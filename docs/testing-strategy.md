@@ -11,11 +11,13 @@ Every public geometry type, checked arithmetic path, validation error, enum,
 and FFI status must have deterministic tests. These are the tests covered by
 the initial 100% coverage gate.
 
-### 2. Corpus tests
+### 2. Multi-reference corpus tests
 
-Import the Clipper polygon, line, offset, and polygon-tree fixtures into a
-versioned knipsa corpus with attribution. Each case gets a stable identifier and
-an expected semantic result, not merely a count or an area.
+Run a versioned corpus through the reference matrix in
+[`reference-matrix.md`](reference-matrix.md). The first mandatory profile is
+the shared integer closed-polygon profile; feature-specific cases are gated
+separately. Each case gets a stable identifier and an expected semantic result,
+not merely a count or an area.
 
 ### 3. Algebraic property tests
 
@@ -33,10 +35,10 @@ as:
 
 ### 4. Differential tests
 
-Run the same serialized cases through a pinned Clipper2 reference executable
-and knipsa. Compare canonicalized regions, not raw ring order. Any exception,
-hang, overflow, non-finite result, or mismatch is a failing case saved as a
-regression fixture.
+Run the same serialized cases through every required reference adapter and
+Knipsa. Compare canonicalized filled regions and topology, not raw ring order.
+Any exception, hang, overflow, non-finite result, or unexplained mismatch is a
+failing case saved as a regression fixture or a documented semantic split.
 
 ### 5. Fuzzing and adversarial geometry
 
@@ -52,17 +54,17 @@ Python, Go, and one managed language before stabilizing the first release.
 
 ### 7. Benchmarks
 
-Benchmark representative small, medium, pathological, and high-vertex cases.
-Record compiler, optimization flags, CPU, coordinate type, operation, input
-hash, output hash, and allocation behavior. A speed claim requires a report
-that can be rerun from the repository.
+Follow [`benchmarking.md`](benchmarking.md) for representative small, medium,
+pathological, and high-vertex cases. Record compiler, optimization flags, CPU,
+coordinate type, operation, input hash, output hash, and allocation behavior.
+A speed claim requires a report that can be rerun from the repository.
 
 ## Release gate for the first clipping kernel
 
 The first kernel is not release-ready until all of these are true:
 
-- the deterministic corpus passes;
-- differential tests pass against the pinned reference, with documented
+- every required profile in the reference matrix passes with no silent skips;
+- differential tests pass against all pinned references, with documented
   intentional semantic differences;
 - property tests and fuzz replay cases pass;
 - no panic, undefined behavior, or unbounded allocation is found on malformed

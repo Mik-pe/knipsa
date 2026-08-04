@@ -1,6 +1,9 @@
 # Conformance fixtures
 
-This directory will hold minimized, attributed regression cases. Fixtures
-must record the operation, fill rule, coordinate mode, input hash, and the
-semantic expectation. Do not add a raw upstream file without recording its
-origin and license in `NOTICE`.
+This directory holds minimized, attributed regression cases. Fixtures must
+record the profile, operation, fill rule, coordinate mode, input hash, and
+semantic expectation.
+
+Prefer Knipsa-generated cases in the canonical format. Do not add a raw
+upstream file without recording its origin, revision, and fixture license in
+the case metadata and [`docs/licensing.md`](../../docs/licensing.md).
