@@ -1,0 +1,22 @@
+[package]
+name = "knipsa-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The stable C-compatible FFI for the knipsa polygon clipping engine"
+readme = "../../README.md"
+keywords = ["geometry", "polygon", "clipping", "ffi"]
+categories = ["api-bindings", "graphics", "mathematics"]
+
+[lib]
+crate-type = ["cdylib", "rlib", "staticlib"]
+
+[dependencies]
+knipsa = { path = "../knipsa" }
+
+[lints]
+workspace = true

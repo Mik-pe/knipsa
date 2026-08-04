@@ -1,0 +1,7 @@
+/target/
+/coverage/
+/fuzz/target/
+*.lcov
+*.profraw
+*.profdata
+.DS_Store

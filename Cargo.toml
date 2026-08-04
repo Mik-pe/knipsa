@@ -1,0 +1,25 @@
+[workspace]
+members = [
+    "crates/knipsa",
+    "crates/knipsa-ffi",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["Mikael Pettersson"]
+repository = "https://github.com/Mik-pe/knipsa"
+homepage = "https://github.com/Mik-pe/knipsa"
+readme = "README.md"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

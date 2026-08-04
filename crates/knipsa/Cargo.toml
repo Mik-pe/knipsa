@@ -1,0 +1,16 @@
+[package]
+name = "knipsa"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "A test-first, idiomatic Rust polygon clipping engine"
+readme = "../../README.md"
+keywords = ["geometry", "polygon", "clipping", "offsetting"]
+categories = ["algorithms", "graphics", "mathematics"]
+
+[lints]
+workspace = true
