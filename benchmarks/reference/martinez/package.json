@@ -1,0 +1,8 @@
+{
+  "name": "knipsa-martinez-reference",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "martinez-polygon-clipping": "0.8.1"
+  }
+}

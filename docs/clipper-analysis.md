@@ -66,8 +66,9 @@ knipsa's boundary is deliberately different:
 - borrowed inputs and explicit ownership rules;
 - versioned additions rather than accidental ABI promises.
 
-The current FFI exposes only the implemented foundation operations. Boolean
-and offset entry points will be added after their Rust semantics are locked.
+The FFI exposes the implemented integer boolean operation with explicit result
+ownership. Offset and open-path entry points remain out of scope until their
+Rust semantics are locked.
 
 ## Compatibility position
 

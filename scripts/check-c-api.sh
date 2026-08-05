@@ -24,6 +24,6 @@ case "$(uname -s)" in
   *)
     nm -g target/debug/libknipsa_ffi.so
     ;;
-esac | grep -E 'knipsa_(version|status_message|validate_paths64|point_in_polygon64)$' >/dev/null
+esac | grep -E 'knipsa_(version|status_message|validate_paths64|point_in_polygon64|boolean64|free_paths64|boolean_d|free_paths_d)$' >/dev/null
 
 echo "C API smoke test passed"

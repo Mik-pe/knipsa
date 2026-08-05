@@ -9,8 +9,14 @@ autogen_warning = "/* Generated from knipsa-ffi. Do not edit by hand. */"
 [export]
 include = [
     "KnipsaLocation",
+    "KnipsaClipType",
+    "KnipsaFillRule",
     "KnipsaPath64",
+    "KnipsaPathD",
     "KnipsaPathKind",
+    "KnipsaPaths64",
+    "KnipsaPathsD",
     "KnipsaPoint64",
+    "KnipsaPointD",
     "KnipsaStatus",
 ]

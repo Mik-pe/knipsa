@@ -22,8 +22,10 @@ pub enum Error {
     },
     /// A checked integer computation could not be represented by `i128`.
     ArithmeticOverflow,
-    /// The scanbeam kernel has not landed in the public tree yet.
-    KernelNotReady,
+    /// An exact boolean result cannot be represented by the integer API.
+    NonIntegralResult,
+    /// The arrangement could not be closed into valid output rings.
+    TopologyFailure,
 }
 
 impl fmt::Display for Error {
@@ -39,7 +41,10 @@ impl fmt::Display for Error {
             Self::ArithmeticOverflow => {
                 formatter.write_str("checked geometry arithmetic overflowed")
             }
-            Self::KernelNotReady => formatter.write_str("the polygon clipping kernel is not ready"),
+            Self::NonIntegralResult => {
+                formatter.write_str("the exact result contains a non-integral coordinate")
+            }
+            Self::TopologyFailure => formatter.write_str("the polygon arrangement did not close"),
         }
     }
 }

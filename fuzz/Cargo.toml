@@ -17,4 +17,10 @@ path = "fuzz_targets/geometry_inputs.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "boolean_inputs"
+path = "fuzz_targets/boolean_inputs.rs"
+test = false
+doc = false
+
 [workspace]

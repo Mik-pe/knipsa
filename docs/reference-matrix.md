@@ -6,14 +6,14 @@ the Rust library.
 
 ## Reference set
 
-| Reference | Role | License | Independence |
+| Reference | Role | Pinned adapter/version | License | Independence |
 | --- | --- | --- | --- |
-| [Clipper2](https://github.com/AngusJohnson/Clipper2) | Integer clipping, offsets, open paths | Boost Software License 1.0 | Scanline/Vatti family |
-| [GEOS](https://github.com/libgeos/geos) | OGC-style topology and robust overlay | LGPL-2.1 | Same lineage as JTS |
-| [JTS](https://github.com/locationtech/jts) | Large topology test corpus and Java oracle | EPL-2.0 or EDL-1.0 | Same lineage as GEOS |
-| [Boost.Geometry](https://github.com/boostorg/geometry) | Generic polygon overlay and validity cases | Boost Software License 1.0 | Separate implementation |
-| [Martinez](https://github.com/w8r/martinez) | Multipolygon boolean operations | MIT | Separate sweep-line implementation |
-| [CGAL](https://github.com/CGAL/cgal) | Optional exact-arithmetic referee | Package-specific; review before redistribution | Arrangement/set-operation implementation |
+| [Clipper2](https://github.com/AngusJohnson/Clipper2) | Integer clipping, offsets, open paths | Source revision in `clipper-analysis.md`; adapter pending | Boost Software License 1.0 | Scanline/Vatti family |
+| [GEOS](https://github.com/libgeos/geos) | OGC-style topology and robust overlay | Shapely 2.0.7 wheel, GEOS 3.11.4 | LGPL-2.1 | Same lineage as JTS |
+| [JTS](https://github.com/locationtech/jts) | Large topology test corpus and Java oracle | Adapter pending; record version before use | EPL-2.0 or EDL-1.0 | Same lineage as GEOS |
+| [Boost.Geometry](https://www.boost.org/library/latest/geometry/) | Generic polygon overlay and validity cases | Adapter pending; record Boost branch before use | Boost Software License 1.0 | Separate implementation |
+| [Martinez](https://github.com/w8r/martinez) | Multipolygon boolean operations | `martinez-polygon-clipping` 0.8.1 | MIT | Separate sweep-line implementation |
+| [CGAL](https://github.com/CGAL/cgal) | Optional exact-arithmetic referee | Adapter pending; package version and license review required | Package-specific; review before redistribution | Arrangement/set-operation implementation |
 
 GEOS and JTS are both useful, but they are not counted as two independent
 algorithm families. A case that passes both is stronger evidence about API

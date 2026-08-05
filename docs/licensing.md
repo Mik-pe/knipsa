@@ -7,6 +7,12 @@ The reference matrix uses external builds of libraries with their own licenses.
 Their output may be used as test data; their source and upstream fixtures are
 not automatically part of this repository.
 
+The checked-in adapter commands currently fetch or use, outside the Rust
+crates, `martinez-polygon-clipping` 0.8.1 under MIT and Shapely 2.0.7 under
+BSD-3-Clause (the wheel bundles GEOS 3.11.4 under LGPL-2.1). These are test and
+benchmark tooling dependencies only; they are not redistributed by the
+knipsa libraries or C ABI.
+
 ## Rules for future work
 
 - A clean-room Rust implementation may use public behavior, documentation, and

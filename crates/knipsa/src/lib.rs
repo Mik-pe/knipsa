@@ -2,7 +2,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod boolean;
 mod error;
+mod fast;
 mod geometry;
 mod request;
 
@@ -12,7 +14,10 @@ pub use geometry::{
     normalize_pathd, orientation, point_in_polygon, signed_area2, validate_path64, validate_pathd,
     validate_paths64,
 };
-pub use request::{BooleanRequest, ClipType, FillRule, boolean_op, validate_request};
+pub use request::{
+    BooleanRequest, BooleanRequestD, ClipType, FillRule, boolean_op, boolean_opd, validate_request,
+    validate_requestd,
+};
 
 /// Whether a path describes a closed region or an open line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,7 +54,8 @@ mod tests {
             Error::InvalidPath { kind: PathKind::Closed, minimum_vertices: 3, actual_vertices: 2 },
             Error::NonFiniteCoordinate { point_index: 4 },
             Error::ArithmeticOverflow,
-            Error::KernelNotReady,
+            Error::NonIntegralResult,
+            Error::TopologyFailure,
         ];
         for error in errors {
             assert!(!error.to_string().is_empty());

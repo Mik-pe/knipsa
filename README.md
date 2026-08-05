@@ -4,14 +4,14 @@
 
 `knipsa` is a polygon geometry library written in Rust. It is designed to be
 safe, predictable, and easy to call from other languages through its small
-C-compatible interface.
+C-compatible interface for both integer and `double` coordinates.
 
 ## Status
 
 Early development. The current code provides checked integer geometry,
-path validation and normalization, point-in-polygon classification, request
-types, and the initial C API. Boolean polygon operations are the next major
-piece.
+polygon booleans, an exact fallback for difficult coordinates, a conservative
+f64 fast path, and the C API. Offsets and open-path operations are not part of
+the current surface.
 
 ## Workspace
 

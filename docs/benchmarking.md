@@ -1,8 +1,7 @@
 # Benchmark protocol
 
-Benchmarks start when the boolean kernel has a real result path. Measuring the
-current `KernelNotReady` stub would only measure error handling, so it is not a
-performance result.
+Benchmarks use the real boolean result path. A benchmark that only measures
+validation, decoding, or an error path is not a clipping performance result.
 
 ## Workloads
 
@@ -42,6 +41,11 @@ from a single warm run or from different input sets.
 
 Reference adapters run external pinned builds or package versions. They do not
 copy foreign implementation code into the Knipsa crates.
+
+The checked-in adapters currently exercise `martinez-polygon-clipping` 0.8.1
+and Shapely 2.0.7 / GEOS 3.11.4. The GEOS adapter is a correctness and
+end-to-end API reference; it is not a claim that Python wrapper timing equals a
+native GEOS C API timing. A native-vs-native result needs its own adapter.
 
 ## Result policy
 
