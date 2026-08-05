@@ -201,6 +201,10 @@ struct PathProperties {
 struct ConvexIndex<'a> {
     points: &'a [Point],
     positive: bool,
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
 }
 
 struct ConvexWalk {
@@ -215,12 +219,17 @@ struct ConvexWalk {
 impl ConvexIndex<'_> {
     #[inline]
     fn new(points: &[Point]) -> ConvexIndex<'_> {
-        ConvexIndex { points, positive: area2(points) > 0.0 }
+        let (min_x, min_y, max_x, max_y) = point_bounds(points);
+        ConvexIndex { points, positive: area2(points) > 0.0, min_x, min_y, max_x, max_y }
     }
 
     #[inline]
     fn contains(&self, point: Point) -> bool {
-        convex_contains(point, self.points, self.positive)
+        point.x >= self.min_x
+            && point.x <= self.max_x
+            && point.y >= self.min_y
+            && point.y <= self.max_y
+            && convex_contains(point, self.points, self.positive)
     }
 }
 
@@ -673,7 +682,7 @@ fn convex_boolean_from_splits(
     let subject_index = ConvexIndex::new(subject);
     let clip_index = ConvexIndex::new(clip);
     let mut directed = Vec::with_capacity(subject.len() + clip.len());
-    append_convex_operation_edges(
+    let subject_count = append_convex_operation_edges(
         subject,
         &mut subject_splits,
         subject_inside,
@@ -683,7 +692,8 @@ fn convex_boolean_from_splits(
         &clip_index,
         &mut directed,
     )?;
-    append_convex_operation_edges(
+    let clip_start = directed.len();
+    let clip_count = append_convex_operation_edges(
         clip,
         &mut clip_splits,
         clip_inside,
@@ -693,6 +703,16 @@ fn convex_boolean_from_splits(
         &clip_index,
         &mut directed,
     )?;
+    if clip_type == ClipType::Xor {
+        return match stitch_ordered_convex(
+            &directed,
+            (0, subject_count),
+            (clip_start, clip_start + clip_count),
+        ) {
+            Ok(result) => Some(result),
+            Err(_) => stitch(&directed).ok(),
+        };
+    }
     stitch(&directed).ok()
 }
 
@@ -706,7 +726,8 @@ fn append_convex_operation_edges(
     subject_index: &ConvexIndex<'_>,
     clip_index: &ConvexIndex<'_>,
     directed: &mut Vec<DirectedEdge>,
-) -> Option<()> {
+) -> Option<usize> {
+    let start_len = directed.len();
     for (index, values) in parameters.iter_mut().enumerate() {
         if values.len() > 2 {
             values.sort_dedup();
@@ -769,7 +790,7 @@ fn append_convex_operation_edges(
             }
         }
     }
-    Some(())
+    Some(directed.len() - start_len)
 }
 
 fn valid_convex_intersection(result: &PathsD, subject: &[Point], clip: &[Point]) -> bool {
@@ -825,7 +846,14 @@ fn convex_boundary_walk(
     let mut clip_previous = clip[clip.len() - 1];
     let mut subject_vector = subtract(subject[subject_index], subject_previous);
     let mut clip_vector = subtract(clip[clip_index], clip_previous);
-    let mut inside = 0_u8;
+    let initial_subject_midpoint = Point {
+        x: (subject_previous.x + subject[subject_index].x) * 0.5,
+        y: (subject_previous.y + subject[subject_index].y) * 0.5,
+    };
+    // Split-only walks need the initial side of the subject boundary so their
+    // per-edge hints remain valid before the first crossing is encountered.
+    let mut inside =
+        u8::from(!collect_output && convex_contains(initial_subject_midpoint, clip, true));
     let mut output =
         if collect_output { Vec::with_capacity(subject.len() + clip.len()) } else { Vec::new() };
     let mut subject_splits =
@@ -847,6 +875,12 @@ fn convex_boundary_walk(
         let second_vector = clip_vector;
         if cross(first_vector, second_vector).abs() <= f64::EPSILON
             && cross(subtract(clip_previous, subject_previous), first_vector).abs() <= f64::EPSILON
+            && collinear_segments_overlap(
+                subject_previous,
+                subject[subject_index],
+                clip_previous,
+                clip[clip_index],
+            )
         {
             degenerate = true;
         }
@@ -1013,6 +1047,26 @@ fn segment_intersection(
     } else {
         None
     }
+}
+
+fn collinear_segments_overlap(
+    first_start: Point,
+    first_end: Point,
+    second_start: Point,
+    second_end: Point,
+) -> bool {
+    let first_min_x = first_start.x.min(first_end.x);
+    let first_max_x = first_start.x.max(first_end.x);
+    let second_min_x = second_start.x.min(second_end.x);
+    let second_max_x = second_start.x.max(second_end.x);
+    let first_min_y = first_start.y.min(first_end.y);
+    let first_max_y = first_start.y.max(first_end.y);
+    let second_min_y = second_start.y.min(second_end.y);
+    let second_max_y = second_start.y.max(second_end.y);
+    first_min_x <= second_max_x
+        && second_min_x <= first_max_x
+        && first_min_y <= second_max_y
+        && second_min_y <= first_max_y
 }
 
 fn point_bounds(points: &[Point]) -> (f64, f64, f64, f64) {
@@ -1516,6 +1570,77 @@ fn containment_bucket(value: f64, min_y: f64, max_y: f64) -> usize {
     scaled.floor().clamp(0.0, CONTAINMENT_BUCKETS as f64 - 1.0) as usize
 }
 
+fn stitch_ordered_convex(
+    edges: &[DirectedEdge],
+    subject_range: (usize, usize),
+    clip_range: (usize, usize),
+) -> Result<PathsD, Error> {
+    // Convex XOR emits each operand's boundary in cyclic source order, so
+    // most successor links can be resolved without a point-key hash table.
+    if edges.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut next = vec![usize::MAX; edges.len()];
+    for (start, end) in [subject_range, clip_range] {
+        if start > end || end > edges.len() {
+            return Err(Error::TopologyFailure);
+        }
+        if start == end {
+            continue;
+        }
+        for index in start..end {
+            let following = if index + 1 == end { start } else { index + 1 };
+            if edges[index].end_key == edges[following].start_key {
+                if next[index] != usize::MAX && next[index] != following {
+                    return Err(Error::TopologyFailure);
+                }
+                next[index] = following;
+            }
+            if edges[following].end_key == edges[index].start_key {
+                if next[following] != usize::MAX && next[following] != index {
+                    return Err(Error::TopologyFailure);
+                }
+                next[following] = index;
+            }
+        }
+    }
+    for (index, edge) in edges.iter().enumerate() {
+        if next[index] != usize::MAX {
+            continue;
+        }
+        let mut candidates = Vec::with_capacity(2);
+        for (candidate, outgoing) in edges.iter().enumerate() {
+            if outgoing.start_key == edge.end_key {
+                candidates.push(candidate);
+            }
+        }
+        if candidates.is_empty() {
+            return Err(Error::TopologyFailure);
+        }
+        if candidates.len() == 1 {
+            next[index] = candidates[0];
+            continue;
+        }
+        let origin_point = edges[candidates[0]].start;
+        candidates.sort_unstable_by(|left, right| {
+            compare_angle(
+                subtract(edges[*left].end, origin_point),
+                subtract(edges[*right].end, origin_point),
+            )
+        });
+        let reverse = subtract(edge.start, edge.end);
+        let insertion = candidates
+            .iter()
+            .position(|candidate| {
+                compare_angle(subtract(edges[*candidate].end, edges[*candidate].start), reverse)
+                    != Ordering::Less
+            })
+            .unwrap_or(candidates.len());
+        next[index] = candidates[(insertion + candidates.len() - 1) % candidates.len()];
+    }
+    stitch_next(edges, &next)
+}
+
 fn stitch(edges: &[DirectedEdge]) -> Result<PathsD, Error> {
     if edges.is_empty() {
         return Ok(Vec::new());
@@ -1568,6 +1693,10 @@ fn stitch(edges: &[DirectedEdge]) -> Result<PathsD, Error> {
             }
         }
     }
+    stitch_next(edges, &next)
+}
+
+fn stitch_next(edges: &[DirectedEdge], next: &[usize]) -> Result<PathsD, Error> {
     let mut visited = vec![false; edges.len()];
     let mut paths = Vec::new();
     for start in 0..edges.len() {
@@ -1685,6 +1814,56 @@ mod tests {
         })
         .expect("high-vertex xor input is eligible");
         assert!(xor_result.is_ok(), "fast xor path failed: {xor_result:?}");
+    }
+
+    #[test]
+    fn rounded_high_vertex_xor_stays_on_linear_walk() {
+        #[allow(clippy::cast_precision_loss)]
+        fn rounded_circle(center_x: f64) -> PathD {
+            (0..64)
+                .map(|index| {
+                    let angle = std::f64::consts::TAU * f64::from(index) / 64.0;
+                    PointD::new(
+                        ((center_x + 100.0 * angle.cos()) * 1000.0).round() / 1000.0,
+                        ((100.0 * angle.sin()) * 1000.0).round() / 1000.0,
+                    )
+                })
+                .collect()
+        }
+
+        let subject = rounded_circle(0.0);
+        let clip = rounded_circle(30.0);
+        let subject_points = fast_paths(std::slice::from_ref(&subject)).expect("finite subject");
+        let clip_points = fast_paths(std::slice::from_ref(&clip)).expect("finite clip");
+        assert!(strict_convex(subject_points[0].points()));
+        assert!(strict_convex(clip_points[0].points()));
+        let walk =
+            convex_boundary_walk(subject_points[0].points(), clip_points[0].points(), false, true);
+        assert!(!walk.degenerate);
+        let fast = convex_boolean(
+            subject_points[0].points(),
+            clip_points[0].points(),
+            ClipType::Xor,
+            Some((true, true)),
+        )
+        .expect("linear convex xor should close");
+        let request = BooleanRequestD {
+            subjects: std::slice::from_ref(&subject),
+            clips: std::slice::from_ref(&clip),
+            clip_type: ClipType::Xor,
+            fill_rule: FillRule::EvenOdd,
+        };
+        let exact = crate::boolean::boolean_opd_exact(request).expect("exact oracle should close");
+        let summary = |paths: &PathsD| {
+            let mut values = paths
+                .iter()
+                .map(|path| (path.len(), (area2(path).abs() * 1_000_000.0).round().to_bits()))
+                .collect::<Vec<_>>();
+            values.sort_unstable();
+            values
+        };
+        assert_eq!(summary(&fast), summary(&exact));
+        assert!(try_boolean_opd(request).expect("rounded input is eligible").is_ok());
     }
 
     fn point(x: f64, y: f64) -> Point {
@@ -2319,6 +2498,24 @@ mod tests {
             &mut collinear_first,
             &mut collinear_second,
             true,
+        ));
+        assert!(collinear_segments_overlap(
+            point(0.0, 0.0),
+            point(10.0, 0.0),
+            point(5.0, 0.0),
+            point(15.0, 0.0),
+        ));
+        assert!(!collinear_segments_overlap(
+            point(0.0, 0.0),
+            point(1.0, 0.0),
+            point(2.0, 0.0),
+            point(3.0, 0.0),
+        ));
+        assert!(collinear_segments_overlap(
+            point(0.0, 0.0),
+            point(0.0, 10.0),
+            point(0.0, 5.0),
+            point(0.0, 15.0),
         ));
 
         let far_right =
