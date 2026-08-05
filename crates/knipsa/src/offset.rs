@@ -202,11 +202,7 @@ pub fn offset_paths_d(
     if generated.is_empty() {
         return Ok(Vec::new());
     }
-    if generated.len() == 1
-        && generated[0].len() <= SIMPLE_OUTLINE_FAST_PATH_LIMIT
-        && signed_area2(&generated[0]).abs() > EPSILON
-        && !ring_self_intersects(&generated[0])
-    {
+    if can_skip_cleanup(&generated) {
         return Ok(generated);
     }
 
@@ -225,6 +221,13 @@ pub fn offset_paths_d(
         .map(|path| clean_ring(path, options.preserve_collinear))
         .filter(|path| path.len() >= 3)
         .collect())
+}
+
+fn can_skip_cleanup(generated: &[PathD]) -> bool {
+    generated.len() == 1
+        && generated[0].len() <= SIMPLE_OUTLINE_FAST_PATH_LIMIT
+        && signed_area2(&generated[0]).abs() > EPSILON
+        && !ring_self_intersects(&generated[0])
 }
 
 /// Offsets floating-point paths; an ergonomic alias for [`offset_paths_d`].
@@ -305,21 +308,18 @@ fn validate_options(delta: f64, options: OffsetOptions) -> Result<(), Error> {
 
 #[allow(clippy::cast_precision_loss)]
 fn paths64_to_local_d(paths: &[Path64]) -> Result<(Point64, Vec<PathD>), Error> {
-    let origin =
-        paths.iter().find_map(|path| path.first()).copied().unwrap_or_else(|| Point64::new(0, 0));
-    let local = paths
-        .iter()
-        .map(|path| {
-            path.iter()
-                .map(|point| {
-                    Ok(PointD::new(
-                        i128_to_exact_f64(i128::from(point.x) - i128::from(origin.x))?,
-                        i128_to_exact_f64(i128::from(point.y) - i128::from(origin.y))?,
-                    ))
-                })
-                .collect()
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
+    let origin = paths.iter().find_map(|path| path.first()).copied().unwrap_or(Point64::new(0, 0));
+    let mut local = Vec::with_capacity(paths.len());
+    for path in paths {
+        let mut local_path = Vec::with_capacity(path.len());
+        for point in path {
+            local_path.push(PointD::new(
+                i128_to_exact_f64(i128::from(point.x) - i128::from(origin.x))?,
+                i128_to_exact_f64(i128::from(point.y) - i128::from(origin.y))?,
+            ));
+        }
+        local.push(local_path);
+    }
     Ok((origin, local))
 }
 
@@ -876,11 +876,11 @@ fn segments_intersect(
     let ab_d = first_direction.cross(Vector::from(second_end).sub(Vector::from(first)));
     let cd_a = second_direction.cross(Vector::from(first).sub(Vector::from(second)));
     let cd_b = second_direction.cross(Vector::from(first_end).sub(Vector::from(second)));
-    if ab_c.abs() <= EPSILON && point_on_segment(second, first, first_end)
-        || ab_d.abs() <= EPSILON && point_on_segment(second_end, first, first_end)
-        || cd_a.abs() <= EPSILON && point_on_segment(first, second, second_end)
-        || cd_b.abs() <= EPSILON && point_on_segment(first_end, second, second_end)
-    {
+    let touches = (ab_c.abs() <= EPSILON && point_on_segment(second, first, first_end))
+        | (ab_d.abs() <= EPSILON && point_on_segment(second_end, first, first_end))
+        | (cd_a.abs() <= EPSILON && point_on_segment(first, second, second_end))
+        | (cd_b.abs() <= EPSILON && point_on_segment(first_end, second, second_end));
+    if touches {
         return true;
     }
     (ab_c > 0.0) != (ab_d > 0.0) && (cd_a > 0.0) != (cd_b > 0.0)
@@ -978,9 +978,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(square[0].len(), 8);
-        assert!(square[0].iter().any(|point| {
-            (point.x + 10.0).abs() < 1e-9 && (point.y + 4.142_135_624).abs() < 1e-9
-        }));
+        assert!((square[0][0].x + 10.0).abs() < 1e-9);
+        assert!((square[0][0].y + 4.142_135_624).abs() < 1e-9);
 
         let hole = vec![
             PointD::new(30.0, 30.0),
@@ -1039,6 +1038,16 @@ mod tests {
         assert!(stroke[0].iter().any(|point| {
             (point.x - 45.366_563_146).abs() < 1e-9 && (point.y + 2.683_281_573).abs() < 1e-9
         }));
+
+        let concave = vec![
+            PointD::new(0.0, 0.0),
+            PointD::new(20.0, 0.0),
+            PointD::new(20.0, 8.0),
+            PointD::new(8.0, 8.0),
+            PointD::new(8.0, 20.0),
+            PointD::new(0.0, 20.0),
+        ];
+        assert!(offset_paths_d(&[concave], -1.0, OffsetOptions::polygon(JoinType::Miter),).is_ok());
     }
 
     #[test]
@@ -1371,6 +1380,68 @@ mod tests {
         assert_eq!(line_intersection(previous, horizontal, next, horizontal), None);
         assert!(line_intersection(previous, horizontal, next, vertical).is_some());
         assert!((distance(center, PointD::new(3.0, 4.0)) - 5.0).abs() < f64::EPSILON);
+        assert_eq!(i128_to_exact_f64((1_i128 << 53) + 1), Err(Error::ArithmeticOverflow));
+        let excessive_span =
+            vec![vec![Point64::new(0, 0), Point64::new((1_i64 << 53) + 1, 0), Point64::new(0, 1)]];
+        assert_eq!(
+            offset_paths64(&excessive_span, 1.0, OffsetOptions::polygon(JoinType::Miter)),
+            Err(Error::ArithmeticOverflow)
+        );
+
+        output.clear();
+        append_square_join(
+            &mut output,
+            center,
+            PointD::new(0.0, 1.0),
+            PointD::new(0.0, -1.0),
+            horizontal,
+            horizontal,
+            1.0,
+        );
+        assert_eq!(output.len(), 2);
+        output.clear();
+        let diagonal = Vector { x: -1.0, y: 1.0 }.normalized().unwrap();
+        append_square_join(
+            &mut output,
+            center,
+            PointD::new(1.0, 0.0),
+            PointD::new(0.0, 1.0),
+            diagonal,
+            diagonal,
+            1.0,
+        );
+        assert_eq!(output.len(), 2);
+        append_arc_with_sweep(&mut output, center, Vector::ZERO, 1.0, 1.0, 0.1);
+
+        assert!(ring_self_intersects(&[
+            PointD::new(0.0, 0.0),
+            PointD::new(2.0, 2.0),
+            PointD::new(0.0, 2.0),
+            PointD::new(2.0, 0.0),
+        ]));
+        assert!(segments_intersect(
+            PointD::new(0.0, 0.0),
+            PointD::new(2.0, 0.0),
+            PointD::new(1.0, 0.0),
+            PointD::new(3.0, 0.0),
+        ));
+        assert!(point_on_segment(PointD::new(1.0, 0.0), center, PointD::new(2.0, 0.0)));
+        assert!(!point_on_segment(PointD::new(-1.0, 0.0), center, PointD::new(2.0, 0.0)));
+        assert!(!point_on_segment(PointD::new(3.0, 0.0), center, PointD::new(2.0, 0.0)));
+        assert!(!point_on_segment(PointD::new(1.0, -1.0), center, PointD::new(2.0, 0.0)));
+        assert!(!point_on_segment(PointD::new(1.0, 1.0), center, PointD::new(2.0, 0.0)));
+
+        let simple = rectangle(0.0, 0.0, 2.0, 2.0);
+        assert!(!can_skip_cleanup(&[]));
+        assert!(can_skip_cleanup(std::slice::from_ref(&simple)));
+        assert!(!can_skip_cleanup(&[vec![center; SIMPLE_OUTLINE_FAST_PATH_LIMIT + 1]]));
+        assert!(!can_skip_cleanup(&[vec![center, next, PointD::new(2.0, 0.0)]]));
+        assert!(!can_skip_cleanup(&[vec![
+            PointD::new(0.0, 0.0),
+            PointD::new(2.0, 2.0),
+            PointD::new(0.0, 2.0),
+            PointD::new(2.0, 0.0),
+        ]]));
 
         let mut points = vec![center];
         push_point(&mut points, center);

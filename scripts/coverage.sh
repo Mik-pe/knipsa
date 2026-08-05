@@ -13,13 +13,22 @@ mkdir -p target/coverage
 cargo +nightly llvm-cov --workspace --all-features \
   --branch \
   --lcov --output-path target/coverage/lcov.info \
-  --fail-under-lines 100 \
   --fail-under-functions 100
+
+line_records=$(awk '/^DA:/{ total += 1 } END { print total + 0 }' target/coverage/lcov.info)
+line_missed=$(awk -F, '/^DA:/ && ($2 == "" || ($2 + 0) == 0) { total += 1 } END { print total + 0 }' target/coverage/lcov.info)
 
 branch_found=$(awk -F: '/^BRF:/{ total += $2 } END { print total + 0 }' target/coverage/lcov.info)
 branch_records=$(awk '/^BRDA:/{ total += 1 } END { print total + 0 }' target/coverage/lcov.info)
 branch_missed=$(awk -F, '/^BRDA:/ && ($4 == "-" || $4 == "" || ($4 + 0) == 0) { total += 1 } END { print total + 0 }' target/coverage/lcov.info)
 
+# LLVM's aggregate line totals can count Rust inline/generic instantiations for
+# which it emits no corresponding source record. Gate every detailed source
+# record instead, just as branch coverage below gates every detailed branch.
+if [ "$line_records" -eq 0 ] || [ "$line_missed" -ne 0 ]; then
+  echo "line coverage has ${line_missed} missed detailed records out of ${line_records}" >&2
+  exit 1
+fi
 # BRH is an aggregate summary that can undercount Rust generic instantiations.
 # Gate the individual BRDA records instead: every true/false branch must have
 # a non-zero execution count, and every branch declared by BRF must be present.

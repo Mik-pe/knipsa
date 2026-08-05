@@ -142,21 +142,18 @@ struct Ring {
 
 #[allow(clippy::cast_precision_loss)]
 fn paths64_to_local_d(paths: &[Path64]) -> Result<(Point64, Vec<PathD>), Error> {
-    let origin =
-        paths.iter().find_map(|path| path.first()).copied().unwrap_or_else(|| Point64::new(0, 0));
-    let local = paths
-        .iter()
-        .map(|path| {
-            path.iter()
-                .map(|point| {
-                    Ok(PointD::new(
-                        i128_to_exact_f64(i128::from(point.x) - i128::from(origin.x))?,
-                        i128_to_exact_f64(i128::from(point.y) - i128::from(origin.y))?,
-                    ))
-                })
-                .collect::<Result<PathD, Error>>()
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
+    let origin = paths.iter().find_map(|path| path.first()).copied().unwrap_or(Point64::new(0, 0));
+    let mut local = Vec::with_capacity(paths.len());
+    for path in paths {
+        let mut local_path = Vec::with_capacity(path.len());
+        for point in path {
+            local_path.push(PointD::new(
+                i128_to_exact_f64(i128::from(point.x) - i128::from(origin.x))?,
+                i128_to_exact_f64(i128::from(point.y) - i128::from(origin.y))?,
+            ));
+        }
+        local.push(local_path);
+    }
     Ok((origin, local))
 }
 
@@ -573,6 +570,13 @@ mod tests {
 
     #[test]
     fn covers_aliases_and_numeric_boundaries() {
+        assert_eq!(i128_to_exact_f64((1_i128 << 53) + 1), Err(Error::ArithmeticOverflow));
+        let excessive_span =
+            vec![vec![Point64::new(0, 0), Point64::new((1_i64 << 53) + 1, 0), Point64::new(0, 1)]];
+        assert_eq!(
+            triangulate64(&excessive_span, FillRule::EvenOdd),
+            Err(Error::ArithmeticOverflow)
+        );
         let integer_path = vec![
             Point64::new(0, 0),
             Point64::new(10, 0),

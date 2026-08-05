@@ -1434,6 +1434,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn executes_and_releases_double_boolean_results() {
         let subject = KnipsaPathD { points: TRIANGLE_D.as_ptr(), point_count: 3 };
         let mut result = KnipsaPathsD::default();
@@ -1508,6 +1509,121 @@ mod tests {
             assert_ne!(result.path_count, 0);
             knipsa_free_paths_d(std::ptr::from_mut(&mut result));
         }
+
+        // Adjacent points remain distinct to the exact kernel but collide in
+        // the fast path's acceleration key, exercising its conservative
+        // fallback through the public FFI build too.
+        let sub_quantization_triangle = [
+            KnipsaPointD { x: 0.0, y: 0.0 },
+            KnipsaPointD { x: 0.000_000_000_1, y: 0.0 },
+            KnipsaPointD { x: 0.0, y: 1.0 },
+        ];
+        let tiny_path = KnipsaPathD {
+            points: sub_quantization_triangle.as_ptr(),
+            point_count: sub_quantization_triangle.len(),
+        };
+        let subjects = [tiny_path, subject_path];
+        assert_eq!(
+            knipsa_boolean_d(
+                subjects.as_ptr(),
+                subjects.len(),
+                std::ptr::null(),
+                0,
+                ClipType::Union as u8,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result),
+            ),
+            KnipsaStatus::Ok
+        );
+        knipsa_free_paths_d(std::ptr::from_mut(&mut result));
+
+        let subjects = [subject_path, clip_path];
+        assert_eq!(
+            knipsa_boolean_d(
+                subjects.as_ptr(),
+                subjects.len(),
+                std::ptr::from_ref(&tiny_path),
+                1,
+                ClipType::Union as u8,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result),
+            ),
+            KnipsaStatus::Ok
+        );
+        knipsa_free_paths_d(std::ptr::from_mut(&mut result));
+
+        let large_triangle = [
+            KnipsaPointD { x: 2_000_000.0, y: 0.0 },
+            KnipsaPointD { x: 2_000_010.0, y: 0.0 },
+            KnipsaPointD { x: 2_000_000.0, y: 10.0 },
+        ];
+        let large_path =
+            KnipsaPathD { points: large_triangle.as_ptr(), point_count: large_triangle.len() };
+        let subjects = [large_path, subject_path];
+        assert_eq!(
+            knipsa_boolean_d(
+                subjects.as_ptr(),
+                subjects.len(),
+                std::ptr::null(),
+                0,
+                ClipType::Union as u8,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result),
+            ),
+            KnipsaStatus::Ok
+        );
+        knipsa_free_paths_d(std::ptr::from_mut(&mut result));
+        assert_eq!(
+            knipsa_boolean_d(
+                std::ptr::from_ref(&large_path),
+                1,
+                std::ptr::from_ref(&subject_path),
+                1,
+                ClipType::Union as u8,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result),
+            ),
+            KnipsaStatus::Ok
+        );
+        knipsa_free_paths_d(std::ptr::from_mut(&mut result));
+
+        // Disjoint operand sets are only returned directly when every path in
+        // each set is also mutually disjoint. Exercise both conservative
+        // fallbacks through the independently instrumented FFI dependency.
+        let far_square = [
+            KnipsaPointD { x: 100.0, y: 100.0 },
+            KnipsaPointD { x: 110.0, y: 100.0 },
+            KnipsaPointD { x: 110.0, y: 110.0 },
+            KnipsaPointD { x: 100.0, y: 110.0 },
+        ];
+        let far_path = KnipsaPathD { points: far_square.as_ptr(), point_count: far_square.len() };
+        let overlapping = [subject_path, clip_path];
+        assert_eq!(
+            knipsa_boolean_d(
+                overlapping.as_ptr(),
+                overlapping.len(),
+                std::ptr::from_ref(&far_path),
+                1,
+                ClipType::Union as u8,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result),
+            ),
+            KnipsaStatus::Ok
+        );
+        knipsa_free_paths_d(std::ptr::from_mut(&mut result));
+        assert_eq!(
+            knipsa_boolean_d(
+                std::ptr::from_ref(&far_path),
+                1,
+                overlapping.as_ptr(),
+                overlapping.len(),
+                ClipType::Union as u8,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result),
+            ),
+            KnipsaStatus::Ok
+        );
+        knipsa_free_paths_d(std::ptr::from_mut(&mut result));
     }
 
     #[test]

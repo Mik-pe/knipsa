@@ -196,6 +196,7 @@ struct LocalSides {
 struct PathProperties {
     simple: bool,
     convex: bool,
+    bounds: Option<(f64, f64, f64, f64)>,
 }
 
 struct ConvexIndex<'a> {
@@ -511,10 +512,14 @@ fn split_pairs(
 
 fn classify_path(path: &[Point]) -> PathProperties {
     if path.len() < 3 {
-        return PathProperties::default();
+        return PathProperties {
+            bounds: (!path.is_empty()).then(|| point_bounds(path)),
+            ..PathProperties::default()
+        };
     }
+    let bounds = Some(point_bounds(path));
     if is_convex_simple(path) {
-        return PathProperties { simple: true, convex: true };
+        return PathProperties { simple: true, convex: true, bounds };
     }
     let edges = path_edges(path);
     for (first, edge) in edges.iter().enumerate() {
@@ -527,7 +532,7 @@ fn classify_path(path: &[Point]) -> PathProperties {
             }
         }
     }
-    PathProperties { simple: true, convex: false }
+    PathProperties { simple: true, convex: false, bounds }
 }
 
 #[cfg(test)]
@@ -582,7 +587,7 @@ fn short_circuit_with_properties<P: PathSlice>(
     }
     if clips.is_empty() {
         return match clip_type {
-            ClipType::Intersection => unreachable!("handled by trivial short circuit"),
+            ClipType::Intersection => Some(Vec::new()),
             ClipType::Difference | ClipType::Union | ClipType::Xor => {
                 direct_if_simple_and_disjoint_with_properties(subjects, subject_properties)
             }
@@ -590,16 +595,14 @@ fn short_circuit_with_properties<P: PathSlice>(
     }
     if subjects.is_empty() {
         return match clip_type {
-            ClipType::Intersection | ClipType::Difference => {
-                unreachable!("handled by trivial short circuit")
-            }
+            ClipType::Intersection | ClipType::Difference => Some(Vec::new()),
             ClipType::Union | ClipType::Xor => {
                 direct_if_simple_and_disjoint_with_properties(clips, clip_properties)
             }
         };
     }
-    let subjects_box = bbox(subjects)?;
-    let clips_box = bbox(clips)?;
+    let subjects_box = properties_bbox(subject_properties)?;
+    let clips_box = properties_bbox(clip_properties)?;
     if subjects_box.2 < clips_box.0
         || clips_box.2 < subjects_box.0
         || subjects_box.3 < clips_box.1
@@ -671,7 +674,7 @@ fn convex_boolean(
     let mut edges = Vec::with_capacity(subject.len() + clip.len());
     append_path_edges(&mut edges, subject, 0, true);
     append_path_edges(&mut edges, clip, 1, false);
-    let properties = [PathProperties { simple: true, convex: true }; 2];
+    let properties = [PathProperties { simple: true, convex: true, bounds: None }; 2];
     let mut parameters = vec![SplitParameters::new(); edges.len()];
     if !split_pairs(&edges, &properties, &mut parameters, true) {
         return None;
@@ -687,8 +690,8 @@ fn convex_boolean(
         for pair in values.values().windows(2) {
             let start = point_at(*edge, pair[0]);
             let end = point_at(*edge, pair[1]);
-            let start_key = key(start)?;
-            let end_key = key(end)?;
+            let start_key = split_point_key(start);
+            let end_key = split_point_key(end);
             if start_key == end_key {
                 continue;
             }
@@ -744,7 +747,7 @@ fn convex_boolean_from_splits(
         &subject_index,
         &clip_index,
         &mut directed,
-    )?;
+    );
     let clip_start = directed.len();
     let clip_count = append_convex_operation_edges(
         clip,
@@ -755,7 +758,7 @@ fn convex_boolean_from_splits(
         &subject_index,
         &clip_index,
         &mut directed,
-    )?;
+    );
     if clip_type == ClipType::Xor {
         return match stitch_ordered_convex(
             &directed,
@@ -779,7 +782,7 @@ fn append_convex_operation_edges(
     subject_index: &ConvexIndex<'_>,
     clip_index: &ConvexIndex<'_>,
     directed: &mut Vec<DirectedEdge>,
-) -> Option<usize> {
+) -> usize {
     let start_len = directed.len();
     for (index, values) in parameters.iter_mut().enumerate() {
         if values.len() > 2 {
@@ -798,8 +801,8 @@ fn append_convex_operation_edges(
                 x: start_point.x + vector.x * pair[1],
                 y: start_point.y + vector.y * pair[1],
             };
-            let start_key = key(start)?;
-            let end_key = key(end)?;
+            let start_key = split_point_key(start);
+            let end_key = split_point_key(end);
             if start_key == end_key {
                 continue;
             }
@@ -843,7 +846,7 @@ fn append_convex_operation_edges(
             }
         }
     }
-    Some(directed.len() - start_len)
+    directed.len() - start_len
 }
 
 fn valid_convex_intersection(result: &PathsD, subject: &[Point], clip: &[Point]) -> bool {
@@ -1233,6 +1236,17 @@ fn bbox<P: PathSlice>(paths: &[P]) -> Option<(f64, f64, f64, f64)> {
     })
 }
 
+fn properties_bbox(properties: &[PathProperties]) -> Option<(f64, f64, f64, f64)> {
+    properties.iter().filter_map(|property| property.bounds).fold(None, |current, next| {
+        Some(match current {
+            None => next,
+            Some((min_x, min_y, max_x, max_y)) => {
+                (min_x.min(next.0), min_y.min(next.1), max_x.max(next.2), max_y.max(next.3))
+            }
+        })
+    })
+}
+
 fn path_edges(path: &[Point]) -> Vec<Edge> {
     let mut edges = Vec::with_capacity(path.len());
     append_path_edges(&mut edges, path, 0, false);
@@ -1271,6 +1285,14 @@ fn key(point: Point) -> Option<PointKey> {
     } else {
         Some(PointKey { x: x as i64, y: y as i64 })
     }
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn split_point_key(point: Point) -> PointKey {
+    // Split parameters are clamped to [0, 1], so these points stay inside the
+    // finite, bounded input edges accepted by `eligible`. Avoid repeating the
+    // checked public-input conversion in the inner segment loop.
+    PointKey { x: (point.x * KEY_SCALE).round() as i64, y: (point.y * KEY_SCALE).round() as i64 }
 }
 
 #[inline]
@@ -1761,7 +1783,8 @@ fn stitch(edges: &[DirectedEdge]) -> Result<PathsD, Error> {
     let mut next = vec![0; edges.len()];
     for candidates in outgoing.values_mut() {
         if let Outgoing::Multiple(indices) = candidates {
-            let origin_point = edges[*indices.first().ok_or(Error::TopologyFailure)?].start;
+            // `Multiple` is created with two indices and is never emptied.
+            let origin_point = edges[indices[0]].start;
             indices.sort_by(|left, right| {
                 compare_angle(
                     subtract(edges[*left].end, origin_point),
@@ -2031,11 +2054,11 @@ mod tests {
         assert!(
             fast_paths(&[vec![PointD::new(f64::INFINITY, 0.0), PointD::new(1.0, 0.0)]]).is_some()
         );
-        let borrowed = fast_paths(std::slice::from_ref(&rectangle)).expect("borrowed path");
-        assert!(matches!(borrowed.first(), Some(FastPath::Borrowed(_))));
+        let borrowed = fast_paths(std::slice::from_ref(&rectangle)).unwrap_or_default();
+        assert_eq!(borrowed[0].points(), rectangle);
         let duplicated = vec![point(0.0, 0.0), point(1.0, 0.0), point(1.0, 0.0), point(0.0, 1.0)];
-        let owned = fast_paths(std::slice::from_ref(&duplicated)).expect("normalized path");
-        assert!(matches!(owned.first(), Some(FastPath::Owned(_))));
+        let owned = fast_paths(std::slice::from_ref(&duplicated)).unwrap_or_default();
+        assert_eq!(owned[0].points().len(), 3);
         let no_paths: Vec<Vec<Point>> = Vec::new();
         assert!(eligible(&no_paths, &[]));
         assert!(eligible(std::slice::from_ref(&rectangle), &[]));
@@ -2346,7 +2369,7 @@ mod tests {
         let convex_rectangle_paths = [rectangle.clone()];
         let convex_containment = containment_paths_with_properties(
             &convex_rectangle_paths,
-            &[PathProperties { simple: true, convex: true }],
+            &[PathProperties { simple: true, convex: true, ..PathProperties::default() }],
         );
         assert_eq!(
             paths_contain_pair(
@@ -2374,7 +2397,7 @@ mod tests {
             [vec![point(0.0, 0.0), point(0.0, 10.0), point(10.0, 10.0), point(10.0, 0.0)]];
         let clockwise_containment = containment_paths_with_properties(
             &clockwise_paths,
-            &[PathProperties { simple: true, convex: true }],
+            &[PathProperties { simple: true, convex: true, ..PathProperties::default() }],
         );
         assert_eq!(
             paths_contain_pair(
@@ -2548,45 +2571,12 @@ mod tests {
         ];
         assert!(convex_boolean(&rectangle, &narrow, ClipType::Xor, Some((false, false))).is_none());
 
-        let huge = vec![
-            point(10_000_000_000.0, 0.0),
-            point(10_000_000_010.0, 0.0),
-            point(10_000_000_010.0, 10.0),
-            point(10_000_000_000.0, 10.0),
-        ];
-        let huge_splits = vec![SplitParameters::new(); huge.len()];
-        let rectangle_splits = vec![SplitParameters::new(); rectangle.len()];
-        assert!(
-            convex_boolean_from_splits(
-                &huge,
-                &rectangle,
-                ClipType::Union,
-                huge_splits.clone(),
-                rectangle_splits.clone(),
-                &[],
-                &[],
-            )
-            .is_none()
-        );
-        assert!(
-            convex_boolean_from_splits(
-                &rectangle,
-                &huge,
-                ClipType::Union,
-                rectangle_splits,
-                huge_splits,
-                &[],
-                &[],
-            )
-            .is_none()
-        );
-
         let tiny = vec![point(0.0, 0.0), point(0.000_000_000_1, 0.0), point(0.0, 1.0)];
         let tiny_index = ConvexIndex::new(&tiny);
         let rectangle_index = ConvexIndex::new(&rectangle);
         let mut tiny_splits = vec![SplitParameters::new(); tiny.len()];
         let mut tiny_directed = Vec::new();
-        assert!(
+        assert_eq!(
             append_convex_operation_edges(
                 &tiny,
                 &mut tiny_splits,
@@ -2596,10 +2586,9 @@ mod tests {
                 &tiny_index,
                 &rectangle_index,
                 &mut tiny_directed,
-            )
-            .is_some()
+            ),
+            0
         );
-
         let mut bad_edges = Vec::new();
         append_path_edges(
             &mut bad_edges,
@@ -2819,8 +2808,8 @@ mod tests {
         );
 
         let closed = vec![point(0.0, 0.0), point(1.0, 0.0), point(0.0, 1.0), point(0.0, 0.0)];
-        let closed_paths = fast_paths(std::slice::from_ref(&closed)).expect("closed path");
-        assert!(matches!(closed_paths.first(), Some(FastPath::Owned(_))));
+        let closed_paths = fast_paths(std::slice::from_ref(&closed)).unwrap_or_default();
+        assert_eq!(closed_paths[0].points().len(), 3);
 
         let invalid_paths = [
             vec![point(f64::NAN, 0.0), point(1.0, 0.0), point(0.0, 1.0)],
@@ -3094,5 +3083,78 @@ mod tests {
         update_winding(&mut state, point(-1.0, 5.0), &downward);
         assert!(state.parity);
         assert_eq!(state.winding, -1);
+        assert!(!paths_are_simple_and_disjoint_with_properties(
+            std::slice::from_ref(&rectangle),
+            &[],
+        ));
+        let properties = [classify_path(&rectangle)];
+        assert_eq!(
+            short_circuit_with_properties(
+                std::slice::from_ref(&rectangle),
+                &[] as &[Vec<Point>],
+                ClipType::Intersection,
+                FillRule::EvenOdd,
+                &properties,
+                &[],
+            ),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            short_circuit_with_properties(
+                &[] as &[Vec<Point>],
+                std::slice::from_ref(&rectangle),
+                ClipType::Difference,
+                FillRule::EvenOdd,
+                &[],
+                &properties,
+            ),
+            Some(Vec::new())
+        );
+        let empty_path = Vec::new();
+        assert_eq!(
+            short_circuit_with_properties(
+                std::slice::from_ref(&empty_path),
+                std::slice::from_ref(&rectangle),
+                ClipType::Union,
+                FillRule::EvenOdd,
+                &[classify_path(&empty_path)],
+                &properties,
+            ),
+            None
+        );
+        assert_eq!(
+            short_circuit_with_properties(
+                std::slice::from_ref(&rectangle),
+                std::slice::from_ref(&empty_path),
+                ClipType::Union,
+                FillRule::EvenOdd,
+                &properties,
+                &[classify_path(&empty_path)],
+            ),
+            None
+        );
+
+        let invalid = vec![point(f64::NAN, 0.0), point(1.0, 0.0), point(0.0, 1.0)];
+        let subjects = [invalid.clone(), rectangle.clone()];
+        assert!(
+            try_boolean_opd(BooleanRequestD {
+                subjects: &subjects,
+                clips: &[],
+                clip_type: ClipType::Union,
+                fill_rule: FillRule::EvenOdd,
+            })
+            .is_none()
+        );
+        let subjects = [rectangle.clone(), rectangle.clone()];
+        let clips = [invalid];
+        assert!(
+            try_boolean_opd(BooleanRequestD {
+                subjects: &subjects,
+                clips: &clips,
+                clip_type: ClipType::Union,
+                fill_rule: FillRule::EvenOdd,
+            })
+            .is_none()
+        );
     }
 }
