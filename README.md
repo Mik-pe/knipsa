@@ -18,7 +18,8 @@ the current surface.
 - `crates/knipsa` — the safe Rust API;
 - `crates/knipsa-ffi` — the C-compatible library and public header;
 - `tests/c` — a C11 ABI smoke test;
-- `fuzz` — fuzz targets for geometry inputs.
+- `fuzz` — fuzz targets for geometry inputs;
+- `docs/benchmark-results-2026-08-05.md` — reproducible conformance and timing baseline.
 
 ## Development
 
