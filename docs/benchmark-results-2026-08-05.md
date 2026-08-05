@@ -1,11 +1,11 @@
 # Benchmark results
 
 This is the reproducible result for the versioned 18-case workload after the
-strict-convex fast path optimization.
+high-vertex convex XOR optimization.
 
 ## Run metadata
 
-- source commit: `1e8a835` (`Optimize strict convex boolean operations`)
+- source commit: `cc3c26c` (`Optimize high-vertex convex XOR`)
 - date: 2026-08-05
 - machine: Apple `Mac17,2`, arm64, macOS 26.5, 10 logical CPUs
 - Rust: `rustc 1.96.0`, optimized `cargo bench` profile
@@ -30,27 +30,27 @@ Values are microseconds. Ratios above `1.00x` favor Knipsa.
 
 | Case | Knipsa | GEOS/Shapely | Martinez | GEOS / Knipsa | Martinez / Knipsa |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| overlap-intersection | 1.791 | 36.667 | 35.625 | 20.47x | 19.89x |
-| overlap-union | 1.834 | 36.542 | 41.416 | 19.92x | 22.58x |
-| overlap-difference | 1.750 | 36.167 | 28.708 | 20.67x | 16.40x |
-| overlap-xor | 1.792 | 37.125 | 29.500 | 20.72x | 16.46x |
-| nested-hole | 0.500 | 34.375 | 16.791 | 68.75x | 33.58x |
-| disjoint-union | 0.500 | 29.417 | 2.667 | 58.83x | 5.33x |
-| edge-touch-union | 1.709 | 34.208 | 12.583 | 20.02x | 7.36x |
-| vertex-touch-xor | 1.459 | 32.875 | 8.333 | 22.53x | 5.71x |
-| concave-crossing | 2.916 | 39.792 | 31.375 | 13.65x | 10.76x |
-| fractional-crossing | 0.208 | 36.333 | 25.250 | 174.68x | 121.39x |
-| self-crossing-even-odd | 1.875 | 56.709 | 33.709 | 30.24x | 17.98x |
-| many-horizontal-edges | 3.041 | 37.542 | 49.333 | 12.35x | 16.22x |
-| contained-intersection | 0.208 | 33.500 | 8.625 | 161.06x | 41.47x |
-| contained-xor | 0.500 | 33.750 | 10.167 | 67.50x | 20.33x |
-| repeated-collinear-union | 1.458 | 35.208 | 14.958 | 24.15x | 10.26x |
-| near-touch-union | 0.500 | 28.916 | 1.875 | 57.83x | 3.75x |
-| high-vertex-intersection | 1.792 | 73.417 | 123.875 | 40.97x | 69.13x |
-| high-vertex-xor | 19.791 | 75.000 | 60.041 | 3.79x | 3.03x |
+| overlap-intersection | 1.708 | 37.709 | 33.917 | 22.08x | 19.86x |
+| overlap-union | 1.667 | 37.458 | 42.500 | 22.47x | 25.49x |
+| overlap-difference | 1.542 | 38.125 | 27.667 | 24.72x | 17.94x |
+| overlap-xor | 1.583 | 37.167 | 29.500 | 23.48x | 18.64x |
+| nested-hole | 0.458 | 35.083 | 16.917 | 76.60x | 36.94x |
+| disjoint-union | 0.458 | 29.292 | 2.833 | 63.96x | 6.19x |
+| edge-touch-union | 1.542 | 33.875 | 12.625 | 21.97x | 8.19x |
+| vertex-touch-xor | 1.333 | 32.458 | 8.250 | 24.35x | 6.19x |
+| concave-crossing | 2.625 | 39.083 | 31.959 | 14.89x | 12.17x |
+| fractional-crossing | 0.209 | 35.959 | 25.541 | 172.05x | 122.21x |
+| self-crossing-even-odd | 1.667 | 57.250 | 33.083 | 34.34x | 19.85x |
+| many-horizontal-edges | 2.625 | 37.708 | 30.167 | 14.36x | 11.49x |
+| contained-intersection | 0.208 | 33.708 | 11.791 | 162.06x | 56.69x |
+| contained-xor | 0.375 | 34.000 | 14.209 | 90.67x | 37.89x |
+| repeated-collinear-union | 1.167 | 35.625 | 17.042 | 30.53x | 14.60x |
+| near-touch-union | 0.417 | 29.084 | 1.959 | 69.75x | 4.70x |
+| high-vertex-intersection | 1.541 | 77.958 | 110.333 | 50.59x | 71.60x |
+| high-vertex-xor | 3.500 | 74.792 | 60.041 | 21.37x | 17.15x |
 
 Knipsa was faster in all 18/18 cases against GEOS/Shapely and Martinez. The
-geometric-mean ratios are 30.92x and 15.40x respectively.
+geometric-mean ratios are 38.35x and 19.15x respectively.
 
 ## Native Clipper2 comparison
 
@@ -61,46 +61,43 @@ the process boundary; they measure the native `BooleanOp` call. Ratios above
 
 | Case | Knipsa | Clipper2 native | Clipper2 / Knipsa |
 | --- | ---: | ---: | ---: |
-| overlap-intersection | 1.791 | 1.917 | 1.07x |
-| overlap-union | 1.834 | 1.875 | 1.02x |
-| overlap-difference | 1.750 | 1.416 | 0.81x |
-| overlap-xor | 1.792 | 1.917 | 1.07x |
-| nested-hole | 0.500 | 1.666 | 3.33x |
-| disjoint-union | 0.500 | 1.667 | 3.33x |
-| edge-touch-union | 1.709 | 1.625 | 0.95x |
-| vertex-touch-xor | 1.459 | 1.458 | 1.00x |
-| concave-crossing | 2.916 | 2.000 | 0.69x |
-| fractional-crossing | 0.208 | 1.458 | 7.01x |
-| self-crossing-even-odd | 1.875 | 1.166 | 0.62x |
-| many-horizontal-edges | 3.041 | 2.291 | 0.75x |
-| contained-intersection | 0.208 | 1.333 | 6.41x |
-| contained-xor | 0.500 | 1.667 | 3.33x |
-| repeated-collinear-union | 1.458 | 1.750 | 1.20x |
-| near-touch-union | 0.500 | 1.667 | 3.33x |
-| high-vertex-intersection | 1.792 | 5.292 | 2.95x |
-| high-vertex-xor | 19.791 | 8.250 | 0.42x |
+| overlap-intersection | 1.708 | 2.333 | 1.37x |
+| overlap-union | 1.667 | 2.334 | 1.40x |
+| overlap-difference | 1.542 | 1.709 | 1.11x |
+| overlap-xor | 1.583 | 2.334 | 1.47x |
+| nested-hole | 0.458 | 2.083 | 4.55x |
+| disjoint-union | 0.458 | 2.083 | 4.55x |
+| edge-touch-union | 1.542 | 2.084 | 1.35x |
+| vertex-touch-xor | 1.333 | 1.792 | 1.34x |
+| concave-crossing | 2.625 | 2.334 | 0.89x |
+| fractional-crossing | 0.209 | 1.709 | 8.18x |
+| self-crossing-even-odd | 1.667 | 1.458 | 0.87x |
+| many-horizontal-edges | 2.625 | 2.792 | 1.06x |
+| contained-intersection | 0.208 | 1.542 | 7.41x |
+| contained-xor | 0.375 | 2.000 | 5.33x |
+| repeated-collinear-union | 1.167 | 2.083 | 1.78x |
+| near-touch-union | 0.417 | 2.084 | 5.00x |
+| high-vertex-intersection | 1.541 | 6.791 | 4.41x |
+| high-vertex-xor | 3.500 | 10.458 | 2.99x |
 
-Knipsa won 11/18 cases; Clipper2 won 7/18. The geometric-mean latency ratio
-was `1.54x` in Knipsa's favor, and the median per-case ratio was `1.07x`.
-The remaining clear gap is high-vertex XOR, where Clipper2 measured about
-2.4x faster on this workload.
+Knipsa won 16/18 cases; Clipper2 won 2/18. The geometric-mean latency ratio
+was `2.32x` in Knipsa's favor, and the median per-case ratio was `1.63x`.
+High-vertex XOR is now `3.0x` faster in Knipsa on the three-run median.
 
 ## Optimization pass
 
-This pass adds a strict-convex single-pair dispatch and a linear edge walk for
-ordinary convex input. The walk supplies split parameters and containment
-hints to a direct convex edge classifier; touching, collinear, ill-conditioned,
-or otherwise uncertain cases use the existing conservative fallback.
+This pass keeps the strict-convex linear edge walk on the ordinary convex path,
+avoids treating separated collinear edges as a degeneracy, seeds split-only
+walks with the correct initial containment side, and stitches convex XOR edges
+in source order before falling back to the general topology index. Convex
+containment also rejects points outside a cached bounding box before its
+logarithmic predicate.
 
-The hot path also now borrows convex input in its containment index, stores the
-usual split parameters inline, stops the walk after both boundaries have been
-visited, and uses one compact outgoing-edge index during stitching. The added
-regression tests cover the walk, degeneracies, fallback predicates, topology
-failures, and quantized micro-intersections.
-
-The repository gate remains strict: 44 Knipsa tests plus 8 FFI tests pass,
-Clippy is clean, and `scripts/coverage.sh` reports 100% line, function, and
-branch coverage.
+The added regression tests cover the high-vertex rounded workload, exact-oracle
+topology and area, collinear degeneracies, fallback predicates, and stitching
+failures. The repository gate remains strict: 45 Knipsa tests plus 8 FFI tests
+pass, Clippy is clean, and `scripts/coverage.sh` reports 100% line, function,
+and branch coverage.
 
 ## Reproduce
 
