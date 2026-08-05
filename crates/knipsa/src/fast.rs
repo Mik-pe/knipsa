@@ -15,7 +15,7 @@ const KEY_SCALE: f64 = 1_000_000_000.0;
 const MAX_COORDINATE: f64 = 1_000_000.0;
 const PREDICATE_TOLERANCE: f64 = 1.0e-12;
 const SAMPLE_SCALE: f64 = 1.0e-9;
-const CONTAINMENT_BUCKETS: usize = 32;
+const MAX_CONTAINMENT_BUCKETS: usize = 64;
 
 #[derive(Default)]
 struct FastHasher(u64);
@@ -1401,8 +1401,11 @@ fn paths_contain_pair(
             continue;
         }
         let (min_x, min_y, max_x, max_y) = path.bounds;
-        let left_bucket = containment_bucket_if_inside(left, min_x, min_y, max_x, max_y);
-        let right_bucket = containment_bucket_if_inside(right, min_x, min_y, max_x, max_y);
+        let bucket_count = path.buckets.len();
+        let left_bucket =
+            containment_bucket_if_inside(left, min_x, min_y, max_x, max_y, bucket_count);
+        let right_bucket =
+            containment_bucket_if_inside(right, min_x, min_y, max_x, max_y, bucket_count);
         match (left_bucket, right_bucket) {
             (None, None) => {}
             (Some(bucket), None) => {
@@ -1509,9 +1512,10 @@ fn containment_bucket_if_inside(
     min_y: f64,
     max_x: f64,
     max_y: f64,
+    bucket_count: usize,
 ) -> Option<usize> {
     (point.x >= min_x && point.x <= max_x && point.y >= min_y && point.y <= max_y)
-        .then(|| containment_bucket(point.y, min_y, max_y))
+        .then(|| containment_bucket(point.y, min_y, max_y, bucket_count))
 }
 
 #[cfg(test)]
@@ -1558,12 +1562,15 @@ fn containment_paths_with_properties<'a, P: PathSlice>(
                     }
                 })
                 .collect();
-            let mut buckets = vec![Vec::new(); CONTAINMENT_BUCKETS];
+            let bucket_count = containment_bucket_count(edges.len());
+            let mut buckets = vec![Vec::new(); bucket_count];
             for edge in edges {
                 let start_y = edge.start.y;
                 let end_y = edge.start.y + edge.delta_y;
-                let lower = containment_bucket(start_y.min(end_y), bounds.1, bounds.3);
-                let upper = containment_bucket(start_y.max(end_y), bounds.1, bounds.3);
+                let lower =
+                    containment_bucket(start_y.min(end_y), bounds.1, bounds.3, bucket_count);
+                let upper =
+                    containment_bucket(start_y.max(end_y), bounds.1, bounds.3, bucket_count);
                 for bucket in buckets.iter_mut().take(upper + 1).skip(lower) {
                     bucket.push(edge);
                 }
@@ -1573,13 +1580,20 @@ fn containment_paths_with_properties<'a, P: PathSlice>(
         .collect()
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)]
-fn containment_bucket(value: f64, min_y: f64, max_y: f64) -> usize {
-    if max_y <= min_y {
+fn containment_bucket_count(edge_count: usize) -> usize {
+    // Tiny rings should not pay for dozens of empty Vec allocations. Keeping
+    // roughly two edges per power-of-two bucket preserves cheap indexing while
+    // capping construction and memory for large paths.
+    edge_count.div_ceil(2).clamp(1, MAX_CONTAINMENT_BUCKETS).next_power_of_two()
+}
+
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn containment_bucket(value: f64, min_y: f64, max_y: f64, bucket_count: usize) -> usize {
+    if max_y <= min_y || bucket_count <= 1 {
         return 0;
     }
-    let scaled = (value - min_y) / (max_y - min_y) * CONTAINMENT_BUCKETS as f64;
-    scaled.floor().clamp(0.0, CONTAINMENT_BUCKETS as f64 - 1.0) as usize
+    let scaled = (value - min_y) / (max_y - min_y) * bucket_count as f64;
+    scaled.floor().clamp(0.0, bucket_count as f64 - 1.0) as usize
 }
 
 fn stitch_ordered_convex(
@@ -2256,6 +2270,7 @@ mod tests {
 
         let rectangle_paths = [rectangle.clone()];
         let containment = containment_paths(&rectangle_paths);
+        assert_eq!(containment[0].buckets.len(), 2);
         let convex_rectangle_paths = [rectangle.clone()];
         let convex_containment = containment_paths_with_properties(
             &convex_rectangle_paths,
@@ -2318,11 +2333,14 @@ mod tests {
             paths_contain_pair(point(1.0, 1.0), point(9.0, 9.0), &containment, FillRule::Negative),
             (false, false)
         );
-        assert_eq!(containment_bucket(0.0, 1.0, 1.0), 0);
-        assert_eq!(containment_bucket(-100.0, 0.0, 10.0), 0);
-        assert_eq!(containment_bucket(100.0, 0.0, 10.0), CONTAINMENT_BUCKETS - 1);
-        assert!(containment_bucket_if_inside(point(-1.0, 5.0), 0.0, 0.0, 10.0, 10.0).is_none());
-        assert!(containment_bucket_if_inside(point(5.0, 5.0), 0.0, 0.0, 10.0, 10.0).is_some());
+        assert_eq!(containment_bucket_count(0), 1);
+        assert_eq!(containment_bucket_count(4), 2);
+        assert_eq!(containment_bucket_count(usize::MAX), MAX_CONTAINMENT_BUCKETS);
+        assert_eq!(containment_bucket(0.0, 1.0, 1.0, 2), 0);
+        assert_eq!(containment_bucket(-100.0, 0.0, 10.0, 2), 0);
+        assert_eq!(containment_bucket(100.0, 0.0, 10.0, 2), 1);
+        assert!(containment_bucket_if_inside(point(-1.0, 5.0), 0.0, 0.0, 10.0, 10.0, 2).is_none());
+        assert!(containment_bucket_if_inside(point(5.0, 5.0), 0.0, 0.0, 10.0, 10.0, 2).is_some());
         let mut state = WindingState::default();
         let upward = ContainmentEdge {
             start: point(0.0, 0.0),

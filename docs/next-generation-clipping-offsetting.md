@@ -216,10 +216,17 @@ proof that local refinement never exceeds the public error bound.
 | P1 | Exact Boolean intersection discovery is all-pairs. | Add an exact event-discovery interface; feed its splits into the unchanged classifier/tracer first. | Differential equality against all-pairs oracle. |
 | P1 | `offset_paths64` used absolute `f64` conversion and rejected small shapes beyond 2^53. | Translate to a shared local origin, compute checked differences in `i128`, restore with checked `i128`. | Translation metamorphic tests and overflow edges. |
 | P1 | Fast-path classification and short-circuit helpers can rescan rings. | Build one per-request property cache and pass it through dispatch. | Benchmark without changing selected result. |
-| P1 | Fixed 32-row containment buckets ignore input size/distribution. | Choose bucket count from edge count and y-distribution, with a small-vector path for tiny rings. | Worst-case memory cap and profile evidence. |
+| P1 | Fixed 32-row containment buckets ignored input size/distribution. | The first implementation now selects a power-of-two count from edge count, capped at 64; y-distribution and inline storage remain future work. | Worst-case memory cap and profile evidence. |
 | P2 | `KEY_SCALE` is both an acceleration key and an implicit topology identity. | Separate approximate lookup keys from exact vertex identity; collisions must fall back or be disambiguated. | Adversarial points below the quantization spacing. |
 | P2 | Offset predicates use one absolute epsilon across scales. | Use scale-aware filters with exact/extended fallback for sign decisions. | Scale and translation metamorphic tests. |
 | P2 | Outline finiteness checking cloned the entire generated path. | Validate and return the owned vector. | Existing unit/coverage gates. |
+
+The first adaptive-bucket A/B experiment used ten interleaved process pairs
+against commit `434545a`. Median paired speedups were `1.52x` for
+self-crossing EvenOdd union, `1.31x` for concave crossing, and `1.23x` for the
+many-horizontal case; all 18 signatures still matched Clipper2. Unaffected
+sub-microsecond cases remained noisy, so this is evidence for those targeted
+paths rather than a blanket speed claim.
 
 ## Experiments that can kill the ideas quickly
 
