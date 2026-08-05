@@ -1,9 +1,10 @@
-.PHONY: check test lint docs c-api coverage
+.PHONY: check test lint docs c-api coverage conformance
 
 check: test lint c-api
 
 test:
 	cargo test --workspace --all-features
+	python3 -m unittest scripts/test_compare_benchmark_results.py
 
 lint:
 	cargo fmt --all -- --check
@@ -17,3 +18,6 @@ c-api:
 
 coverage:
 	./scripts/coverage.sh
+
+conformance:
+	./scripts/run-conformance.sh

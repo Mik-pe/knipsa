@@ -31,14 +31,23 @@ and is not linked into the Rust library.
 To compare the optimized Rust run with an adapter:
 
 ```sh
-cargo bench -p knipsa --bench workload -- --nocapture > target/knipsa.jsonl
-benchmarks/reference/run-geos.sh benchmarks/workloads.json > target/geos.jsonl
-python3 scripts/compare-benchmark-results.py target/knipsa.jsonl target/geos.jsonl
+./scripts/run-conformance.sh benchmarks/workloads.json target/conformance
 ```
 
 The adapters use three warm-up calls and 25 measured calls per case. Their
 signatures compare canonical filled-region rings; raw ring order is not a
-correctness criterion.
+correctness criterion. The comparison is fail-closed: every adapter must emit
+one header and exactly one valid record for every workload case, and any
+reported adapter error or missing case fails the command.
+
+To inspect one pair manually, pass the workload explicitly:
+
+```sh
+python3 scripts/compare-benchmark-results.py \
+  --workload benchmarks/workloads.json \
+  target/conformance/knipsa.jsonl \
+  target/conformance/clipper2.jsonl
+```
 
 Reference adapters are comparison tools only; they are not runtime
 dependencies of knipsa.

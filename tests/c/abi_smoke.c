@@ -23,6 +23,18 @@ int main(void) {
   knipsa_free_paths64(&result);
   assert(result.path_count == 0);
 
+  KnipsaPaths64 simplified = KNIPSA_PATHS64_INIT;
+  assert(knipsa_simplify64(&path, 1, KNIPSA_FILL_EVEN_ODD, &simplified) ==
+         KNIPSA_STATUS_OK);
+  assert(simplified.path_count == 1);
+  knipsa_free_paths64(&simplified);
+
+  KnipsaPaths64 clipped = KNIPSA_PATHS64_INIT;
+  assert(knipsa_clip_to_rect64(&path, 1, (KnipsaRect64){0, 0, 5, 5},
+                               KNIPSA_FILL_EVEN_ODD, &clipped) == KNIPSA_STATUS_OK);
+  assert(clipped.path_count == 1);
+  knipsa_free_paths64(&clipped);
+
   const KnipsaPointD triangle_d[] = {{0.0, 0.0}, {10.0, 0.0}, {0.0, 10.0}};
   const KnipsaPathD path_d = {triangle_d, 3};
   assert(knipsa_validate_paths_d(&path_d, 1, KNIPSA_PATH_CLOSED) ==
@@ -34,6 +46,18 @@ int main(void) {
   assert(result_d.paths[0].point_count == 3);
   knipsa_free_paths_d(&result_d);
   assert(result_d.path_count == 0);
+
+  KnipsaPathsD simplified_d = KNIPSA_PATHS_D_INIT;
+  assert(knipsa_simplify_d(&path_d, 1, KNIPSA_FILL_EVEN_ODD, &simplified_d) ==
+         KNIPSA_STATUS_OK);
+  assert(simplified_d.path_count == 1);
+  knipsa_free_paths_d(&simplified_d);
+
+  KnipsaPathsD clipped_d = KNIPSA_PATHS_D_INIT;
+  assert(knipsa_clip_to_rect_d(&path_d, 1, (KnipsaRectD){0.0, 0.0, 5.0, 5.0},
+                               KNIPSA_FILL_EVEN_ODD, &clipped_d) == KNIPSA_STATUS_OK);
+  assert(clipped_d.path_count == 1);
+  knipsa_free_paths_d(&clipped_d);
 
   KnipsaPathsD offset = {0};
   KnipsaOffsetOptions offset_options = KNIPSA_OFFSET_OPTIONS_INIT;

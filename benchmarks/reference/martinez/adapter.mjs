@@ -229,6 +229,14 @@ function interiorProbe(ring) {
   }
   return ring[0];
 }
+
+process.stdout.write(`${JSON.stringify({
+  implementation: 'martinez-polygon-clipping',
+  revision: '0.8.1',
+  samples: 25,
+  warmups: 3,
+})}\n`);
+
 for (const testCase of workload.cases) {
   const operation = operations[testCase.clip_type];
   for (let index = 0; index < 3; index += 1) operation(testCase.subjects, testCase.clips);

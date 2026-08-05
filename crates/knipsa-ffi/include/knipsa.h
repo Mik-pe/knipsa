@@ -28,6 +28,30 @@ typedef struct KnipsaPointD {
   double y;
 } KnipsaPointD;
 
+/** An axis-aligned integer clipping rectangle. */
+typedef struct KnipsaRect64 {
+  /** Lower horizontal bound. */
+  int64_t min_x;
+  /** Lower vertical bound. */
+  int64_t min_y;
+  /** Upper horizontal bound. */
+  int64_t max_x;
+  /** Upper vertical bound. */
+  int64_t max_y;
+} KnipsaRect64;
+
+/** An axis-aligned floating-point clipping rectangle. Bounds must be finite. */
+typedef struct KnipsaRectD {
+  /** Lower horizontal bound. */
+  double min_x;
+  /** Lower vertical bound. */
+  double min_y;
+  /** Upper horizontal bound. */
+  double max_x;
+  /** Upper vertical bound. */
+  double max_y;
+} KnipsaRectD;
+
 /** A borrowed integer path.
  *
  * `points` may be NULL only when `point_count` is zero. The caller keeps
@@ -283,6 +307,35 @@ KnipsaStatus knipsa_boolean_d(const KnipsaPathD *subjects,
                               uint8_t clip_type,
                               uint8_t fill_rule,
                               KnipsaPathsD *result);
+
+/** Simplifies integer paths with a union using the selected fill rule. */
+KnipsaStatus knipsa_simplify64(const KnipsaPath64 *paths,
+                               size_t path_count,
+                               uint8_t fill_rule,
+                               KnipsaPaths64 *result);
+
+/** Simplifies finite floating-point paths with a union using the selected
+ * fill rule. */
+KnipsaStatus knipsa_simplify_d(const KnipsaPathD *paths,
+                               size_t path_count,
+                               uint8_t fill_rule,
+                               KnipsaPathsD *result);
+
+/** Clips integer paths to an axis-aligned rectangle. Bounds are normalized if
+ * the caller supplies opposite corners in reverse order. */
+KnipsaStatus knipsa_clip_to_rect64(const KnipsaPath64 *paths,
+                                   size_t path_count,
+                                   KnipsaRect64 rectangle,
+                                   uint8_t fill_rule,
+                                   KnipsaPaths64 *result);
+
+/** Clips finite floating-point paths to an axis-aligned rectangle. Bounds are
+ * normalized if the caller supplies opposite corners in reverse order. */
+KnipsaStatus knipsa_clip_to_rect_d(const KnipsaPathD *paths,
+                                   size_t path_count,
+                                   KnipsaRectD rectangle,
+                                   uint8_t fill_rule,
+                                   KnipsaPathsD *result);
 
 /** Offsets integer paths and returns an unrounded floating-point outline.
  *

@@ -14,8 +14,9 @@ use std::cell::Cell;
 
 use knipsa::{
     BooleanRequest, BooleanRequestD, ClipType, EndType, Error, FillRule, JoinType, OffsetOptions,
-    Path64, PathD, PathKind, Point64, PointD, PointLocation, boolean_op, boolean_opd,
-    offset_paths_d, point_in_polygon, triangulate_d, triangulate64, validate_paths_d,
+    Path64, PathD, PathKind, Point64, PointD, PointLocation, Rect64, RectD, boolean_op,
+    boolean_opd, clip_to_rect_d, clip_to_rect64, offset_paths_d, point_in_polygon,
+    simplify_paths_d, simplify_paths64, triangulate_d, triangulate64, validate_paths_d,
     validate_paths64,
 };
 
@@ -48,6 +49,46 @@ pub struct KnipsaPointD {
 impl From<KnipsaPointD> for PointD {
     fn from(point: KnipsaPointD) -> Self {
         Self::new(point.x, point.y)
+    }
+}
+
+/// An axis-aligned integer clipping rectangle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct KnipsaRect64 {
+    /// Lower horizontal bound.
+    pub min_x: i64,
+    /// Lower vertical bound.
+    pub min_y: i64,
+    /// Upper horizontal bound.
+    pub max_x: i64,
+    /// Upper vertical bound.
+    pub max_y: i64,
+}
+
+impl From<KnipsaRect64> for Rect64 {
+    fn from(rectangle: KnipsaRect64) -> Self {
+        Self::new(rectangle.min_x, rectangle.min_y, rectangle.max_x, rectangle.max_y)
+    }
+}
+
+/// An axis-aligned floating-point clipping rectangle.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
+pub struct KnipsaRectD {
+    /// Lower horizontal bound.
+    pub min_x: f64,
+    /// Lower vertical bound.
+    pub min_y: f64,
+    /// Upper horizontal bound.
+    pub max_x: f64,
+    /// Upper vertical bound.
+    pub max_y: f64,
+}
+
+impl From<KnipsaRectD> for RectD {
+    fn from(rectangle: KnipsaRectD) -> Self {
+        Self::new(rectangle.min_x, rectangle.min_y, rectangle.max_x, rectangle.max_y)
     }
 }
 
@@ -505,6 +546,194 @@ pub extern "C" fn knipsa_boolean_d(
         let subjects = copy_paths_d(subjects, subject_count)?;
         let clips = copy_paths_d(clips, clip_count)?;
         boolean_opd(BooleanRequestD { subjects: &subjects, clips: &clips, clip_type, fill_rule })
+            .map_err(|error| status_from_error(&error))
+    }));
+    match operation {
+        Ok(Ok(paths)) => {
+            write_paths_d(paths, result);
+            KnipsaStatus::Ok
+        }
+        Ok(Err(status)) => status,
+        Err(_) => KnipsaStatus::InternalError,
+    }
+}
+
+/// Simplifies integer paths with a union using the selected fill rule.
+///
+/// On success, release `result` with [`knipsa_free_paths64`].
+///
+/// # Safety
+///
+/// `result` must point to an initialized empty result slot. When
+/// `path_count` is non-zero, `paths` and every non-empty point buffer must be
+/// readable for the duration of the call.
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn knipsa_simplify64(
+    paths: *const KnipsaPath64,
+    path_count: usize,
+    fill_rule: u8,
+    result: *mut KnipsaPaths64,
+) -> KnipsaStatus {
+    if result.is_null() {
+        return KnipsaStatus::NullPointer;
+    }
+    if !result_is_empty64(result) {
+        return KnipsaStatus::InvalidArgument;
+    }
+    // SAFETY: `result` was checked for null and is writable for this call.
+    unsafe {
+        *result = KnipsaPaths64::default();
+    }
+    let Some(fill_rule) = fill_rule_from_u8(fill_rule) else {
+        return KnipsaStatus::InvalidArgument;
+    };
+    let operation = catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        test_panic_if_requested();
+        let paths = copy_paths64(paths, path_count)?;
+        simplify_paths64(&paths, fill_rule).map_err(|error| status_from_error(&error))
+    }));
+    match operation {
+        Ok(Ok(paths)) => {
+            write_paths64(paths, result);
+            KnipsaStatus::Ok
+        }
+        Ok(Err(status)) => status,
+        Err(_) => KnipsaStatus::InternalError,
+    }
+}
+
+/// Simplifies floating-point paths with a union using the selected fill rule.
+///
+/// On success, release `result` with [`knipsa_free_paths_d`].
+///
+/// # Safety
+///
+/// `result` must point to an initialized empty result slot. When
+/// `path_count` is non-zero, `paths` and every non-empty point buffer must be
+/// readable for the duration of the call.
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn knipsa_simplify_d(
+    paths: *const KnipsaPathD,
+    path_count: usize,
+    fill_rule: u8,
+    result: *mut KnipsaPathsD,
+) -> KnipsaStatus {
+    if result.is_null() {
+        return KnipsaStatus::NullPointer;
+    }
+    if !result_is_empty_d(result) {
+        return KnipsaStatus::InvalidArgument;
+    }
+    // SAFETY: `result` was checked for null and is writable for this call.
+    unsafe {
+        *result = KnipsaPathsD::default();
+    }
+    let Some(fill_rule) = fill_rule_from_u8(fill_rule) else {
+        return KnipsaStatus::InvalidArgument;
+    };
+    let operation = catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        test_panic_if_requested();
+        let paths = copy_paths_d(paths, path_count)?;
+        simplify_paths_d(&paths, fill_rule).map_err(|error| status_from_error(&error))
+    }));
+    match operation {
+        Ok(Ok(paths)) => {
+            write_paths_d(paths, result);
+            KnipsaStatus::Ok
+        }
+        Ok(Err(status)) => status,
+        Err(_) => KnipsaStatus::InternalError,
+    }
+}
+
+/// Clips integer paths to an axis-aligned rectangle.
+///
+/// On success, release `result` with [`knipsa_free_paths64`].
+///
+/// # Safety
+///
+/// `result` must point to an initialized empty result slot. When
+/// `path_count` is non-zero, `paths` and every non-empty point buffer must be
+/// readable for the duration of the call.
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn knipsa_clip_to_rect64(
+    paths: *const KnipsaPath64,
+    path_count: usize,
+    rectangle: KnipsaRect64,
+    fill_rule: u8,
+    result: *mut KnipsaPaths64,
+) -> KnipsaStatus {
+    if result.is_null() {
+        return KnipsaStatus::NullPointer;
+    }
+    if !result_is_empty64(result) {
+        return KnipsaStatus::InvalidArgument;
+    }
+    // SAFETY: `result` was checked for null and is writable for this call.
+    unsafe {
+        *result = KnipsaPaths64::default();
+    }
+    let Some(fill_rule) = fill_rule_from_u8(fill_rule) else {
+        return KnipsaStatus::InvalidArgument;
+    };
+    let operation = catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        test_panic_if_requested();
+        let paths = copy_paths64(paths, path_count)?;
+        clip_to_rect64(&paths, rectangle.into(), fill_rule)
+            .map_err(|error| status_from_error(&error))
+    }));
+    match operation {
+        Ok(Ok(paths)) => {
+            write_paths64(paths, result);
+            KnipsaStatus::Ok
+        }
+        Ok(Err(status)) => status,
+        Err(_) => KnipsaStatus::InternalError,
+    }
+}
+
+/// Clips floating-point paths to an axis-aligned rectangle.
+///
+/// On success, release `result` with [`knipsa_free_paths_d`].
+///
+/// # Safety
+///
+/// `result` must point to an initialized empty result slot. When
+/// `path_count` is non-zero, `paths` and every non-empty point buffer must be
+/// readable for the duration of the call.
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn knipsa_clip_to_rect_d(
+    paths: *const KnipsaPathD,
+    path_count: usize,
+    rectangle: KnipsaRectD,
+    fill_rule: u8,
+    result: *mut KnipsaPathsD,
+) -> KnipsaStatus {
+    if result.is_null() {
+        return KnipsaStatus::NullPointer;
+    }
+    if !result_is_empty_d(result) {
+        return KnipsaStatus::InvalidArgument;
+    }
+    // SAFETY: `result` was checked for null and is writable for this call.
+    unsafe {
+        *result = KnipsaPathsD::default();
+    }
+    let Some(fill_rule) = fill_rule_from_u8(fill_rule) else {
+        return KnipsaStatus::InvalidArgument;
+    };
+    let operation = catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        test_panic_if_requested();
+        let paths = copy_paths_d(paths, path_count)?;
+        clip_to_rect_d(&paths, rectangle.into(), fill_rule)
             .map_err(|error| status_from_error(&error))
     }));
     match operation {
@@ -1511,6 +1740,106 @@ mod tests {
     }
 
     #[test]
+    fn executes_simplification_and_rectangle_clipping() {
+        let integer_path = KnipsaPath64 { points: TRIANGLE.as_ptr(), point_count: 3 };
+        let mut simplified = KnipsaPaths64::default();
+        assert_eq!(
+            knipsa_simplify64(
+                std::ptr::from_ref(&integer_path),
+                1,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut simplified),
+            ),
+            KnipsaStatus::Ok
+        );
+        assert_eq!(simplified.path_count, 1);
+        knipsa_free_paths64(std::ptr::from_mut(&mut simplified));
+
+        assert_eq!(
+            knipsa_clip_to_rect64(
+                std::ptr::from_ref(&integer_path),
+                1,
+                KnipsaRect64 { min_x: 0, min_y: 0, max_x: 5, max_y: 5 },
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut simplified),
+            ),
+            KnipsaStatus::Ok
+        );
+        assert_eq!(simplified.path_count, 1);
+        knipsa_free_paths64(std::ptr::from_mut(&mut simplified));
+
+        let double_path = KnipsaPathD { points: TRIANGLE_D.as_ptr(), point_count: 3 };
+        let mut simplified_d = KnipsaPathsD::default();
+        assert_eq!(
+            knipsa_simplify_d(
+                std::ptr::from_ref(&double_path),
+                1,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut simplified_d),
+            ),
+            KnipsaStatus::Ok
+        );
+        assert_eq!(simplified_d.path_count, 1);
+        knipsa_free_paths_d(std::ptr::from_mut(&mut simplified_d));
+
+        assert_eq!(
+            knipsa_clip_to_rect_d(
+                std::ptr::from_ref(&double_path),
+                1,
+                KnipsaRectD { min_x: 0.0, min_y: 0.0, max_x: 5.0, max_y: 5.0 },
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut simplified_d),
+            ),
+            KnipsaStatus::Ok
+        );
+        assert_eq!(simplified_d.path_count, 1);
+        knipsa_free_paths_d(std::ptr::from_mut(&mut simplified_d));
+
+        assert_eq!(
+            knipsa_simplify64(std::ptr::null(), 0, 99, std::ptr::from_mut(&mut simplified),),
+            KnipsaStatus::InvalidArgument
+        );
+        assert_eq!(
+            knipsa_simplify_d(std::ptr::null(), 0, 99, std::ptr::from_mut(&mut simplified_d),),
+            KnipsaStatus::InvalidArgument
+        );
+        assert_eq!(
+            knipsa_clip_to_rect64(
+                std::ptr::null(),
+                0,
+                KnipsaRect64::default(),
+                99,
+                std::ptr::from_mut(&mut simplified),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
+        assert_eq!(
+            knipsa_clip_to_rect_d(
+                std::ptr::null(),
+                0,
+                KnipsaRectD::default(),
+                99,
+                std::ptr::from_mut(&mut simplified_d),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
+        assert_eq!(
+            knipsa_clip_to_rect_d(
+                std::ptr::null(),
+                0,
+                KnipsaRectD { min_x: f64::NAN, ..KnipsaRectD::default() },
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut simplified_d),
+            ),
+            KnipsaStatus::NonFiniteCoordinate
+        );
+        assert_eq!(
+            knipsa_simplify64(std::ptr::null(), 0, FillRule::EvenOdd as u8, std::ptr::null_mut(),),
+            KnipsaStatus::NullPointer
+        );
+    }
+
+    #[test]
     fn executes_offsets_and_triangulation() {
         let square = [
             KnipsaPointD { x: 0.0, y: 0.0 },
@@ -1732,6 +2061,44 @@ mod tests {
             knipsa_triangulate_d(
                 std::ptr::null(),
                 0,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result_d),
+            ),
+            KnipsaStatus::InternalError
+        );
+        assert_eq!(
+            knipsa_simplify64(
+                std::ptr::null(),
+                0,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result_64),
+            ),
+            KnipsaStatus::InternalError
+        );
+        assert_eq!(
+            knipsa_simplify_d(
+                std::ptr::null(),
+                0,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result_d),
+            ),
+            KnipsaStatus::InternalError
+        );
+        assert_eq!(
+            knipsa_clip_to_rect64(
+                std::ptr::null(),
+                0,
+                KnipsaRect64::default(),
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result_64),
+            ),
+            KnipsaStatus::InternalError
+        );
+        assert_eq!(
+            knipsa_clip_to_rect_d(
+                std::ptr::null(),
+                0,
+                KnipsaRectD::default(),
                 FillRule::EvenOdd as u8,
                 std::ptr::from_mut(&mut result_d),
             ),

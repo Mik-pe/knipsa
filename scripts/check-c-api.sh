@@ -33,6 +33,6 @@ case "$(uname -s)" in
   *)
     nm -g target/debug/libknipsa_ffi.so
     ;;
-esac | grep -E 'knipsa_(version|status_message|validate_paths64|validate_paths_d|point_in_polygon64|boolean64|free_paths64|boolean_d|free_paths_d|offset64|offset_d|triangulate64|triangulate_d)$' >/dev/null
+esac | grep -E 'knipsa_(version|status_message|validate_paths64|validate_paths_d|point_in_polygon64|boolean64|free_paths64|boolean_d|free_paths_d|simplify64|simplify_d|clip_to_rect64|clip_to_rect_d|offset64|offset_d|triangulate64|triangulate_d)$' >/dev/null
 
 echo "C API smoke test passed"

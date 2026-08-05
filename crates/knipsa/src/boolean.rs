@@ -312,6 +312,20 @@ type ExactPath = Vec<ExactPoint>;
 struct Edge {
     start: ExactPoint,
     end: ExactPoint,
+    min_x: Rational,
+    max_x: Rational,
+    min_y: Rational,
+    max_y: Rational,
+}
+
+impl Edge {
+    fn new(start: ExactPoint, end: ExactPoint) -> Self {
+        let min_x = start.x.clone().min(end.x.clone());
+        let max_x = start.x.clone().max(end.x.clone());
+        let min_y = start.y.clone().min(end.y.clone());
+        let max_y = start.y.clone().max(end.y.clone());
+        Self { start, end, min_x, max_x, min_y, max_y }
+    }
 }
 
 #[derive(Clone)]
@@ -393,7 +407,7 @@ fn run_boolean(
     for path in subjects.iter().chain(clips) {
         for (start, end) in path.iter().zip(path.iter().cycle().skip(1)).take(path.len()) {
             if start != end {
-                edges.push(Edge { start: start.clone(), end: end.clone() });
+                edges.push(Edge::new(start.clone(), end.clone()));
             }
         }
     }
@@ -402,11 +416,24 @@ fn run_boolean(
     }
 
     let mut split_parameters = vec![vec![Rational::zero(), Rational::one()]; edges.len()];
-    for first in 0..edges.len() {
-        for second in (first + 1)..edges.len() {
+    let mut edge_order: Vec<usize> = (0..edges.len()).collect();
+    edge_order.sort_unstable_by(|&first, &second| {
+        edges[first]
+            .min_x
+            .cmp(&edges[second].min_x)
+            .then_with(|| edges[first].max_x.cmp(&edges[second].max_x))
+    });
+    let mut active: Vec<usize> = Vec::new();
+    for &current in &edge_order {
+        let current_min_x = &edges[current].min_x;
+        active.retain(|&candidate| edges[candidate].max_x >= *current_min_x);
+        for &previous in &active {
+            let (first, second) =
+                if previous < current { (previous, current) } else { (current, previous) };
             let (before, after) = split_parameters.split_at_mut(second);
             split_edge_pair(&edges[first], &edges[second], &mut before[first], &mut after[0]);
         }
+        active.push(current);
     }
 
     let atomic_edges = split_edges(&edges, &mut split_parameters);
@@ -583,7 +610,7 @@ fn path_edges(path: &ExactPath) -> Vec<Edge> {
         .zip(path.iter().cycle().skip(1))
         .take(path.len())
         .filter(|(start, end)| start != end)
-        .map(|(start, end)| Edge { start: start.clone(), end: end.clone() })
+        .map(|(start, end)| Edge::new(start.clone(), end.clone()))
         .collect()
 }
 
@@ -638,6 +665,13 @@ fn split_edge_pair(
     first_params: &mut Vec<Rational>,
     second_params: &mut Vec<Rational>,
 ) {
+    if first.max_x < second.min_x
+        || second.max_x < first.min_x
+        || first.max_y < second.min_y
+        || second.max_y < first.min_y
+    {
+        return;
+    }
     let first_vector = first.end.sub(&first.start);
     let second_vector = second.end.sub(&second.start);
     let denominator = cross_vectors(&first_vector, &second_vector);
@@ -696,7 +730,7 @@ fn split_edges(edges: &[Edge], parameters: &mut [Vec<Rational>]) -> Vec<Edge> {
             let start = point_at(&edge.start, &edge.end, &pair[0]);
             let end = point_at(&edge.start, &edge.end, &pair[1]);
             if start != end {
-                result.push(Edge { start, end });
+                result.push(Edge::new(start, end));
             }
         }
     }
@@ -1106,7 +1140,7 @@ mod tests {
     }
 
     fn exact_edge(start: (i64, i64), end: (i64, i64)) -> Edge {
-        Edge { start: exact_point(start.0, start.1), end: exact_point(end.0, end.1) }
+        Edge::new(exact_point(start.0, start.1), exact_point(end.0, end.1))
     }
 
     fn exact_directed(start: (i64, i64), end: (i64, i64)) -> DirectedEdge {
@@ -1560,6 +1594,44 @@ mod tests {
     }
 
     #[test]
+    fn floating_rectangle_workload_matches_set_operations() {
+        let subject = rectangle_d(0.0, 0.0, 10.0, 10.0);
+        let clip = rectangle_d(5.0, 0.0, 15.0, 10.0);
+        let subjects = [subject];
+        let clips = [clip];
+        let expected = [
+            (ClipType::Intersection, 100.0),
+            (ClipType::Union, 300.0),
+            (ClipType::Difference, 100.0),
+            (ClipType::Xor, 200.0),
+        ];
+
+        for (clip_type, expected_area) in expected {
+            let request = BooleanRequestD {
+                subjects: &subjects,
+                clips: &clips,
+                clip_type,
+                fill_rule: FillRule::EvenOdd,
+            };
+            let exact = boolean_opd_exact(request).expect("exact rectangle operation should close");
+            let result = boolean_opd(request).expect("public rectangle operation should close");
+            assert!((double_area_sum(&exact) - expected_area).abs() < f64::EPSILON);
+            assert!((double_area_sum(&result) - expected_area).abs() < f64::EPSILON);
+        }
+
+        let touching = rectangle_d(10.0, 0.0, 20.0, 10.0);
+        let result = boolean_opd(BooleanRequestD {
+            subjects: &subjects,
+            clips: std::slice::from_ref(&touching),
+            clip_type: ClipType::Union,
+            fill_rule: FillRule::EvenOdd,
+        })
+        .expect("touching rectangle union should close");
+        assert_eq!(result.len(), 1);
+        assert!((double_area_sum(&result) - 400.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn fast_double_path_matches_exact_for_all_fill_rules() {
         let subject = rectangle_d(0.0, 0.0, 10.0, 10.0);
         let mut reversed = rectangle_d(2.0, 2.0, 8.0, 8.0);
@@ -1657,6 +1729,10 @@ mod tests {
             .take(path.len())
             .map(|(start, end)| start.x * end.y - start.y * end.x)
             .sum()
+    }
+
+    fn double_area_sum(paths: &[PathD]) -> f64 {
+        paths.iter().map(|path| double_area2(path).abs()).sum()
     }
 
     fn rectangle_d(left: f64, bottom: f64, right: f64, top: f64) -> PathD {

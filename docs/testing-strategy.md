@@ -24,7 +24,9 @@ Run a versioned corpus through the reference matrix in
 [`reference-matrix.md`](reference-matrix.md). The first mandatory profile is
 the shared integer closed-polygon profile; feature-specific cases are gated
 separately. Each case gets a stable identifier and an expected semantic result,
-not merely a count or an area.
+not merely a count or an area. Run the local gate with
+`./scripts/run-conformance.sh`; it requires a complete record set from
+Clipper2, GEOS, and Martinez and fails on adapter errors or missing cases.
 
 ### 4. Algebraic property tests
 
