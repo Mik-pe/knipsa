@@ -1116,7 +1116,7 @@ mod tests {
     fn exposes_version_and_status_messages() {
         // SAFETY: Both pointers refer to static NUL-terminated strings.
         unsafe {
-            assert_eq!(CStr::from_ptr(knipsa_version()).to_str(), Ok("0.1.0"));
+            assert_eq!(CStr::from_ptr(knipsa_version()).to_str(), Ok(env!("CARGO_PKG_VERSION")));
             assert_eq!(
                 CStr::from_ptr(knipsa_status_message(KnipsaStatus::Ok as u8)).to_str(),
                 Ok("ok")
