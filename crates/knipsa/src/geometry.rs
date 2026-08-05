@@ -1,5 +1,8 @@
 //! Checked, allocation-transparent geometry primitives.
 
+use core::cmp::Ordering;
+use num_bigint::BigInt;
+
 use crate::{Error, PathKind};
 
 /// An integer point used by the exact-coordinate API.
@@ -235,14 +238,14 @@ pub fn signed_area2(path: &[Point64]) -> Result<i128, Error> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::ArithmeticOverflow`] if the exact cross product does not
-/// fit in an `i128`.
+/// The common path uses checked `i128` arithmetic. Coordinates spanning more
+/// than that representation can hold are compared with arbitrary-precision
+/// integers, so every `i64` input has an exact answer.
 pub fn orientation(a: Point64, b: Point64, c: Point64) -> Result<Orientation, Error> {
-    let cross = checked_cross(a, b, c)?;
-    Ok(match cross.cmp(&0) {
-        core::cmp::Ordering::Less => Orientation::Clockwise,
-        core::cmp::Ordering::Equal => Orientation::Collinear,
-        core::cmp::Ordering::Greater => Orientation::CounterClockwise,
+    Ok(match cross_ordering(a, b, c) {
+        Ordering::Less => Orientation::Clockwise,
+        Ordering::Equal => Orientation::Collinear,
+        Ordering::Greater => Orientation::CounterClockwise,
     })
 }
 
@@ -253,7 +256,7 @@ pub fn orientation(a: Point64, b: Point64, c: Point64) -> Result<Orientation, Er
 /// # Errors
 ///
 /// Returns [`Error::InvalidPath`] for a non-empty path with fewer than three
-/// points or [`Error::ArithmeticOverflow`] if a cross product overflows.
+/// points. Predicates are exact across the complete `i64` coordinate range.
 pub fn point_in_polygon(point: Point64, path: &[Point64]) -> Result<PointLocation, Error> {
     validate_path64(path, PathKind::Closed)?;
     if path.is_empty() {
@@ -262,13 +265,14 @@ pub fn point_in_polygon(point: Point64, path: &[Point64]) -> Result<PointLocatio
 
     let mut inside = false;
     for (a, b) in path.iter().copied().zip(path.iter().copied().cycle().skip(1)).take(path.len()) {
-        if point_on_segment(point, a, b)? {
+        if point_on_segment(point, a, b) {
             return Ok(PointLocation::Boundary);
         }
 
         if (a.y > point.y) != (b.y > point.y) {
-            let cross = checked_cross(a, b, point)?;
-            let crosses_right = if b.y > a.y { cross > 0 } else { cross < 0 };
+            let cross = cross_ordering(a, b, point);
+            let crosses_right =
+                if b.y > a.y { cross == Ordering::Greater } else { cross == Ordering::Less };
             if crosses_right {
                 inside = !inside;
             }
@@ -288,9 +292,20 @@ fn checked_cross(a: Point64, b: Point64, c: Point64) -> Result<i128, Error> {
         .ok_or(Error::ArithmeticOverflow)
 }
 
-fn point_on_segment(point: Point64, a: Point64, b: Point64) -> Result<bool, Error> {
-    if checked_cross(a, b, point)? != 0 {
-        return Ok(false);
+fn cross_ordering(a: Point64, b: Point64, c: Point64) -> Ordering {
+    if let Ok(cross) = checked_cross(a, b, c) {
+        return cross.cmp(&0);
+    }
+    let first_x = BigInt::from(i128::from(b.x) - i128::from(a.x));
+    let first_y = BigInt::from(i128::from(b.y) - i128::from(a.y));
+    let second_x = BigInt::from(i128::from(c.x) - i128::from(a.x));
+    let second_y = BigInt::from(i128::from(c.y) - i128::from(a.y));
+    (first_x * second_y - first_y * second_x).cmp(&BigInt::from(0))
+}
+
+fn point_on_segment(point: Point64, a: Point64, b: Point64) -> bool {
+    if cross_ordering(a, b, point) != Ordering::Equal {
+        return false;
     }
     let px = i128::from(point.x);
     let py = i128::from(point.y);
@@ -298,7 +313,7 @@ fn point_on_segment(point: Point64, a: Point64, b: Point64) -> Result<bool, Erro
     let max_x = i128::from(a.x).max(i128::from(b.x));
     let min_y = i128::from(a.y).min(i128::from(b.y));
     let max_y = i128::from(a.y).max(i128::from(b.y));
-    Ok(px >= min_x && px <= max_x && py >= min_y && py <= max_y)
+    px >= min_x && px <= max_x && py >= min_y && py <= max_y
 }
 
 #[cfg(test)]
@@ -420,7 +435,7 @@ mod tests {
                 Point64::new(i64::MAX, i64::MAX),
                 Point64::new(i64::MIN, i64::MAX)
             ),
-            Err(Error::ArithmeticOverflow)
+            Ok(Orientation::CounterClockwise)
         );
         assert_eq!(
             checked_cross(
@@ -452,5 +467,17 @@ mod tests {
         assert_eq!(point_in_polygon(Point64::new(10, 5), &square), Ok(PointLocation::Boundary));
         assert_eq!(point_in_polygon(A, &[]), Ok(PointLocation::Outside));
         assert!(point_in_polygon(A, &[A, B]).is_err());
+
+        let extreme = vec![
+            Point64::new(i64::MAX, i64::MAX),
+            Point64::new(i64::MIN, i64::MAX),
+            Point64::new(i64::MIN, i64::MIN),
+            Point64::new(i64::MAX, i64::MIN),
+        ];
+        assert_eq!(point_in_polygon(Point64::new(0, 0), &extreme), Ok(PointLocation::Inside));
+        assert_eq!(
+            point_in_polygon(Point64::new(i64::MIN, 0), &extreme),
+            Ok(PointLocation::Boundary)
+        );
     }
 }

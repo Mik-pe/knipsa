@@ -27,7 +27,9 @@ pub type TriangleD = [PointD; 3];
 /// Rings may be nested to describe holes and islands. Intersecting rings are
 /// rejected because their filled meaning is ambiguous for triangulation.
 /// The returned triangles are counter-clockwise and preserve the integer
-/// coordinate type.
+/// coordinate type. Computation uses a shared local origin, so absolute
+/// coordinates may span the full `i64` range when their differences from that
+/// origin fit the exact integer range of `f64` (2^53).
 ///
 /// # Errors
 ///
@@ -35,14 +37,14 @@ pub type TriangleD = [PointD; 3];
 /// for crossing rings, and [`Error::TriangulationFailure`] when the topology
 /// cannot be triangulated.
 pub fn triangulate64(paths: &[Path64], fill_rule: FillRule) -> Result<Vec<Triangle64>, Error> {
-    let paths_d = paths64_to_d(paths)?;
+    let (origin, paths_d) = paths64_to_local_d(paths)?;
     let triangles = triangulate_d(&paths_d, fill_rule)?;
     triangles
         .into_iter()
         .map(|triangle| {
             triangle
                 .into_iter()
-                .map(point_d_to_64)
+                .map(|point| point_d_to_64(point, origin))
                 .collect::<Result<Vec<_>, _>>()
                 .and_then(|points| points.try_into().map_err(|_| Error::TriangulationFailure))
         })
@@ -139,22 +141,28 @@ struct Ring {
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn paths64_to_d(paths: &[Path64]) -> Result<Vec<PathD>, Error> {
-    paths
+fn paths64_to_local_d(paths: &[Path64]) -> Result<(Point64, Vec<PathD>), Error> {
+    let origin =
+        paths.iter().find_map(|path| path.first()).copied().unwrap_or_else(|| Point64::new(0, 0));
+    let local = paths
         .iter()
         .map(|path| {
             path.iter()
                 .map(|point| {
-                    Ok(PointD::new(i64_to_exact_f64(point.x)?, i64_to_exact_f64(point.y)?))
+                    Ok(PointD::new(
+                        i128_to_exact_f64(i128::from(point.x) - i128::from(origin.x))?,
+                        i128_to_exact_f64(i128::from(point.y) - i128::from(origin.y))?,
+                    ))
                 })
                 .collect::<Result<PathD, Error>>()
         })
-        .collect()
+        .collect::<Result<Vec<_>, Error>>()?;
+    Ok((origin, local))
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn i64_to_exact_f64(value: i64) -> Result<f64, Error> {
-    const MAX_EXACT_INTEGER: u64 = 1 << 53;
+fn i128_to_exact_f64(value: i128) -> Result<f64, Error> {
+    const MAX_EXACT_INTEGER: u128 = 1 << 53;
     if value.unsigned_abs() > MAX_EXACT_INTEGER {
         return Err(Error::ArithmeticOverflow);
     }
@@ -162,7 +170,7 @@ fn i64_to_exact_f64(value: i64) -> Result<f64, Error> {
 }
 
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-fn point_d_to_64(point: PointD) -> Result<Point64, Error> {
+fn point_d_to_64(point: PointD, origin: Point64) -> Result<Point64, Error> {
     if !point.x.is_finite()
         || !point.y.is_finite()
         || point.x < -2_f64.powi(63)
@@ -172,7 +180,12 @@ fn point_d_to_64(point: PointD) -> Result<Point64, Error> {
     {
         return Err(Error::ArithmeticOverflow);
     }
-    Ok(Point64::new(point.x as i64, point.y as i64))
+    let x = i128::from(point.x as i64) + i128::from(origin.x);
+    let y = i128::from(point.y as i64) + i128::from(origin.y);
+    Ok(Point64::new(
+        i64::try_from(x).map_err(|_| Error::ArithmeticOverflow)?,
+        i64::try_from(y).map_err(|_| Error::ArithmeticOverflow)?,
+    ))
 }
 
 fn collect_rings(paths: &[PathD]) -> Result<Vec<Ring>, Error> {
@@ -609,12 +622,17 @@ mod tests {
             Err(Error::TriangulationFailure)
         );
 
-        let too_large = vec![vec![
-            Point64::new((1_i64 << 53) + 1, 0),
-            Point64::new((1_i64 << 53) + 11, 0),
-            Point64::new((1_i64 << 53) + 1, 10),
+        let translated_origin = (1_i64 << 53) + 1;
+        let translated = vec![vec![
+            Point64::new(translated_origin, 0),
+            Point64::new(translated_origin + 10, 0),
+            Point64::new(translated_origin + 10, 10),
+            Point64::new(translated_origin, 10),
         ]];
-        assert_eq!(triangulate64(&too_large, FillRule::NonZero), Err(Error::ArithmeticOverflow));
+        let translated_triangles = triangulate64(&translated, FillRule::NonZero)
+            .expect("small integer geometry should triangulate independently of its origin");
+        assert_eq!(translated_triangles.len(), 2);
+        assert!(translated_triangles.iter().flatten().all(|point| point.x >= translated_origin));
 
         for bad in [
             PointD::new(f64::NAN, 0.0),
@@ -625,7 +643,7 @@ mod tests {
             PointD::new(0.0, -2_f64.powi(63) - 4096.0),
             PointD::new(0.0, 2_f64.powi(63)),
         ] {
-            assert_eq!(point_d_to_64(bad), Err(Error::ArithmeticOverflow));
+            assert_eq!(point_d_to_64(bad, Point64::new(0, 0)), Err(Error::ArithmeticOverflow));
         }
     }
 
