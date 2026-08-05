@@ -49,13 +49,17 @@ piece" wording:
 - `docs/reference-matrix.md`, `docs/testing-strategy.md`, and `benchmarks/`
   already establish the right policy: semantic-region comparison, pinned
   independent references, and kernel-only timing separated from FFI.
+- `src/fast.rs` now adds a separate strict-convex two-ring path: a linear
+  boundary walk produces split parameters and containment hints, while
+  degenerate or uncertain input stays on the exact/general fallback.
 
-The present splitter checks every edge pair, so its intersection-discovery
-stage is **O(E^2)** before rational-cost and output work. That is a concrete
-optimization boundary, not a reason to weaken the exact semantics. Also note
-that arbitrary-precision exact coordinates prevent floating predicate errors,
-but do not alone prove a correct topology policy: zero-area, shared-boundary,
-and output-ring choices still require a contract and tests.
+The exact fallback splitter checks every edge pair, so its
+intersection-discovery stage is **O(E^2)** before rational-cost and output
+work. That is a concrete optimization boundary, not a reason to weaken the
+exact semantics. Also note that arbitrary-precision exact coordinates prevent
+floating predicate errors, but do not alone prove a correct topology policy:
+zero-area, shared-boundary, and output-ring choices still require a contract
+and tests.
 
 ## Terms that must be fixed before choosing an algorithm
 
@@ -94,6 +98,7 @@ and output-ring choices still require a contract and tests.
 ### Primary and high-quality sources
 
 - Sutherland and Hodgman, [*Reentrant Polygon Clipping* (1974)](https://dl.acm.org/doi/10.1145/360767.360802): convex-window, re-entrant clipping.
+- O'Rourke et al., [*A Linear-Time Algorithm for Intersecting Convex Polygons* (1982)](https://www.cs.jhu.edu/~misha/Spring20/ORourke82.pdf): edge-walk rules used as the restricted convex-path design reference.
 - Weiler and Atherton, [*Hidden Surface Removal Using Polygon Area Sorting* (1977)](https://www.cs.drexel.edu/~deb39/Classes/CS430/HWs/p214-weiler.pdf): its clipper handles concave polygons with holes.
 - Vatti, [*A Generic Solution to Polygon Clipping* (1992)](https://doi.org/10.1145/129902.129906): scanbeam/general clipping formulation.
 - Greiner and Hormann, [*Efficient Clipping of Arbitrary Polygons* (1998)](https://doi.org/10.1145/274363.274364), plus [Hormann, Agathos and Elber's degeneracy extension (2019)](https://doi.org/10.1016/j.cagx.2019.100007).
