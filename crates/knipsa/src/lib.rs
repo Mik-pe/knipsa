@@ -15,7 +15,7 @@ pub use error::Error;
 pub use geometry::{
     Orientation, Path64, PathD, Paths64, PathsD, Point64, PointD, PointLocation, normalize_path64,
     normalize_pathd, orientation, point_in_polygon, signed_area2, validate_path64, validate_pathd,
-    validate_paths64,
+    validate_paths_d, validate_paths64,
 };
 pub use offset::{EndType, JoinType, OffsetOptions, offset_paths, offset_paths_d, offset_paths64};
 pub use request::{

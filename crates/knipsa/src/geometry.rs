@@ -148,6 +148,21 @@ pub fn validate_pathd(path: &[PointD], kind: PathKind) -> Result<(), Error> {
     Ok(())
 }
 
+/// Validates every floating-point path in a collection.
+///
+/// This is the collection counterpart to [`validate_pathd`]. Empty paths are
+/// valid and every coordinate in a non-empty path must be finite.
+///
+/// # Errors
+///
+/// Returns the first path-shape or coordinate-finiteness error found.
+pub fn validate_paths_d(paths: &[PathD], kind: PathKind) -> Result<(), Error> {
+    for path in paths {
+        validate_pathd(path, kind)?;
+    }
+    Ok(())
+}
+
 /// Removes consecutive duplicates and, for closed paths, a repeated closing
 /// point. The input is never modified.
 ///
@@ -303,6 +318,13 @@ mod tests {
         assert!(validate_path64(&[A], PathKind::Open).is_err());
         assert!(validate_paths64(&[vec![A, B]], PathKind::Open).is_ok());
         assert!(validate_paths64(&[vec![A]], PathKind::Closed).is_err());
+
+        assert!(validate_paths_d(&[], PathKind::Closed).is_ok());
+        assert!(
+            validate_paths_d(&[vec![PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)]], PathKind::Open)
+                .is_ok()
+        );
+        assert!(validate_paths_d(&[vec![PointD::new(0.0, 0.0)]], PathKind::Closed).is_err());
     }
 
     #[test]

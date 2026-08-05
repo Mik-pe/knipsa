@@ -18,6 +18,7 @@ include = [
     "KnipsaPathKind",
     "KnipsaPaths64",
     "KnipsaPathsD",
+    "KnipsaOffsetOptions",
     "KnipsaPoint64",
     "KnipsaPointD",
     "KnipsaStatus",

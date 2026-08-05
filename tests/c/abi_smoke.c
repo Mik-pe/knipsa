@@ -25,6 +25,8 @@ int main(void) {
 
   const KnipsaPointD triangle_d[] = {{0.0, 0.0}, {10.0, 0.0}, {0.0, 10.0}};
   const KnipsaPathD path_d = {triangle_d, 3};
+  assert(knipsa_validate_paths_d(&path_d, 1, KNIPSA_PATH_CLOSED) ==
+         KNIPSA_STATUS_OK);
   KnipsaPathsD result_d = {0};
   assert(knipsa_boolean_d(&path_d, 1, NULL, 0, KNIPSA_CLIP_UNION,
                           KNIPSA_FILL_EVEN_ODD, &result_d) == KNIPSA_STATUS_OK);
@@ -34,8 +36,9 @@ int main(void) {
   assert(result_d.path_count == 0);
 
   KnipsaPathsD offset = {0};
-  assert(knipsa_offset64(&path, 1, 1.0, KNIPSA_JOIN_MITER,
-                         KNIPSA_END_POLYGON, 2.0, 0.0, 0, &offset) ==
+  KnipsaOffsetOptions offset_options = KNIPSA_OFFSET_OPTIONS_INIT;
+  offset_options.join_type = KNIPSA_JOIN_MITER;
+  assert(knipsa_offset64(&path, 1, 1.0, &offset_options, &offset) ==
          KNIPSA_STATUS_OK);
   assert(offset.path_count == 1);
   knipsa_free_paths_d(&offset);

@@ -53,6 +53,19 @@ pub struct BooleanRequest<'a> {
     pub fill_rule: FillRule,
 }
 
+impl<'a> BooleanRequest<'a> {
+    /// Creates a boolean request from borrowed subject and clip paths.
+    #[must_use]
+    pub const fn new(
+        subjects: &'a [Path64],
+        clips: &'a [Path64],
+        clip_type: ClipType,
+        fill_rule: FillRule,
+    ) -> Self {
+        Self { subjects, clips, clip_type, fill_rule }
+    }
+}
+
 /// Borrowed floating-point inputs to a boolean operation.
 ///
 /// This has the same topology contract as [`BooleanRequest`], but accepts
@@ -67,6 +80,19 @@ pub struct BooleanRequestD<'a> {
     pub clip_type: ClipType,
     /// Fill rule for both path sets.
     pub fill_rule: FillRule,
+}
+
+impl<'a> BooleanRequestD<'a> {
+    /// Creates a floating-point boolean request from borrowed paths.
+    #[must_use]
+    pub const fn new(
+        subjects: &'a [PathD],
+        clips: &'a [PathD],
+        clip_type: ClipType,
+        fill_rule: FillRule,
+    ) -> Self {
+        Self { subjects, clips, clip_type, fill_rule }
+    }
 }
 
 /// Validates a boolean request without executing it.
@@ -120,12 +146,12 @@ pub fn validate_requestd(request: &BooleanRequestD<'_>) -> Result<(), Error> {
 ///     Point64::new(15, 15),
 ///     Point64::new(5, 15),
 /// ];
-/// let result = boolean_op(BooleanRequest {
-///     subjects: std::slice::from_ref(&subject),
-///     clips: std::slice::from_ref(&clip),
-///     clip_type: ClipType::Intersection,
-///     fill_rule: FillRule::EvenOdd,
-/// })
+/// let result = boolean_op(BooleanRequest::new(
+///     std::slice::from_ref(&subject),
+///     std::slice::from_ref(&clip),
+///     ClipType::Intersection,
+///     FillRule::EvenOdd,
+/// ))
 /// .expect("valid polygons close");
 ///
 /// assert_eq!(result.len(), 1);

@@ -38,12 +38,12 @@ fn main() -> Result<(), knipsa::Error> {
         PointD::new(5.0, 15.0),
     ];
 
-    let result = boolean_opd(BooleanRequestD {
-        subjects: std::slice::from_ref(&subject),
-        clips: std::slice::from_ref(&clip),
-        clip_type: ClipType::Intersection,
-        fill_rule: FillRule::EvenOdd,
-    })?;
+    let result = boolean_opd(BooleanRequestD::new(
+        std::slice::from_ref(&subject),
+        std::slice::from_ref(&clip),
+        ClipType::Intersection,
+        FillRule::EvenOdd,
+    ))?;
 
     assert_eq!(result.len(), 1);
     Ok(())
@@ -99,13 +99,17 @@ and the ownership and null-pointer rules are documented in
 
 Outputs allocated by the FFI must be released with the matching
 `knipsa_free_paths64` or `knipsa_free_paths_d` function. Input memory remains
-owned by the caller.
+owned by the caller. Initialize output slots with `KNIPSA_PATHS64_INIT` or
+`KNIPSA_PATHS_D_INIT`; configure offsets with
+`KNIPSA_OFFSET_OPTIONS_INIT`. Use
+[`examples/quickstart.c`](examples/quickstart.c) as a complete C11 example.
 
 ## Workspace
 
 - `crates/knipsa` — the safe Rust API and geometry engine;
 - `crates/knipsa-ffi` — the C-compatible library and public header;
 - `crates/knipsa/examples/quickstart.rs` — a runnable API tour;
+- `examples/quickstart.c` — a runnable C11 API tour;
 - `tests/c` — a C11 ABI smoke test;
 - `fuzz` — fuzz targets for geometry inputs;
 - `docs/` — API contracts, testing notes, licensing, and benchmarks.

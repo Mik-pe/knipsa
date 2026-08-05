@@ -1,8 +1,7 @@
 # FFI contract
 
 The FFI crate is named `knipsa-ffi`. It exists to make the library callable from
-languages that can consume a C-compatible shared library. This is a boundary
-chosen for interoperability, not an attempt to reproduce Clipper's ABI.
+languages that can consume a C-compatible shared library.
 
 ## Rules
 
@@ -14,14 +13,22 @@ chosen for interoperability, not an attempt to reproduce Clipper's ABI.
   boundary.
 - Null pointers are accepted only where the function's documentation says
   they represent an empty slice.
+- Result slots must start as `KNIPSA_PATHS64_INIT` or `KNIPSA_PATHS_D_INIT`,
+  and a live result must be released before the slot is reused. Passing a live
+  result back into an operation returns `KNIPSA_STATUS_INVALID_ARGUMENT`
+  instead of leaking it.
 - Output ownership is explicit. `knipsa_boolean64` allocates a
   `KnipsaPaths64` result and `knipsa_free_paths64` releases it; callers must
   never free Rust memory with their platform allocator.
+- `knipsa_validate_paths64` and `knipsa_validate_paths_d` are available when a
+  caller wants to validate input before selecting an operation.
 - `knipsa_boolean_d` provides the same boolean contract for finite C `double`
   coordinates, with `KnipsaPathsD` released by `knipsa_free_paths_d`.
 - `knipsa_offset64` and `knipsa_offset_d` expose polygon and polyline offsets;
-  the integer entry point returns rounded coordinates in `KnipsaPathsD` so
-  joins and round caps are not truncated by the ABI.
+  the integer entry point converts exact integer inputs to `double` and keeps
+  fractional joins and round caps in `KnipsaPathsD`. Both use the small
+  `KnipsaOffsetOptions` descriptor, normally initialized with
+  `KNIPSA_OFFSET_OPTIONS_INIT`.
 - `knipsa_triangulate64` and `knipsa_triangulate_d` return each triangle as a
   three-point path and use the same fill-rule enum as boolean operations.
 - ABI additions are versioned. Existing fields and enum values are never
@@ -29,8 +36,9 @@ chosen for interoperability, not an attempt to reproduce Clipper's ABI.
 
 The API contains validation, point-location, boolean, offset, and triangulation
 calls. Output is an owned array of
-borrowed-looking path descriptors; the descriptors and their point arrays are
-both released by the single matching free function for that coordinate type.
+borrowed-looking, read-only path descriptors; the descriptors and their point
+arrays are both released by the single matching free function for that
+coordinate type.
 
 ## Minimal C client
 
@@ -47,7 +55,7 @@ int main(void) {
         {0, 0}, {10, 0}, {10, 10}, {0, 10},
     };
     const KnipsaPath64 subject = {points, 4};
-    KnipsaPaths64 result = {0};
+    KnipsaPaths64 result = KNIPSA_PATHS64_INIT;
 
     const KnipsaStatus status = knipsa_boolean64(
         &subject, 1, NULL, 0,

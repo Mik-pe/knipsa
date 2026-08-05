@@ -18,12 +18,12 @@ fn main() -> Result<(), knipsa::Error> {
     let subject = square(0.0, 0.0, 10.0, 10.0);
     let clip = square(5.0, 5.0, 15.0, 15.0);
 
-    let intersection = boolean_opd(BooleanRequestD {
-        subjects: std::slice::from_ref(&subject),
-        clips: std::slice::from_ref(&clip),
-        clip_type: ClipType::Intersection,
-        fill_rule: FillRule::EvenOdd,
-    })?;
+    let intersection = boolean_opd(BooleanRequestD::new(
+        std::slice::from_ref(&subject),
+        std::slice::from_ref(&clip),
+        ClipType::Intersection,
+        FillRule::EvenOdd,
+    ))?;
     println!("intersection rings: {}", intersection.len());
 
     let outline = offset_paths_d(std::slice::from_ref(&subject), 1.0, OffsetOptions::default())?;

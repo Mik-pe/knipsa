@@ -17,6 +17,15 @@ cc=${CC:-clang}
 
 target/c-api/abi-smoke
 
+"$cc" -std=c11 -Wall -Wextra -Werror \
+  -Icrates/knipsa-ffi/include \
+  examples/quickstart.c \
+  -Ltarget/debug -lknipsa_ffi \
+  -Wl,-rpath,"$repo_root/target/debug" \
+  -o target/c-api/quickstart
+
+target/c-api/quickstart
+
 case "$(uname -s)" in
   Darwin)
     nm -gU target/debug/libknipsa_ffi.dylib
@@ -24,6 +33,6 @@ case "$(uname -s)" in
   *)
     nm -g target/debug/libknipsa_ffi.so
     ;;
-esac | grep -E 'knipsa_(version|status_message|validate_paths64|point_in_polygon64|boolean64|free_paths64|boolean_d|free_paths_d|offset64|offset_d|triangulate64|triangulate_d)$' >/dev/null
+esac | grep -E 'knipsa_(version|status_message|validate_paths64|validate_paths_d|point_in_polygon64|boolean64|free_paths64|boolean_d|free_paths_d|offset64|offset_d|triangulate64|triangulate_d)$' >/dev/null
 
 echo "C API smoke test passed"
