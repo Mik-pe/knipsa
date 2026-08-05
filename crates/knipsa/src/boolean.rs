@@ -1603,6 +1603,32 @@ mod tests {
     }
 
     #[test]
+    fn fast_double_path_matches_exact_for_convex_variants() {
+        let cases = [(0.0, 40.0, 12.0, 40.0), (0.0, 20.0, 60.0, 20.0), (0.0, 40.0, 0.0, 20.0)];
+        for (subject_x, subject_radius, clip_x, clip_radius) in cases {
+            let subject = regular_polygon(subject_x, subject_radius, 8);
+            let clip = regular_polygon(clip_x, clip_radius, 8);
+            let subjects = [subject];
+            let clips = [clip];
+            for clip_type in
+                [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor]
+            {
+                let request = BooleanRequestD {
+                    subjects: &subjects,
+                    clips: &clips,
+                    clip_type,
+                    fill_rule: FillRule::EvenOdd,
+                };
+                let fast = crate::fast::try_boolean_opd(request)
+                    .expect("convex input should use fast path")
+                    .expect("fast path should close");
+                let exact = boolean_opd_exact(request).expect("exact oracle should close");
+                assert_eq!(double_summary(&fast), double_summary(&exact), "case: {clip_type:?}");
+            }
+        }
+    }
+
+    #[test]
     fn fast_double_path_defers_large_coordinates_to_exact_oracle() {
         let path = rectangle_d(2_000_000.0, 2_000_000.0, 2_000_010.0, 2_000_010.0);
         let subjects = [path];

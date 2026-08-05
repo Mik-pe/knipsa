@@ -6,7 +6,7 @@
 //! away from zero.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::hash::{BuildHasherDefault, Hasher};
 
 use crate::{BooleanRequestD, ClipType, Error, FillRule, PathD, PathsD, PointD, normalize_pathd};
@@ -103,6 +103,11 @@ struct DirectedEdge {
     end_key: PointKey,
 }
 
+enum Outgoing {
+    Single(usize),
+    Multiple(Vec<usize>),
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ContainmentEdge {
     start: Point,
@@ -113,11 +118,72 @@ struct ContainmentEdge {
 }
 
 #[derive(Clone, Debug)]
-struct ContainmentPath {
+struct ContainmentPath<'a> {
     bounds: (f64, f64, f64, f64),
     buckets: Vec<Vec<ContainmentEdge>>,
-    convex_points: Option<Vec<Point>>,
+    convex_points: Option<&'a [Point]>,
     convex_winding: Option<i32>,
+}
+
+const INLINE_SPLIT_CAPACITY: usize = 4;
+
+#[derive(Clone, Debug)]
+struct SplitParameters {
+    inline: [f64; INLINE_SPLIT_CAPACITY],
+    len: usize,
+    overflow: Option<Vec<f64>>,
+}
+
+impl SplitParameters {
+    fn new() -> Self {
+        Self { inline: [0.0, 1.0, 0.0, 0.0], len: 2, overflow: None }
+    }
+
+    fn len(&self) -> usize {
+        self.overflow.as_ref().map_or(self.len, Vec::len)
+    }
+
+    fn push(&mut self, value: f64) {
+        if let Some(overflow) = &mut self.overflow {
+            overflow.push(value);
+        } else if self.len < INLINE_SPLIT_CAPACITY {
+            self.inline[self.len] = value;
+            self.len += 1;
+        } else {
+            let mut overflow = Vec::with_capacity(INLINE_SPLIT_CAPACITY * 2);
+            overflow.extend_from_slice(&self.inline);
+            overflow.push(value);
+            self.overflow = Some(overflow);
+            self.len += 1;
+        }
+    }
+
+    fn sort_dedup(&mut self) {
+        if let Some(overflow) = &mut self.overflow {
+            overflow.sort_unstable_by(f64::total_cmp);
+            overflow.dedup_by(|left, right| (*left - *right).abs() <= 1.0e-12);
+            self.len = overflow.len();
+        } else {
+            let old_len = self.len;
+            let values = &mut self.inline[..old_len];
+            values.sort_unstable_by(f64::total_cmp);
+            let mut write = 1;
+            for read in 1..old_len {
+                if (values[read] - values[write - 1]).abs() > 1.0e-12 {
+                    values[write] = values[read];
+                    write += 1;
+                }
+            }
+            self.len = write;
+        }
+    }
+
+    fn values(&self) -> &[f64] {
+        match self.overflow.as_deref() {
+            Some(values) => values,
+            None => &self.inline[..self.len],
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -132,13 +198,75 @@ struct PathProperties {
     convex: bool,
 }
 
+struct ConvexIndex<'a> {
+    points: &'a [Point],
+    positive: bool,
+}
+
+struct ConvexWalk {
+    output: PathsD,
+    subject_splits: Vec<SplitParameters>,
+    clip_splits: Vec<SplitParameters>,
+    subject_inside: Vec<Option<bool>>,
+    clip_inside: Vec<Option<bool>>,
+    degenerate: bool,
+}
+
+impl ConvexIndex<'_> {
+    #[inline]
+    fn new(points: &[Point]) -> ConvexIndex<'_> {
+        ConvexIndex { points, positive: area2(points) > 0.0 }
+    }
+
+    #[inline]
+    fn contains(&self, point: Point) -> bool {
+        convex_contains(point, self.points, self.positive)
+    }
+}
+
 pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<PathsD, ()>> {
+    if let Some(result) = try_single_convex_boolean(request) {
+        return Some(result.map_err(|_| ()));
+    }
     let subjects = fast_paths(request.subjects)?;
     let clips = fast_paths(request.clips)?;
     if !eligible(&subjects, &clips) {
         return None;
     }
     Some(run(&subjects, &clips, request.clip_type, request.fill_rule).map_err(|_| ()))
+}
+
+fn try_single_convex_boolean(request: BooleanRequestD<'_>) -> Option<Result<PathsD, Error>> {
+    if request.subjects.len() != 1
+        || request.clips.len() != 1
+        || !eligible(request.subjects, request.clips)
+    {
+        return None;
+    }
+    let subject = request.subjects[0].as_slice();
+    let clip = request.clips[0].as_slice();
+    if subject.len() >= 3 && clip.len() >= 3 && strict_convex(subject) && strict_convex(clip) {
+        if !keyable_path(subject)
+            || !keyable_path(clip)
+            || !fill_rule_accepts_ring(subject, request.fill_rule)
+            || !fill_rule_accepts_ring(clip, request.fill_rule)
+        {
+            return None;
+        }
+        return convex_boolean(subject, clip, request.clip_type, Some((true, true))).map(Ok);
+    }
+    let subject_properties = classify_path(subject);
+    let clip_properties = classify_path(clip);
+    if subject.len() < 3
+        || clip.len() < 3
+        || !subject_properties.convex
+        || !clip_properties.convex
+        || !fill_rule_accepts_ring(subject, request.fill_rule)
+        || !fill_rule_accepts_ring(clip, request.fill_rule)
+    {
+        return None;
+    }
+    convex_boolean(subject, clip, request.clip_type, None).map(Ok)
 }
 
 fn fast_paths(paths: &[PathD]) -> Option<Vec<FastPath<'_>>> {
@@ -215,32 +343,37 @@ fn run<P: PathSlice>(
     if let Some(result) = short_circuit(subjects, clips, clip_type, fill_rule) {
         return Ok(result);
     }
-    let mut edges = Vec::new();
+    let edge_capacity = subjects.iter().chain(clips).map(|path| path.points().len()).sum();
+    let mut edges = Vec::with_capacity(edge_capacity);
     let mut path_properties = Vec::with_capacity(subjects.len() + clips.len());
     for (path_id, path) in subjects.iter().enumerate() {
         let points = path.points();
         path_properties.push(classify_path(points));
-        edges.extend(path_edges(points).into_iter().map(|mut edge| {
-            edge.path_id = path_id;
-            edge.subject = true;
-            edge
-        }));
+        append_path_edges(&mut edges, points, path_id, true);
     }
     for (clip_index, path) in clips.iter().enumerate() {
         let path_id = subjects.len() + clip_index;
         let points = path.points();
         path_properties.push(classify_path(points));
-        edges.extend(path_edges(points).into_iter().map(|mut edge| {
-            edge.path_id = path_id;
-            edge
-        }));
+        if path_properties[path_id].convex
+            && subjects.len() == 1
+            && clips.len() == 1
+            && path_properties[0].convex
+            && fill_rule_accepts_ring(subjects[0].points(), fill_rule)
+            && fill_rule_accepts_ring(points, fill_rule)
+        {
+            if let Some(result) = convex_boolean(subjects[0].points(), points, clip_type, None) {
+                return Ok(result);
+            }
+        }
+        append_path_edges(&mut edges, points, path_id, false);
     }
     if edges.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut parameters = vec![vec![0.0, 1.0]; edges.len()];
-    if !split_pairs(&edges, &path_properties, &mut parameters) {
+    let mut parameters = vec![SplitParameters::new(); edges.len()];
+    if !split_pairs(&edges, &path_properties, &mut parameters, false) {
         return Err(Error::TopologyFailure);
     }
 
@@ -271,10 +404,9 @@ fn run<P: PathSlice>(
         FastSet::with_capacity_and_hasher(edges.len(), BuildHasherDefault::default());
     for (edge, values) in edges.iter().zip(parameters.iter_mut()) {
         if values.len() > 2 {
-            values.sort_unstable_by(f64::total_cmp);
-            values.dedup_by(|left, right| (*left - *right).abs() <= 1.0e-12);
+            values.sort_dedup();
         }
-        for pair in values.windows(2) {
+        for pair in values.values().windows(2) {
             let start = point_at(*edge, pair[0]);
             let end = point_at(*edge, pair[1]);
             let start_key = key(start).expect("eligible split point is keyable");
@@ -326,7 +458,8 @@ fn run<P: PathSlice>(
 fn split_pairs(
     edges: &[Edge],
     path_properties: &[PathProperties],
-    parameters: &mut [Vec<f64>],
+    parameters: &mut [SplitParameters],
+    reject_collinear: bool,
 ) -> bool {
     let mut order = (0..edges.len()).collect::<Vec<_>>();
     order.sort_unstable_by_key(|index| (edges[*index].min_x_key, edges[*index].max_x_key, *index));
@@ -343,7 +476,13 @@ fn split_pairs(
                 continue;
             }
             let (before, after) = parameters.split_at_mut(second);
-            if !split_pair(&edges[first], &edges[second], &mut before[first], &mut after[0]) {
+            if !split_pair(
+                &edges[first],
+                &edges[second],
+                &mut before[first],
+                &mut after[0],
+                reject_collinear,
+            ) {
                 return false;
             }
         }
@@ -418,6 +557,473 @@ fn short_circuit<P: PathSlice>(
     None
 }
 
+fn fill_rule_accepts_ring(path: &[Point], fill_rule: FillRule) -> bool {
+    match fill_rule {
+        FillRule::EvenOdd | FillRule::NonZero => true,
+        FillRule::Positive => area2(path) > 0.0,
+        FillRule::Negative => area2(path) < 0.0,
+    }
+}
+
+fn convex_boolean(
+    subject: &[Point],
+    clip: &[Point],
+    clip_type: ClipType,
+    strict_hint: Option<(bool, bool)>,
+) -> Option<PathsD> {
+    let (subject_strict, clip_strict) =
+        strict_hint.unwrap_or_else(|| (strict_convex(subject), strict_convex(clip)));
+    let linear_walk = if area2(subject) > 0.0 && area2(clip) > 0.0 && subject_strict && clip_strict
+    {
+        Some(convex_boundary_walk(
+            subject,
+            clip,
+            clip_type == ClipType::Intersection,
+            clip_type != ClipType::Intersection,
+        ))
+    } else {
+        None
+    };
+    if clip_type == ClipType::Intersection
+        && let Some(walk) = linear_walk.as_ref()
+        && (!walk.degenerate || valid_convex_intersection(&walk.output, subject, clip))
+    {
+        return Some(walk.output.clone());
+    }
+    let use_linear_splits = linear_walk.as_ref().is_some_and(|walk| !walk.degenerate);
+    if use_linear_splits {
+        let ConvexWalk { subject_splits, clip_splits, subject_inside, clip_inside, .. } =
+            linear_walk.expect("linear walk was checked above");
+        let use_inside_hints =
+            subject_splits.iter().chain(&clip_splits).any(|values| values.len() > 2);
+        return convex_boolean_from_splits(
+            subject,
+            clip,
+            clip_type,
+            subject_splits,
+            clip_splits,
+            if use_inside_hints { &subject_inside } else { &[] },
+            if use_inside_hints { &clip_inside } else { &[] },
+        );
+    }
+    let mut edges = Vec::with_capacity(subject.len() + clip.len());
+    append_path_edges(&mut edges, subject, 0, true);
+    append_path_edges(&mut edges, clip, 1, false);
+    let properties = [PathProperties { simple: true, convex: true }; 2];
+    let mut parameters = vec![SplitParameters::new(); edges.len()];
+    if !split_pairs(&edges, &properties, &mut parameters, true) {
+        return None;
+    }
+
+    let subject_index = ConvexIndex::new(subject);
+    let clip_index = ConvexIndex::new(clip);
+    let mut directed = Vec::with_capacity(edges.len());
+    for (edge, values) in edges.iter().zip(parameters.iter_mut()) {
+        if values.len() > 2 {
+            values.sort_dedup();
+        }
+        for pair in values.values().windows(2) {
+            let start = point_at(*edge, pair[0]);
+            let end = point_at(*edge, pair[1]);
+            let start_key = key(start)?;
+            let end_key = key(end)?;
+            if start_key == end_key {
+                continue;
+            }
+            let midpoint = Point { x: (start.x + end.x) * 0.5, y: (start.y + end.y) * 0.5 };
+            let other_inside = if edge.subject {
+                clip_index.contains(midpoint)
+            } else {
+                subject_index.contains(midpoint)
+            };
+            let (left, right) = if edge.subject {
+                (
+                    apply_operation(subject_index.positive, other_inside, clip_type),
+                    apply_operation(!subject_index.positive, other_inside, clip_type),
+                )
+            } else {
+                (
+                    apply_operation(other_inside, clip_index.positive, clip_type),
+                    apply_operation(other_inside, !clip_index.positive, clip_type),
+                )
+            };
+            if left == right {
+                continue;
+            }
+            let directed_edge = if left {
+                DirectedEdge { start, end, start_key, end_key }
+            } else {
+                DirectedEdge { start: end, end: start, start_key: end_key, end_key: start_key }
+            };
+            directed.push(directed_edge);
+        }
+    }
+    stitch(&directed).ok()
+}
+
+fn convex_boolean_from_splits(
+    subject: &[Point],
+    clip: &[Point],
+    clip_type: ClipType,
+    mut subject_splits: Vec<SplitParameters>,
+    mut clip_splits: Vec<SplitParameters>,
+    subject_inside: &[Option<bool>],
+    clip_inside: &[Option<bool>],
+) -> Option<PathsD> {
+    let subject_index = ConvexIndex::new(subject);
+    let clip_index = ConvexIndex::new(clip);
+    let mut directed = Vec::with_capacity(subject.len() + clip.len());
+    append_convex_operation_edges(
+        subject,
+        &mut subject_splits,
+        subject_inside,
+        true,
+        clip_type,
+        &subject_index,
+        &clip_index,
+        &mut directed,
+    )?;
+    append_convex_operation_edges(
+        clip,
+        &mut clip_splits,
+        clip_inside,
+        false,
+        clip_type,
+        &subject_index,
+        &clip_index,
+        &mut directed,
+    )?;
+    stitch(&directed).ok()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_convex_operation_edges(
+    points: &[Point],
+    parameters: &mut [SplitParameters],
+    inside_hints: &[Option<bool>],
+    subject: bool,
+    clip_type: ClipType,
+    subject_index: &ConvexIndex<'_>,
+    clip_index: &ConvexIndex<'_>,
+    directed: &mut Vec<DirectedEdge>,
+) -> Option<()> {
+    for (index, values) in parameters.iter_mut().enumerate() {
+        if values.len() > 2 {
+            values.sort_dedup();
+        }
+        let has_split = values.len() > 2;
+        let start_point = points[index];
+        let end_point = points[(index + 1) % points.len()];
+        let vector = subtract(end_point, start_point);
+        for pair in values.values().windows(2) {
+            let start = Point {
+                x: start_point.x + vector.x * pair[0],
+                y: start_point.y + vector.y * pair[0],
+            };
+            let end = Point {
+                x: start_point.x + vector.x * pair[1],
+                y: start_point.y + vector.y * pair[1],
+            };
+            let start_key = key(start)?;
+            let end_key = key(end)?;
+            if start_key == end_key {
+                continue;
+            }
+            let midpoint = Point { x: (start.x + end.x) * 0.5, y: (start.y + end.y) * 0.5 };
+            let other_inside = if !has_split {
+                inside_hints.get(index).copied().flatten().unwrap_or_else(|| {
+                    if subject {
+                        clip_index.contains(midpoint)
+                    } else {
+                        subject_index.contains(midpoint)
+                    }
+                })
+            } else if subject {
+                clip_index.contains(midpoint)
+            } else {
+                subject_index.contains(midpoint)
+            };
+            let (left, right) = if subject {
+                (
+                    apply_operation(subject_index.positive, other_inside, clip_type),
+                    apply_operation(!subject_index.positive, other_inside, clip_type),
+                )
+            } else {
+                (
+                    apply_operation(other_inside, clip_index.positive, clip_type),
+                    apply_operation(other_inside, !clip_index.positive, clip_type),
+                )
+            };
+            if left == right {
+                continue;
+            }
+            if left {
+                directed.push(DirectedEdge { start, end, start_key, end_key });
+            } else {
+                directed.push(DirectedEdge {
+                    start: end,
+                    end: start,
+                    start_key: end_key,
+                    end_key: start_key,
+                });
+            }
+        }
+    }
+    Some(())
+}
+
+fn valid_convex_intersection(result: &PathsD, subject: &[Point], clip: &[Point]) -> bool {
+    let Some(path) = result.first() else {
+        let subject_bounds = point_bounds(subject);
+        let clip_bounds = point_bounds(clip);
+        return subject_bounds.2 < clip_bounds.0
+            || clip_bounds.2 < subject_bounds.0
+            || subject_bounds.3 < clip_bounds.1
+            || clip_bounds.3 < subject_bounds.1;
+    };
+    if result.len() != 1 || path.len() < 3 {
+        return false;
+    }
+    path.iter()
+        .copied()
+        .all(|point| convex_contains(point, subject, true) && convex_contains(point, clip, true))
+        && area2(path) > 0.0
+}
+
+fn strict_convex(path: &[Point]) -> bool {
+    if path.len() < 3 {
+        return false;
+    }
+    let mut direction = None;
+    for index in 0..path.len() {
+        let previous = path[(index + path.len() - 1) % path.len()];
+        let current = path[index];
+        let next = path[(index + 1) % path.len()];
+        let turn = cross(subtract(current, previous), subtract(next, current));
+        if turn.abs() <= f64::EPSILON {
+            return false;
+        }
+        let positive = turn > 0.0;
+        if direction.is_some_and(|known| known != positive) {
+            return false;
+        }
+        direction = Some(positive);
+    }
+    true
+}
+
+#[allow(clippy::too_many_lines)]
+fn convex_boundary_walk(
+    subject: &[Point],
+    clip: &[Point],
+    collect_output: bool,
+    collect_splits: bool,
+) -> ConvexWalk {
+    let mut subject_index = 0;
+    let mut clip_index = 0;
+    let mut subject_previous = subject[subject.len() - 1];
+    let mut clip_previous = clip[clip.len() - 1];
+    let mut subject_vector = subtract(subject[subject_index], subject_previous);
+    let mut clip_vector = subtract(clip[clip_index], clip_previous);
+    let mut inside = 0_u8;
+    let mut output =
+        if collect_output { Vec::with_capacity(subject.len() + clip.len()) } else { Vec::new() };
+    let mut subject_splits =
+        if collect_splits { vec![SplitParameters::new(); subject.len()] } else { Vec::new() };
+    let mut clip_splits =
+        if collect_splits { vec![SplitParameters::new(); clip.len()] } else { Vec::new() };
+    let mut subject_inside = if collect_splits { vec![None; subject.len()] } else { Vec::new() };
+    let mut clip_inside = if collect_splits { vec![None; clip.len()] } else { Vec::new() };
+    let mut first_intersection = None;
+    let limit = 2 * (subject.len() + clip.len()) + 1;
+    let mut degenerate = false;
+    let mut subject_steps = 0;
+    let mut clip_steps = 0;
+
+    for _ in 0..limit {
+        let subject_edge = (subject_index + subject.len() - 1) % subject.len();
+        let clip_edge = (clip_index + clip.len() - 1) % clip.len();
+        let first_vector = subject_vector;
+        let second_vector = clip_vector;
+        if cross(first_vector, second_vector).abs() <= f64::EPSILON
+            && cross(subtract(clip_previous, subject_previous), first_vector).abs() <= f64::EPSILON
+        {
+            degenerate = true;
+        }
+        if let Some((intersection, first_parameter, second_parameter)) = segment_intersection(
+            subject_previous,
+            subject[subject_index],
+            clip_previous,
+            clip[clip_index],
+        ) {
+            if first_parameter <= f64::EPSILON
+                || first_parameter >= 1.0 - f64::EPSILON
+                || second_parameter <= f64::EPSILON
+                || second_parameter >= 1.0 - f64::EPSILON
+            {
+                degenerate = true;
+            }
+            if first_intersection.is_some_and(|first| key(first) == key(intersection)) {
+                break;
+            }
+            if first_intersection.is_none() {
+                first_intersection = Some(intersection);
+            }
+            if collect_splits {
+                subject_splits[subject_edge].push(first_parameter.clamp(0.0, 1.0));
+                clip_splits[clip_edge].push(second_parameter.clamp(0.0, 1.0));
+            }
+            if collect_output {
+                output.push(intersection);
+            }
+            inside = if cross(clip_vector, subtract(subject[subject_index], clip_previous)) >= 0.0 {
+                1
+            } else {
+                2
+            };
+        }
+
+        if cross(clip_vector, subject_vector) > 0.0 {
+            if cross(clip_vector, subtract(subject[subject_index], clip_previous)) >= 0.0 {
+                if collect_splits && clip_inside[clip_edge].is_none() {
+                    clip_inside[clip_edge] = Some(inside == 2);
+                }
+                clip_previous = clip[clip_index];
+                clip_index = (clip_index + 1) % clip.len();
+                clip_vector = subtract(clip[clip_index], clip_previous);
+                clip_steps += 1;
+                if collect_output && inside == 2 {
+                    output.push(clip_previous);
+                }
+            } else {
+                if collect_splits && subject_inside[subject_edge].is_none() {
+                    subject_inside[subject_edge] = Some(inside == 1);
+                }
+                subject_previous = subject[subject_index];
+                subject_index = (subject_index + 1) % subject.len();
+                subject_vector = subtract(subject[subject_index], subject_previous);
+                subject_steps += 1;
+                if collect_output && inside == 1 {
+                    output.push(subject_previous);
+                }
+            }
+        } else if cross(subject_vector, subtract(clip[clip_index], subject_previous)) >= 0.0 {
+            if collect_splits && subject_inside[subject_edge].is_none() {
+                subject_inside[subject_edge] = Some(inside == 1);
+            }
+            subject_previous = subject[subject_index];
+            subject_index = (subject_index + 1) % subject.len();
+            subject_vector = subtract(subject[subject_index], subject_previous);
+            subject_steps += 1;
+            if collect_output && inside == 1 {
+                output.push(subject_previous);
+            }
+        } else {
+            if collect_splits && clip_inside[clip_edge].is_none() {
+                clip_inside[clip_edge] = Some(inside == 2);
+            }
+            clip_previous = clip[clip_index];
+            clip_index = (clip_index + 1) % clip.len();
+            clip_vector = subtract(clip[clip_index], clip_previous);
+            clip_steps += 1;
+            if collect_output && inside == 2 {
+                output.push(clip_previous);
+            }
+        }
+        if !collect_output && subject_steps >= subject.len() && clip_steps >= clip.len() {
+            break;
+        }
+    }
+
+    if !collect_output {
+        return ConvexWalk {
+            output: Vec::new(),
+            subject_splits,
+            clip_splits,
+            subject_inside,
+            clip_inside,
+            degenerate,
+        };
+    }
+    if output.is_empty() {
+        if convex_contains(subject[0], clip, true) {
+            output.extend_from_slice(subject);
+        } else if convex_contains(clip[0], subject, true) {
+            output.extend_from_slice(clip);
+        } else {
+            return ConvexWalk {
+                output: Vec::new(),
+                subject_splits,
+                clip_splits,
+                subject_inside,
+                clip_inside,
+                degenerate,
+            };
+        }
+    }
+    output.dedup_by(|left, right| *left == *right);
+    if output.len() > 1 && output.first() == output.last() {
+        output.pop();
+    }
+    if output.len() < 3 || area2(&output).abs() <= f64::EPSILON {
+        return ConvexWalk {
+            output: Vec::new(),
+            subject_splits,
+            clip_splits,
+            subject_inside,
+            clip_inside,
+            degenerate,
+        };
+    }
+    canonicalize(&mut output);
+    ConvexWalk {
+        output: vec![output],
+        subject_splits,
+        clip_splits,
+        subject_inside,
+        clip_inside,
+        degenerate,
+    }
+}
+
+fn segment_intersection(
+    first_start: Point,
+    first_end: Point,
+    second_start: Point,
+    second_end: Point,
+) -> Option<(Point, f64, f64)> {
+    let first_vector = subtract(first_end, first_start);
+    let second_vector = subtract(second_end, second_start);
+    let denominator = cross(first_vector, second_vector);
+    if denominator.abs() <= f64::EPSILON {
+        return None;
+    }
+    let between = subtract(second_start, first_start);
+    let first_parameter = cross(between, second_vector) / denominator;
+    let second_parameter = cross(between, first_vector) / denominator;
+    if in_unit_interval(first_parameter) && in_unit_interval(second_parameter) {
+        Some((
+            Point {
+                x: first_start.x + first_vector.x * first_parameter,
+                y: first_start.y + first_vector.y * first_parameter,
+            },
+            first_parameter,
+            second_parameter,
+        ))
+    } else {
+        None
+    }
+}
+
+fn point_bounds(points: &[Point]) -> (f64, f64, f64, f64) {
+    points.iter().fold(
+        (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+        |(min_x, min_y, max_x, max_y), point| {
+            (min_x.min(point.x), min_y.min(point.y), max_x.max(point.x), max_y.max(point.y))
+        },
+    )
+}
+
 fn direct_if_simple_and_disjoint<P: PathSlice>(paths: &[P]) -> Option<PathsD> {
     paths_are_simple_and_disjoint(paths).then(|| direct_paths(paths))
 }
@@ -490,28 +1096,32 @@ fn bbox<P: PathSlice>(paths: &[P]) -> Option<(f64, f64, f64, f64)> {
 }
 
 fn path_edges(path: &[Point]) -> Vec<Edge> {
-    path.iter()
-        .zip(path.iter().cycle().skip(1))
-        .take(path.len())
-        .filter_map(|(start, end)| {
-            let start_key = key(*start)?;
-            let end_key = key(*end)?;
-            (start_key != end_key).then_some(Edge {
-                start: *start,
-                end: *end,
-                start_key,
-                end_key,
-                path_id: 0,
-                subject: false,
-                min_x: start.x.min(end.x),
-                min_y: start.y.min(end.y),
-                max_x: start.x.max(end.x),
-                max_y: start.y.max(end.y),
-                min_x_key: total_order_key(start.x.min(end.x)),
-                max_x_key: total_order_key(start.x.max(end.x)),
-            })
-        })
-        .collect()
+    let mut edges = Vec::with_capacity(path.len());
+    append_path_edges(&mut edges, path, 0, false);
+    edges
+}
+
+fn append_path_edges(edges: &mut Vec<Edge>, path: &[Point], path_id: usize, subject: bool) {
+    path.iter().zip(path.iter().cycle().skip(1)).take(path.len()).for_each(|(start, end)| {
+        if let (Some(start_key), Some(end_key)) = (key(*start), key(*end)) {
+            if start_key != end_key {
+                edges.push(Edge {
+                    start: *start,
+                    end: *end,
+                    start_key,
+                    end_key,
+                    path_id,
+                    subject,
+                    min_x: start.x.min(end.x),
+                    min_y: start.y.min(end.y),
+                    max_x: start.x.max(end.x),
+                    max_y: start.y.max(end.y),
+                    min_x_key: total_order_key(start.x.min(end.x)),
+                    max_x_key: total_order_key(start.x.max(end.x)),
+                });
+            }
+        }
+    });
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
@@ -536,9 +1146,13 @@ fn total_order_key(value: f64) -> u64 {
 fn split_pair(
     first: &Edge,
     second: &Edge,
-    first_values: &mut Vec<f64>,
-    second_values: &mut Vec<f64>,
+    first_values: &mut SplitParameters,
+    second_values: &mut SplitParameters,
+    reject_collinear: bool,
 ) -> bool {
+    if !well_conditioned_pair(first, second) {
+        return false;
+    }
     if boxes_disjoint(first, second) {
         return true;
     }
@@ -546,14 +1160,11 @@ fn split_pair(
     let second_vector = subtract(second.end, second.start);
     let denominator = cross(first_vector, second_vector);
     let between = subtract(second.start, first.start);
-    if denominator != 0.0 {
-        let scale = first_vector.x.abs().max(first_vector.y.abs())
-            * second_vector.x.abs().max(second_vector.y.abs());
-        if denominator.abs() <= PREDICATE_TOLERANCE * scale.max(1.0)
-            && key_cross(first, second) != 0
-        {
-            return false;
-        }
+    if reject_collinear
+        && key_cross(first, second) == 0
+        && cross(between, first_vector).abs() <= f64::EPSILON
+    {
+        return false;
     }
     if (key_cross(first, second) != 0) & (denominator.abs() > f64::EPSILON) {
         let first_t = cross(between, second_vector) / denominator;
@@ -575,6 +1186,21 @@ fn split_pair(
         }
     }
     true
+}
+
+fn well_conditioned_pair(first: &Edge, second: &Edge) -> bool {
+    if boxes_disjoint(first, second) {
+        return true;
+    }
+    let first_vector = subtract(first.end, first.start);
+    let second_vector = subtract(second.end, second.start);
+    let denominator = cross(first_vector, second_vector);
+    if denominator == 0.0 {
+        return true;
+    }
+    let scale = first_vector.x.abs().max(first_vector.y.abs())
+        * second_vector.x.abs().max(second_vector.y.abs());
+    denominator.abs() > PREDICATE_TOLERANCE * scale.max(1.0) || key_cross(first, second) == 0
 }
 
 fn in_unit_interval(value: f64) -> bool {
@@ -697,7 +1323,7 @@ fn is_convex_simple(path: &[Point]) -> bool {
 fn paths_contain_pair(
     left: Point,
     right: Point,
-    paths: &[ContainmentPath],
+    paths: &[ContainmentPath<'_>],
     fill_rule: FillRule,
 ) -> (bool, bool) {
     let mut left_state = WindingState::default();
@@ -749,6 +1375,7 @@ fn update_convex_winding(state: &mut WindingState, point: Point, points: &[Point
     }
 }
 
+#[inline]
 fn convex_contains(point: Point, points: &[Point], positive: bool) -> bool {
     let origin = points[0];
     let target = subtract(point, origin);
@@ -822,14 +1449,14 @@ fn containment_bucket_if_inside(
 }
 
 #[cfg(test)]
-fn containment_paths<P: PathSlice>(paths: &[P]) -> Vec<ContainmentPath> {
+fn containment_paths<P: PathSlice>(paths: &[P]) -> Vec<ContainmentPath<'_>> {
     containment_paths_with_properties(paths, &[])
 }
 
-fn containment_paths_with_properties<P: PathSlice>(
-    paths: &[P],
+fn containment_paths_with_properties<'a, P: PathSlice>(
+    paths: &'a [P],
     properties: &[PathProperties],
-) -> Vec<ContainmentPath> {
+) -> Vec<ContainmentPath<'a>> {
     paths
         .iter()
         .enumerate()
@@ -841,6 +1468,14 @@ fn containment_paths_with_properties<P: PathSlice>(
                     (min_x.min(point.x), min_y.min(point.y), max_x.max(point.x), max_y.max(point.y))
                 },
             );
+            if properties.get(index).is_some_and(|properties| properties.convex) {
+                return ContainmentPath {
+                    bounds,
+                    buckets: Vec::new(),
+                    convex_points: Some(points),
+                    convex_winding: Some(if area2(points) > 0.0 { 1 } else { -1 }),
+                };
+            }
             let edges: Vec<ContainmentEdge> = points
                 .iter()
                 .zip(points.iter().cycle().skip(1))
@@ -857,14 +1492,6 @@ fn containment_paths_with_properties<P: PathSlice>(
                     }
                 })
                 .collect();
-            if properties.get(index).is_some_and(|properties| properties.convex) {
-                return ContainmentPath {
-                    bounds,
-                    buckets: Vec::new(),
-                    convex_points: Some(points.to_vec()),
-                    convex_winding: Some(if area2(points) > 0.0 { 1 } else { -1 }),
-                };
-            }
             let mut buckets = vec![Vec::new(); CONTAINMENT_BUCKETS];
             for edge in edges {
                 let start_y = edge.start.y;
@@ -893,25 +1520,24 @@ fn stitch(edges: &[DirectedEdge]) -> Result<PathsD, Error> {
     if edges.is_empty() {
         return Ok(Vec::new());
     }
-    let mut single_outgoing: FastMap<PointKey, usize> =
+    let mut outgoing: FastMap<PointKey, Outgoing> =
         FastMap::with_capacity_and_hasher(edges.len(), BuildHasherDefault::default());
-    let mut has_branch = false;
     for (index, edge) in edges.iter().enumerate() {
-        if single_outgoing.insert(edge.start_key, index).is_some() {
-            has_branch = true;
+        match outgoing.entry(edge.start_key) {
+            Entry::Vacant(entry) => {
+                entry.insert(Outgoing::Single(index));
+            }
+            Entry::Occupied(mut entry) => match entry.get_mut() {
+                Outgoing::Single(previous) => {
+                    *entry.get_mut() = Outgoing::Multiple(vec![*previous, index]);
+                }
+                Outgoing::Multiple(indices) => indices.push(index),
+            },
         }
     }
     let mut next = vec![0; edges.len()];
-    if has_branch {
-        let mut outgoing: FastMap<PointKey, Vec<usize>> =
-            FastMap::with_capacity_and_hasher(edges.len(), BuildHasherDefault::default());
-        for (index, edge) in edges.iter().enumerate() {
-            outgoing.entry(edge.start_key).or_default().push(index);
-        }
-        for indices in outgoing.values_mut() {
-            if indices.len() < 2 {
-                continue;
-            }
+    for candidates in outgoing.values_mut() {
+        if let Outgoing::Multiple(indices) = candidates {
             let origin_point = edges[*indices.first().ok_or(Error::TopologyFailure)?].start;
             indices.sort_by(|left, right| {
                 compare_angle(
@@ -920,25 +1546,26 @@ fn stitch(edges: &[DirectedEdge]) -> Result<PathsD, Error> {
                 )
             });
         }
-        for (index, edge) in edges.iter().enumerate() {
-            let candidates = outgoing.get(&edge.end_key).ok_or(Error::TopologyFailure)?;
-            if candidates.len() == 1 {
-                next[index] = candidates[0];
-                continue;
+    }
+    for (index, edge) in edges.iter().enumerate() {
+        let Some(candidates) = outgoing.get(&edge.end_key) else {
+            return Err(Error::TopologyFailure);
+        };
+        match candidates {
+            Outgoing::Single(next_index) => next[index] = *next_index,
+            Outgoing::Multiple(candidates) => {
+                let reverse = subtract(edge.start, edge.end);
+                let insertion = candidates
+                    .iter()
+                    .position(|candidate| {
+                        compare_angle(
+                            subtract(edges[*candidate].end, edges[*candidate].start),
+                            reverse,
+                        ) != Ordering::Less
+                    })
+                    .unwrap_or(candidates.len());
+                next[index] = candidates[(insertion + candidates.len() - 1) % candidates.len()];
             }
-            let reverse = subtract(edge.start, edge.end);
-            let insertion = candidates
-                .iter()
-                .position(|candidate| {
-                    compare_angle(subtract(edges[*candidate].end, edges[*candidate].start), reverse)
-                        != Ordering::Less
-                })
-                .unwrap_or(candidates.len());
-            next[index] = candidates[(insertion + candidates.len() - 1) % candidates.len()];
-        }
-    } else {
-        for (index, edge) in edges.iter().enumerate() {
-            next[index] = *single_outgoing.get(&edge.end_key).ok_or(Error::TopologyFailure)?;
         }
     }
     let mut visited = vec![false; edges.len()];
@@ -947,7 +1574,7 @@ fn stitch(edges: &[DirectedEdge]) -> Result<PathsD, Error> {
         if visited[start] {
             continue;
         }
-        let mut path = Vec::new();
+        let mut path = Vec::with_capacity(edges.len());
         let mut current = start;
         loop {
             if visited[current] {
@@ -962,7 +1589,7 @@ fn stitch(edges: &[DirectedEdge]) -> Result<PathsD, Error> {
         }
         if path.len() >= 3 && area2(&path).abs() > f64::EPSILON {
             canonicalize(&mut path);
-            paths.push(path.into_iter().map(|point| PointD::new(point.x, point.y)).collect());
+            paths.push(path);
         }
     }
     paths.sort_by(compare_paths);
@@ -1050,6 +1677,14 @@ mod tests {
         };
         let result = try_boolean_opd(request).expect("high-vertex input is eligible");
         assert!(result.is_ok(), "fast path failed: {result:?}");
+        let xor_result = try_boolean_opd(BooleanRequestD {
+            subjects: &subjects,
+            clips: &clips,
+            clip_type: ClipType::Xor,
+            fill_rule: FillRule::EvenOdd,
+        })
+        .expect("high-vertex xor input is eligible");
+        assert!(xor_result.is_ok(), "fast xor path failed: {xor_result:?}");
     }
 
     fn point(x: f64, y: f64) -> Point {
@@ -1161,40 +1796,57 @@ mod tests {
 
         let crossing_first = edge(point(0.0, 0.0), point(10.0, 10.0));
         let crossing_second = edge(point(0.0, 10.0), point(10.0, 0.0));
-        let mut first_values = vec![0.0, 1.0];
-        let mut second_values = vec![0.0, 1.0];
+        let mut first_values = SplitParameters::new();
+        let mut second_values = SplitParameters::new();
         assert!(split_pair(
             &crossing_first,
             &crossing_second,
             &mut first_values,
-            &mut second_values
+            &mut second_values,
+            false,
         ));
-        assert!(first_values.iter().any(|value| (*value - 0.5).abs() < f64::EPSILON));
-        assert!(second_values.iter().any(|value| (*value - 0.5).abs() < f64::EPSILON));
+        assert!(first_values.values().iter().any(|value| (*value - 0.5).abs() < f64::EPSILON));
+        assert!(second_values.values().iter().any(|value| (*value - 0.5).abs() < f64::EPSILON));
+        let mut disjoint_first = SplitParameters::new();
+        let mut disjoint_second = SplitParameters::new();
         assert!(split_pair(
             &edge(point(0.0, 0.0), point(1.0, 0.0)),
             &edge(point(0.0, 1.0), point(1.0, 1.0)),
-            &mut Vec::new(),
-            &mut Vec::new()
+            &mut disjoint_first,
+            &mut disjoint_second,
+            false,
         ));
-        let mut overlap_first = Vec::new();
-        let mut overlap_second = Vec::new();
+        let mut overlap_first = SplitParameters::new();
+        let mut overlap_second = SplitParameters::new();
         assert!(split_pair(
             &edge(point(0.0, 0.0), point(10.0, 0.0)),
             &edge(point(5.0, 0.0), point(15.0, 0.0)),
             &mut overlap_first,
-            &mut overlap_second
+            &mut overlap_second,
+            false,
         ));
-        assert_eq!(overlap_first.len(), 1);
-        assert_eq!(overlap_second.len(), 1);
-        let mut ill_conditioned_first = Vec::new();
-        let mut ill_conditioned_second = Vec::new();
+        assert_eq!(overlap_first.len(), 3);
+        assert_eq!(overlap_second.len(), 3);
+        let mut ill_conditioned_first = SplitParameters::new();
+        let mut ill_conditioned_second = SplitParameters::new();
         assert!(!split_pair(
             &edge(point(0.0, 0.0), point(1_000_000.0, 1_000_000.0)),
             &edge(point(0.0, 0.0), point(1_000_000.0, 1_000_000.000_000_001)),
             &mut ill_conditioned_first,
-            &mut ill_conditioned_second
+            &mut ill_conditioned_second,
+            false,
         ));
+        let mut inline_values = SplitParameters::new();
+        inline_values.push(0.5);
+        inline_values.sort_dedup();
+        assert_eq!(inline_values.values(), &[0.0, 0.5, 1.0]);
+        let mut overflow_values = SplitParameters::new();
+        overflow_values.push(0.5);
+        overflow_values.push(0.500_000_000_000_001);
+        overflow_values.push(0.25);
+        overflow_values.push(0.75);
+        overflow_values.sort_dedup();
+        assert_eq!(overflow_values.values(), &[0.0, 0.25, 0.5, 0.75, 1.0]);
         assert!(in_unit_interval(-f64::EPSILON));
         assert!(in_unit_interval(1.0 + f64::EPSILON));
         assert!(!in_unit_interval(2.0));
@@ -1394,9 +2046,11 @@ mod tests {
         ]));
         assert!(!is_convex_simple(&concave));
 
-        let containment = containment_paths(&[rectangle.clone()]);
+        let rectangle_paths = [rectangle.clone()];
+        let containment = containment_paths(&rectangle_paths);
+        let convex_rectangle_paths = [rectangle.clone()];
         let convex_containment = containment_paths_with_properties(
-            &[rectangle.clone()],
+            &convex_rectangle_paths,
             &[PathProperties { simple: true, convex: true }],
         );
         assert_eq!(
@@ -1421,8 +2075,10 @@ mod tests {
                 )
             );
         }
+        let clockwise_paths =
+            [vec![point(0.0, 0.0), point(0.0, 10.0), point(10.0, 10.0), point(10.0, 0.0)]];
         let clockwise_containment = containment_paths_with_properties(
-            &[vec![point(0.0, 0.0), point(0.0, 10.0), point(10.0, 10.0), point(10.0, 0.0)]],
+            &clockwise_paths,
             &[PathProperties { simple: true, convex: true }],
         );
         assert_eq!(
@@ -1525,5 +2181,209 @@ mod tests {
         assert_eq!(compare_paths(&path_a, &path_b), Ordering::Less);
         assert_eq!(compare_paths(&path_a, &path_a), Ordering::Equal);
         assert_eq!(maximum_coordinate(&[rectangle], &[]), 10.0);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn covers_convex_walk_and_conservative_fallbacks() {
+        let rectangle =
+            vec![point(0.0, 0.0), point(10.0, 0.0), point(10.0, 10.0), point(0.0, 10.0)];
+        let overlap = vec![point(5.0, -1.0), point(15.0, -1.0), point(15.0, 9.0), point(5.0, 9.0)];
+        let collinear_convex = vec![
+            point(0.0, 0.0),
+            point(5.0, 0.0),
+            point(10.0, 0.0),
+            point(10.0, 10.0),
+            point(0.0, 10.0),
+        ];
+        let concave = vec![
+            point(0.0, 0.0),
+            point(3.0, 0.0),
+            point(1.0, 1.0),
+            point(3.0, 3.0),
+            point(0.0, 3.0),
+        ];
+        assert!(!strict_convex(&rectangle[..2]));
+        assert!(!strict_convex(&collinear_convex));
+        assert!(!strict_convex(&concave));
+
+        let subjects = [collinear_convex.clone()];
+        let clips = [rectangle.clone()];
+        let result = try_boolean_opd(BooleanRequestD {
+            subjects: &subjects,
+            clips: &clips,
+            clip_type: ClipType::Union,
+            fill_rule: FillRule::EvenOdd,
+        })
+        .expect("collinear convex paths remain eligible");
+        assert!(result.is_ok(), "conservative convex fallback failed: {result:?}");
+        let non_convex_subjects = [concave.clone()];
+        assert!(
+            try_single_convex_boolean(BooleanRequestD {
+                subjects: &non_convex_subjects,
+                clips: &clips,
+                clip_type: ClipType::Union,
+                fill_rule: FillRule::EvenOdd,
+            })
+            .is_none()
+        );
+
+        assert!(
+            run(std::slice::from_ref(&rectangle), &[], ClipType::Union, FillRule::Positive).is_ok()
+        );
+        assert!(
+            run(&[], std::slice::from_ref(&rectangle), ClipType::Union, FillRule::Positive).is_ok()
+        );
+        for clip_type in
+            [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor]
+        {
+            assert!(
+                convex_boolean(&rectangle, &overlap, clip_type, Some((false, false))).is_some()
+            );
+        }
+
+        let narrow = vec![
+            point(5.0, -1.0),
+            point(5.000_000_000_1, -1.0),
+            point(5.000_000_000_1, 1.0),
+            point(5.0, 1.0),
+        ];
+        assert!(convex_boolean(&rectangle, &narrow, ClipType::Xor, Some((false, false))).is_none());
+
+        let huge = vec![
+            point(10_000_000_000.0, 0.0),
+            point(10_000_000_010.0, 0.0),
+            point(10_000_000_010.0, 10.0),
+            point(10_000_000_000.0, 10.0),
+        ];
+        let huge_splits = vec![SplitParameters::new(); huge.len()];
+        let rectangle_splits = vec![SplitParameters::new(); rectangle.len()];
+        assert!(
+            convex_boolean_from_splits(
+                &huge,
+                &rectangle,
+                ClipType::Union,
+                huge_splits.clone(),
+                rectangle_splits.clone(),
+                &[],
+                &[],
+            )
+            .is_none()
+        );
+        assert!(
+            convex_boolean_from_splits(
+                &rectangle,
+                &huge,
+                ClipType::Union,
+                rectangle_splits,
+                huge_splits,
+                &[],
+                &[],
+            )
+            .is_none()
+        );
+
+        let tiny = vec![point(0.0, 0.0), point(0.000_000_000_1, 0.0), point(0.0, 1.0)];
+        let tiny_index = ConvexIndex::new(&tiny);
+        let rectangle_index = ConvexIndex::new(&rectangle);
+        let mut tiny_splits = vec![SplitParameters::new(); tiny.len()];
+        let mut tiny_directed = Vec::new();
+        assert!(
+            append_convex_operation_edges(
+                &tiny,
+                &mut tiny_splits,
+                &[],
+                true,
+                ClipType::Union,
+                &tiny_index,
+                &rectangle_index,
+                &mut tiny_directed,
+            )
+            .is_some()
+        );
+
+        let mut bad_edges = Vec::new();
+        append_path_edges(
+            &mut bad_edges,
+            &[point(f64::NAN, 0.0), point(1.0, 0.0), point(0.0, 1.0)],
+            0,
+            false,
+        );
+        assert_eq!(bad_edges.len(), 1);
+
+        let mut collinear_first = SplitParameters::new();
+        let mut collinear_second = SplitParameters::new();
+        assert!(!split_pair(
+            &edge(point(0.0, 0.0), point(10.0, 0.0)),
+            &edge(point(5.0, 0.0), point(15.0, 0.0)),
+            &mut collinear_first,
+            &mut collinear_second,
+            true,
+        ));
+
+        let far_right =
+            vec![point(20.0, 0.0), point(30.0, 0.0), point(30.0, 10.0), point(20.0, 10.0)];
+        let far_left =
+            vec![point(-30.0, 0.0), point(-20.0, 0.0), point(-20.0, 10.0), point(-30.0, 10.0)];
+        let far_above =
+            vec![point(0.0, 20.0), point(10.0, 20.0), point(10.0, 30.0), point(0.0, 30.0)];
+        let far_below =
+            vec![point(0.0, -30.0), point(10.0, -30.0), point(10.0, -20.0), point(0.0, -20.0)];
+        let empty_result: PathsD = Vec::new();
+        for far in [&far_right, &far_left, &far_above, &far_below] {
+            assert!(valid_convex_intersection(&empty_result, &rectangle, far));
+        }
+        let short_result: PathsD = vec![vec![point(0.0, 0.0), point(1.0, 0.0)]];
+        assert!(!valid_convex_intersection(&short_result, &rectangle, &overlap,));
+        let multiple_result: PathsD = vec![rectangle.clone(), overlap.clone()];
+        assert!(!valid_convex_intersection(&multiple_result, &rectangle, &overlap,));
+
+        let contained = vec![point(2.0, 2.0), point(4.0, 2.0), point(4.0, 4.0), point(2.0, 4.0)];
+        let contained_walk = convex_boundary_walk(&contained, &rectangle, true, false);
+        assert_eq!(contained_walk.output.len(), 1);
+        assert_eq!(contained_walk.output[0].len(), contained.len());
+
+        let touching =
+            vec![point(10.0, 0.0), point(20.0, 0.0), point(20.0, 10.0), point(10.0, 10.0)];
+        let touching_walk = convex_boundary_walk(&rectangle, &touching, true, false);
+        assert!(touching_walk.degenerate);
+        assert!(touching_walk.output.is_empty());
+
+        let overlap_walk = convex_boundary_walk(&rectangle, &overlap, true, false);
+        let reversed_overlap_walk = convex_boundary_walk(&overlap, &rectangle, true, false);
+        assert!(!overlap_walk.output.is_empty() || !reversed_overlap_walk.output.is_empty());
+        let rectangle_reversed = rectangle.iter().copied().rev().collect::<Vec<_>>();
+        let overlap_reversed = overlap.iter().copied().rev().collect::<Vec<_>>();
+        for subject in [&rectangle, &rectangle_reversed, &overlap, &overlap_reversed] {
+            for clip in [&rectangle, &rectangle_reversed, &overlap, &overlap_reversed] {
+                if !std::ptr::eq(subject, clip) {
+                    let walk = convex_boundary_walk(subject, clip, true, false);
+                    assert!(walk.output.is_empty() || !walk.output[0].is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn covers_containment_bucket_and_downward_winding_branches() {
+        let rectangle =
+            vec![point(0.0, 0.0), point(10.0, 0.0), point(10.0, 10.0), point(0.0, 10.0)];
+        let containment = containment_paths(std::slice::from_ref(&rectangle));
+        assert_eq!(
+            paths_contain_pair(point(1.0, 1.0), point(1.2, 1.2), &containment, FillRule::EvenOdd),
+            (true, true)
+        );
+
+        let downward = ContainmentEdge {
+            start: point(0.0, 10.0),
+            delta_x: 0.0,
+            delta_y: -10.0,
+            intercept: 0.0,
+            upward: false,
+        };
+        let mut state = WindingState::default();
+        update_winding(&mut state, point(-1.0, 5.0), &downward);
+        assert!(state.parity);
+        assert_eq!(state.winding, -1);
     }
 }
