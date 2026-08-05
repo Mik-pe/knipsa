@@ -4,7 +4,7 @@ This is the reproducible baseline for the versioned 18-case workload.
 
 ## Run metadata
 
-- source commit: `96606be7230b21a637aa4a7a6a2e12474f06dadf`
+- source commit: `4087c8ada34d69ecd250d7944aee0cf218cc8e12`
 - date: 2026-08-05
 - machine: Apple `Mac17,2`, arm64, macOS 26.5, 10 logical CPUs
 - Rust: `rustc 1.96.0`, optimized `cargo bench` profile
@@ -28,28 +28,28 @@ Knipsa latency; values above `1.00x` favor Knipsa.
 
 | Case | Knipsa | GEOS/Shapely | Martinez | GEOS / Knipsa | Martinez / Knipsa |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| overlap-intersection | 9.000 | 39.666 | 31.166 | 4.41x | 3.46x |
-| overlap-union | 9.625 | 38.709 | 36.208 | 4.02x | 3.76x |
-| overlap-difference | 8.458 | 38.792 | 24.916 | 4.59x | 2.95x |
-| overlap-xor | 9.541 | 40.167 | 26.083 | 4.21x | 2.73x |
-| nested-hole | 8.916 | 36.833 | 16.291 | 4.13x | 1.83x |
-| disjoint-union | 1.792 | 31.292 | 2.666 | 17.46x | 1.49x |
-| edge-touch-union | 8.875 | 36.708 | 11.334 | 4.14x | 1.28x |
-| vertex-touch-xor | 7.750 | 36.125 | 7.875 | 4.66x | 1.02x |
-| concave-crossing | 11.917 | 45.208 | 29.292 | 3.79x | 2.46x |
-| fractional-crossing | 7.458 | 39.625 | 23.584 | 5.31x | 3.16x |
-| self-crossing-even-odd | 5.000 | 61.334 | 31.083 | 12.27x | 6.22x |
-| many-horizontal-edges | 12.250 | 40.917 | 56.709 | 3.34x | 4.63x |
-| contained-intersection | 7.125 | 36.125 | 9.500 | 5.07x | 1.33x |
-| contained-xor | 8.042 | 36.417 | 10.625 | 4.53x | 1.32x |
-| repeated-collinear-union | 8.958 | 37.917 | 15.208 | 4.23x | 1.70x |
-| near-touch-union | 1.541 | 31.500 | 1.792 | 20.44x | 1.16x |
-| high-vertex-intersection | 38.542 | 82.667 | 101.250 | 2.14x | 2.63x |
-| high-vertex-xor | 87.791 | 81.375 | 96.000 | 0.93x | 1.09x |
+| overlap-intersection | 3.500 | 43.417 | 61.208 | 12.40x | 17.49x |
+| overlap-union | 3.625 | 40.667 | 68.625 | 11.22x | 18.93x |
+| overlap-difference | 3.167 | 40.125 | 51.750 | 12.67x | 16.34x |
+| overlap-xor | 3.541 | 40.542 | 48.542 | 11.45x | 13.71x |
+| nested-hole | 3.292 | 37.375 | 16.125 | 11.35x | 4.90x |
+| disjoint-union | 0.625 | 31.750 | 4.542 | 50.80x | 7.27x |
+| edge-touch-union | 3.333 | 36.958 | 23.708 | 11.09x | 7.11x |
+| vertex-touch-xor | 2.916 | 36.125 | 16.000 | 12.39x | 5.49x |
+| concave-crossing | 4.583 | 44.958 | 29.917 | 9.81x | 6.53x |
+| fractional-crossing | 3.167 | 39.875 | 48.500 | 12.59x | 15.31x |
+| self-crossing-even-odd | 2.125 | 59.500 | 60.583 | 28.00x | 28.51x |
+| many-horizontal-edges | 5.000 | 41.666 | 28.417 | 8.33x | 5.68x |
+| contained-intersection | 2.917 | 36.875 | 18.625 | 12.64x | 6.38x |
+| contained-xor | 3.292 | 37.041 | 20.041 | 11.25x | 6.09x |
+| repeated-collinear-union | 4.041 | 38.167 | 27.625 | 9.44x | 6.84x |
+| near-touch-union | 0.667 | 32.000 | 1.792 | 47.98x | 2.69x |
+| high-vertex-intersection | 30.666 | 82.375 | 92.125 | 2.69x | 3.00x |
+| high-vertex-xor | 38.542 | 82.833 | 117.750 | 2.15x | 3.06x |
 
-Knipsa was faster in 17/18 cases against GEOS/Shapely and 18/18 against
-Martinez. The high-vertex XOR case is the current optimization target: it is
-slightly slower than the GEOS adapter and only narrowly ahead of Martinez.
+Knipsa was faster in all 18/18 cases against both GEOS/Shapely and Martinez.
+The geometric-mean reference/Knipsa ratios are 11.71x for GEOS/Shapely and
+7.78x for Martinez.
 
 ## Native Clipper2 comparison
 
@@ -61,30 +61,29 @@ ratio above `1.00x` in the last column favors Clipper2.
 
 | Case | Knipsa | Clipper2 native | Clipper2 / Knipsa |
 | --- | ---: | ---: | ---: |
-| overlap-intersection | 10.542 | 2.750 | 0.26x |
-| overlap-union | 11.292 | 2.667 | 0.24x |
-| overlap-difference | 9.958 | 1.958 | 0.20x |
-| overlap-xor | 11.042 | 2.666 | 0.24x |
-| nested-hole | 10.375 | 2.333 | 0.22x |
-| disjoint-union | 2.125 | 2.334 | 1.10x |
-| edge-touch-union | 10.292 | 2.334 | 0.23x |
-| vertex-touch-xor | 9.125 | 2.083 | 0.23x |
-| concave-crossing | 13.959 | 2.792 | 0.20x |
-| fractional-crossing | 10.000 | 2.000 | 0.20x |
-| self-crossing-even-odd | 6.667 | 1.666 | 0.25x |
-| many-horizontal-edges | 15.584 | 3.250 | 0.21x |
-| contained-intersection | 9.084 | 1.792 | 0.20x |
-| contained-xor | 9.042 | 2.292 | 0.25x |
-| repeated-collinear-union | 10.250 | 2.375 | 0.23x |
-| near-touch-union | 1.833 | 2.334 | 1.27x |
-| high-vertex-intersection | 79.625 | 7.042 | 0.09x |
-| high-vertex-xor | 97.125 | 11.000 | 0.11x |
+| overlap-intersection | 3.500 | 3.000 | 0.86x |
+| overlap-union | 3.625 | 2.958 | 0.82x |
+| overlap-difference | 3.167 | 2.208 | 0.70x |
+| overlap-xor | 3.541 | 2.917 | 0.82x |
+| nested-hole | 3.292 | 2.584 | 0.78x |
+| disjoint-union | 0.625 | 2.625 | 4.20x |
+| edge-touch-union | 3.333 | 2.625 | 0.79x |
+| vertex-touch-xor | 2.916 | 2.333 | 0.80x |
+| concave-crossing | 4.583 | 3.208 | 0.70x |
+| fractional-crossing | 3.167 | 2.250 | 0.71x |
+| self-crossing-even-odd | 2.125 | 1.875 | 0.88x |
+| many-horizontal-edges | 5.000 | 3.625 | 0.72x |
+| contained-intersection | 2.917 | 2.042 | 0.70x |
+| contained-xor | 3.292 | 2.583 | 0.78x |
+| repeated-collinear-union | 4.041 | 2.750 | 0.68x |
+| near-touch-union | 0.667 | 2.625 | 3.94x |
+| high-vertex-intersection | 30.666 | 8.959 | 0.29x |
+| high-vertex-xor | 38.542 | 13.625 | 0.35x |
 
-Across this small workload, Clipper2 is about 4.05x faster geometrically on
-the geometric mean and 4.40x faster at the median case. Knipsa still matches
-all 18 filled-region signatures; the current performance gap is concentrated
-in arrangement construction and high-vertex cases rather than a semantic
-mismatch.
+Across this small workload, Clipper2 is about 1.20x faster than Knipsa on the
+geometric mean and about 1.27x faster at the median ratio. Knipsa wins 2/18
+cases. It still matches all 18 filled-region signatures; the remaining gap is
+small on this workload and is concentrated in arrangement construction.
 
 ## Reproduce
 
