@@ -349,21 +349,30 @@ fn run<P: PathSlice>(
     clip_type: ClipType,
     fill_rule: FillRule,
 ) -> Result<PathsD, Error> {
-    if let Some(result) = short_circuit(subjects, clips, clip_type, fill_rule) {
+    if let Some(result) = trivial_short_circuit(subjects, clips, clip_type) {
+        return Ok(result);
+    }
+    let path_properties =
+        subjects.iter().chain(clips).map(|path| classify_path(path.points())).collect::<Vec<_>>();
+    if let Some(result) = short_circuit_with_properties(
+        subjects,
+        clips,
+        clip_type,
+        fill_rule,
+        &path_properties[..subjects.len()],
+        &path_properties[subjects.len()..],
+    ) {
         return Ok(result);
     }
     let edge_capacity = subjects.iter().chain(clips).map(|path| path.points().len()).sum();
     let mut edges = Vec::with_capacity(edge_capacity);
-    let mut path_properties = Vec::with_capacity(subjects.len() + clips.len());
     for (path_id, path) in subjects.iter().enumerate() {
         let points = path.points();
-        path_properties.push(classify_path(points));
         append_path_edges(&mut edges, points, path_id, true);
     }
     for (clip_index, path) in clips.iter().enumerate() {
         let path_id = subjects.len() + clip_index;
         let points = path.points();
-        path_properties.push(classify_path(points));
         if path_properties[path_id].convex
             && subjects.len() == 1
             && clips.len() == 1
@@ -521,30 +530,72 @@ fn classify_path(path: &[Point]) -> PathProperties {
     PathProperties { simple: true, convex: false }
 }
 
+#[cfg(test)]
 fn short_circuit<P: PathSlice>(
     subjects: &[P],
     clips: &[P],
     clip_type: ClipType,
     fill_rule: FillRule,
 ) -> Option<PathsD> {
-    if !matches!(fill_rule, FillRule::EvenOdd | FillRule::NonZero) {
-        return None;
+    if let Some(result) = trivial_short_circuit(subjects, clips, clip_type) {
+        return Some(result);
     }
+    let properties =
+        subjects.iter().chain(clips).map(|path| classify_path(path.points())).collect::<Vec<_>>();
+    short_circuit_with_properties(
+        subjects,
+        clips,
+        clip_type,
+        fill_rule,
+        &properties[..subjects.len()],
+        &properties[subjects.len()..],
+    )
+}
+
+fn trivial_short_circuit<P: PathSlice>(
+    subjects: &[P],
+    clips: &[P],
+    clip_type: ClipType,
+) -> Option<PathsD> {
     if subjects.is_empty() && clips.is_empty() {
         return Some(Vec::new());
     }
+    if clips.is_empty() && clip_type == ClipType::Intersection {
+        return Some(Vec::new());
+    }
+    if subjects.is_empty() && matches!(clip_type, ClipType::Intersection | ClipType::Difference) {
+        return Some(Vec::new());
+    }
+    None
+}
+
+fn short_circuit_with_properties<P: PathSlice>(
+    subjects: &[P],
+    clips: &[P],
+    clip_type: ClipType,
+    fill_rule: FillRule,
+    subject_properties: &[PathProperties],
+    clip_properties: &[PathProperties],
+) -> Option<PathsD> {
+    if !matches!(fill_rule, FillRule::EvenOdd | FillRule::NonZero) {
+        return None;
+    }
     if clips.is_empty() {
         return match clip_type {
-            ClipType::Intersection => Some(Vec::new()),
+            ClipType::Intersection => unreachable!("handled by trivial short circuit"),
             ClipType::Difference | ClipType::Union | ClipType::Xor => {
-                direct_if_simple_and_disjoint(subjects)
+                direct_if_simple_and_disjoint_with_properties(subjects, subject_properties)
             }
         };
     }
     if subjects.is_empty() {
         return match clip_type {
-            ClipType::Intersection | ClipType::Difference => Some(Vec::new()),
-            ClipType::Union | ClipType::Xor => direct_if_simple_and_disjoint(clips),
+            ClipType::Intersection | ClipType::Difference => {
+                unreachable!("handled by trivial short circuit")
+            }
+            ClipType::Union | ClipType::Xor => {
+                direct_if_simple_and_disjoint_with_properties(clips, clip_properties)
+            }
         };
     }
     let subjects_box = bbox(subjects)?;
@@ -554,7 +605,9 @@ fn short_circuit<P: PathSlice>(
         || subjects_box.3 < clips_box.1
         || clips_box.3 < subjects_box.1
     {
-        if !paths_are_simple_and_disjoint(subjects) || !paths_are_simple_and_disjoint(clips) {
+        if !paths_are_simple_and_disjoint_with_properties(subjects, subject_properties)
+            || !paths_are_simple_and_disjoint_with_properties(clips, clip_properties)
+        {
             return None;
         }
         let mut result = direct_paths(subjects);
@@ -1090,8 +1143,17 @@ fn point_bounds(points: &[Point]) -> (f64, f64, f64, f64) {
     )
 }
 
+#[cfg(test)]
 fn direct_if_simple_and_disjoint<P: PathSlice>(paths: &[P]) -> Option<PathsD> {
-    paths_are_simple_and_disjoint(paths).then(|| direct_paths(paths))
+    let properties = paths.iter().map(|path| classify_path(path.points())).collect::<Vec<_>>();
+    direct_if_simple_and_disjoint_with_properties(paths, &properties)
+}
+
+fn direct_if_simple_and_disjoint_with_properties<P: PathSlice>(
+    paths: &[P],
+    properties: &[PathProperties],
+) -> Option<PathsD> {
+    paths_are_simple_and_disjoint_with_properties(paths, properties).then(|| direct_paths(paths))
 }
 
 fn direct_paths<P: PathSlice>(paths: &[P]) -> PathsD {
@@ -1111,24 +1173,34 @@ fn direct_paths<P: PathSlice>(paths: &[P]) -> PathsD {
 }
 
 #[rustfmt::skip]
+#[cfg(test)]
 fn paths_are_simple_and_disjoint<P: PathSlice>(paths: &[P]) -> bool {
+    let properties = paths.iter().map(|path| classify_path(path.points())).collect::<Vec<_>>();
+    paths_are_simple_and_disjoint_with_properties(paths, &properties)
+}
+
+fn paths_are_simple_and_disjoint_with_properties<P: PathSlice>(
+    paths: &[P],
+    properties: &[PathProperties],
+) -> bool {
+    if paths.len() != properties.len() {
+        return false;
+    }
     for (index, path) in paths.iter().enumerate() {
         let points = path.points();
-        if !is_convex_simple(points) {
-            let edges = path_edges(points);
-            for (first, edge) in edges.iter().enumerate() {
-                for (other_index, other) in edges.iter().enumerate().skip(first + 1) {
-                    if other_index == first + 1 || (first == 0 && other_index + 1 == edges.len()) {
-                        continue;
-                    }
-                    if edges_intersect(edge, other) { return false; }
-                }
-            }
+        if !points.is_empty() && !properties[index].simple {
+            return false;
         }
         let Some(path_box) = bbox(std::slice::from_ref(path)) else { continue };
         for other in paths.iter().skip(index + 1) {
             let Some(other_box) = bbox(std::slice::from_ref(other)) else { continue };
-            if !(path_box.2 < other_box.0 || other_box.2 < path_box.0 || path_box.3 < other_box.1 || other_box.3 < path_box.1) { return false; }
+            if !(path_box.2 < other_box.0
+                || other_box.2 < path_box.0
+                || path_box.3 < other_box.1
+                || other_box.3 < path_box.1)
+            {
+                return false;
+            }
         }
     }
     true
