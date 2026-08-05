@@ -13,9 +13,11 @@ mod triangulation;
 
 pub use error::Error;
 pub use geometry::{
-    Orientation, Path64, PathD, Paths64, PathsD, Point64, PointD, PointLocation, normalize_path64,
-    normalize_pathd, orientation, point_in_polygon, signed_area2, validate_path64, validate_pathd,
-    validate_paths_d, validate_paths64,
+    Orientation, Path64, PathD, Paths64, PathsD, Point64, PointD, PointLocation, Rect64, RectD,
+    clip_to_rect_d, clip_to_rect64, normalize_path64, normalize_pathd, orientation,
+    point_in_polygon, reverse_path_d, reverse_path64, signed_area2, simplify_paths_d,
+    simplify_paths64, translate_path_d, translate_path64, trim_collinear_d, trim_collinear64,
+    validate_path64, validate_pathd, validate_paths_d, validate_paths64,
 };
 pub use offset::{EndType, JoinType, OffsetOptions, offset_paths, offset_paths_d, offset_paths64};
 pub use request::{

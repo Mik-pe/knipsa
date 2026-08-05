@@ -69,6 +69,12 @@ A reference disagreement is recorded as a semantic split with the exact
 versions, inputs, and outputs. We do not choose a majority result and call the
 case passed.
 
+The checked-in `benchmarks/workloads.json` is currently the shared floating
+point smoke corpus. It is useful for the common overlay path, but it is not the
+complete integer, fill-rule, open-path, offset, or triangulation matrix. Those
+profiles must be added and run separately before claiming Clipper2 feature
+conformance.
+
 ## Provenance
 
 Each case records:

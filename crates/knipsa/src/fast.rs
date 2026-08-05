@@ -235,15 +235,40 @@ impl ConvexIndex<'_> {
 }
 
 pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<PathsD, ()>> {
+    if !fast_pair_is_provably_safe(&request) {
+        return None;
+    }
     if let Some(result) = try_single_convex_boolean(request) {
         return Some(result.map_err(|_| ()));
     }
     let subjects = fast_paths(request.subjects)?;
     let clips = fast_paths(request.clips)?;
-    if !eligible(&subjects, &clips) {
-        return None;
-    }
     Some(run(&subjects, &clips, request.clip_type, request.fill_rule).map_err(|_| ()))
+}
+
+/// The public fast path is intentionally narrower than the internal sweep
+/// helpers. Shared collinear edges and non-convex rings need the exact
+/// arrangement until their specialized topology rules have a complete oracle
+/// gate. This keeps a fast result from silently replacing a correct one.
+fn fast_pair_is_provably_safe(request: &BooleanRequestD<'_>) -> bool {
+    if request.subjects.len() != 1 || request.clips.len() != 1 {
+        return false;
+    }
+    let subject = request.subjects[0].as_slice();
+    let clip = request.clips[0].as_slice();
+    strict_convex(subject) && strict_convex(clip) && !has_collinear_contact(subject, clip)
+}
+
+fn has_collinear_contact(first: &[Point], second: &[Point]) -> bool {
+    first.iter().zip(first.iter().cycle().skip(1)).take(first.len()).any(
+        |(first_start, first_end)| {
+            second.iter().zip(second.iter().cycle().skip(1)).take(second.len()).any(
+                |(second_start, second_end)| {
+                    collinear_edges_overlap(*first_start, *first_end, *second_start, *second_end)
+                },
+            )
+        },
+    )
 }
 
 fn try_single_convex_boolean(request: BooleanRequestD<'_>) -> Option<Result<PathsD, Error>> {
@@ -262,6 +287,9 @@ fn try_single_convex_boolean(request: BooleanRequestD<'_>) -> Option<Result<Path
             || !fill_rule_accepts_ring(clip, request.fill_rule)
         {
             return None;
+        }
+        if request.clip_type == ClipType::Intersection {
+            return Some(Ok(convex_intersection(subject, clip)));
         }
         return convex_boolean(subject, clip, request.clip_type, Some((true, true))).map(Ok);
     }
@@ -655,6 +683,10 @@ fn convex_boolean(
     {
         return Some(walk.output.clone());
     }
+    // The linear split hints are not yet safe for every convex topology
+    // (notably axis-aligned overlap and shared-edge cases). Keep the full
+    // split predicate as the conservative path until those hints are
+    // validated against the exact oracle.
     let use_linear_splits = linear_walk.as_ref().is_some_and(|walk| !walk.degenerate);
     if use_linear_splits {
         let ConvexWalk { subject_splits, clip_splits, subject_inside, clip_inside, .. } =
@@ -724,6 +756,88 @@ fn convex_boolean(
         }
     }
     stitch(&directed).ok()
+}
+
+/// Clips one strictly convex ring against the other using a linear
+/// half-plane walk. The public fast-path gate excludes collinear contacts, so
+/// every transition has a well-conditioned line intersection and the exact
+/// arrangement remains available for all ambiguous cases.
+fn convex_intersection(subject: &[Point], clip: &[Point]) -> PathsD {
+    let clip_positive = area2(clip) > 0.0;
+    let mut output = subject.to_vec();
+    for (clip_start, clip_end) in
+        clip.iter().copied().zip(clip.iter().copied().cycle().skip(1)).take(clip.len())
+    {
+        if output.is_empty() {
+            break;
+        }
+        let input = std::mem::take(&mut output);
+        let mut previous = *input.last().expect("non-empty clipping input");
+        let mut previous_inside = inside_half_plane(previous, clip_start, clip_end, clip_positive);
+        for current in input {
+            let current_inside = inside_half_plane(current, clip_start, clip_end, clip_positive);
+            match (previous_inside, current_inside) {
+                (true, true) => output.push(current),
+                (true, false) => {
+                    if let Some(intersection) =
+                        line_intersection(previous, current, clip_start, clip_end)
+                    {
+                        output.push(intersection);
+                    }
+                }
+                (false, true) => {
+                    if let Some(intersection) =
+                        line_intersection(previous, current, clip_start, clip_end)
+                    {
+                        output.push(intersection);
+                    }
+                    output.push(current);
+                }
+                (false, false) => {}
+            }
+            previous = current;
+            previous_inside = current_inside;
+        }
+        dedup_consecutive(&mut output);
+    }
+    dedup_consecutive(&mut output);
+    if output.len() < 3 || area2(&output).abs() <= f64::EPSILON {
+        return Vec::new();
+    }
+    canonicalize(&mut output);
+    vec![output]
+}
+
+#[inline]
+fn inside_half_plane(point: Point, start: Point, end: Point, positive: bool) -> bool {
+    let side = cross(subtract(end, start), subtract(point, start));
+    if positive { side >= -PREDICATE_TOLERANCE } else { side <= PREDICATE_TOLERANCE }
+}
+
+fn line_intersection(
+    first_start: Point,
+    first_end: Point,
+    second_start: Point,
+    second_end: Point,
+) -> Option<Point> {
+    let first_vector = subtract(first_end, first_start);
+    let second_vector = subtract(second_end, second_start);
+    let denominator = cross(first_vector, second_vector);
+    if denominator.abs() <= f64::EPSILON {
+        return None;
+    }
+    let parameter = cross(subtract(second_start, first_start), second_vector) / denominator;
+    Some(Point {
+        x: first_start.x + first_vector.x * parameter,
+        y: first_start.y + first_vector.y * parameter,
+    })
+}
+
+fn dedup_consecutive(points: &mut Vec<Point>) {
+    points.dedup_by(|left, right| *left == *right);
+    if points.len() > 1 && points.first() == points.last() {
+        points.pop();
+    }
 }
 
 fn convex_boolean_from_splits(
@@ -2530,14 +2644,15 @@ mod tests {
 
         let subjects = [collinear_convex.clone()];
         let clips = [rectangle.clone()];
-        let result = try_boolean_opd(BooleanRequestD {
-            subjects: &subjects,
-            clips: &clips,
-            clip_type: ClipType::Union,
-            fill_rule: FillRule::EvenOdd,
-        })
-        .expect("collinear convex paths remain eligible");
-        assert!(result.is_ok(), "conservative convex fallback failed: {result:?}");
+        assert!(
+            try_boolean_opd(BooleanRequestD {
+                subjects: &subjects,
+                clips: &clips,
+                clip_type: ClipType::Union,
+                fill_rule: FillRule::EvenOdd,
+            })
+            .is_none()
+        );
         let non_convex_subjects = [concave.clone()];
         assert!(
             try_single_convex_boolean(BooleanRequestD {

@@ -3,7 +3,9 @@
 use core::cmp::Ordering;
 use num_bigint::BigInt;
 
-use crate::{Error, PathKind};
+use crate::{
+    BooleanRequest, BooleanRequestD, ClipType, Error, FillRule, PathKind, boolean_op, boolean_opd,
+};
 
 /// An integer point used by the exact-coordinate API.
 ///
@@ -90,6 +92,80 @@ pub enum PointLocation {
     Inside,
     /// The point lies on the path boundary.
     Boundary,
+}
+
+/// An axis-aligned integer rectangle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(C)]
+pub struct Rect64 {
+    /// Inclusive lower horizontal bound.
+    pub min_x: i64,
+    /// Inclusive lower vertical bound.
+    pub min_y: i64,
+    /// Inclusive upper horizontal bound.
+    pub max_x: i64,
+    /// Inclusive upper vertical bound.
+    pub max_y: i64,
+}
+
+impl Rect64 {
+    /// Creates a rectangle from two opposite corners.
+    ///
+    /// The bounds are normalized, so the corner order does not matter.
+    #[must_use]
+    pub const fn new(first_x: i64, first_y: i64, second_x: i64, second_y: i64) -> Self {
+        let (min_x, max_x) =
+            if first_x <= second_x { (first_x, second_x) } else { (second_x, first_x) };
+        let (min_y, max_y) =
+            if first_y <= second_y { (first_y, second_y) } else { (second_y, first_y) };
+        Self { min_x, min_y, max_x, max_y }
+    }
+
+    fn path(self) -> Path64 {
+        vec![
+            Point64::new(self.min_x, self.min_y),
+            Point64::new(self.max_x, self.min_y),
+            Point64::new(self.max_x, self.max_y),
+            Point64::new(self.min_x, self.max_y),
+        ]
+    }
+}
+
+/// An axis-aligned floating-point rectangle.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
+pub struct RectD {
+    /// Inclusive lower horizontal bound.
+    pub min_x: f64,
+    /// Inclusive lower vertical bound.
+    pub min_y: f64,
+    /// Inclusive upper horizontal bound.
+    pub max_x: f64,
+    /// Inclusive upper vertical bound.
+    pub max_y: f64,
+}
+
+impl RectD {
+    /// Creates a rectangle from two opposite corners.
+    ///
+    /// The bounds are normalized, so the corner order does not matter.
+    #[must_use]
+    pub const fn new(first_x: f64, first_y: f64, second_x: f64, second_y: f64) -> Self {
+        let (min_x, max_x) =
+            if first_x <= second_x { (first_x, second_x) } else { (second_x, first_x) };
+        let (min_y, max_y) =
+            if first_y <= second_y { (first_y, second_y) } else { (second_y, first_y) };
+        Self { min_x, min_y, max_x, max_y }
+    }
+
+    fn path(self) -> PathD {
+        vec![
+            PointD::new(self.min_x, self.min_y),
+            PointD::new(self.max_x, self.min_y),
+            PointD::new(self.max_x, self.max_y),
+            PointD::new(self.min_x, self.max_y),
+        ]
+    }
 }
 
 /// Validates an integer path's shape contract and coordinate type.
@@ -279,6 +355,248 @@ pub fn point_in_polygon(point: Point64, path: &[Point64]) -> Result<PointLocatio
         }
     }
     Ok(if inside { PointLocation::Inside } else { PointLocation::Outside })
+}
+
+/// Returns a reversed copy of an integer path.
+#[must_use]
+pub fn reverse_path64(path: &[Point64]) -> Path64 {
+    path.iter().copied().rev().collect()
+}
+
+/// Returns a reversed copy of a floating-point path.
+#[must_use]
+pub fn reverse_path_d(path: &[PointD]) -> PathD {
+    path.iter().copied().rev().collect()
+}
+
+/// Translates an integer path with checked coordinate arithmetic.
+///
+/// # Errors
+///
+/// Returns [`Error::ArithmeticOverflow`] if any translated coordinate does not
+/// fit in `i64`.
+pub fn translate_path64(path: &[Point64], dx: i64, dy: i64) -> Result<Path64, Error> {
+    path.iter()
+        .map(|point| {
+            Ok(Point64::new(
+                point.x.checked_add(dx).ok_or(Error::ArithmeticOverflow)?,
+                point.y.checked_add(dy).ok_or(Error::ArithmeticOverflow)?,
+            ))
+        })
+        .collect()
+}
+
+/// Translates a floating-point path.
+///
+/// # Errors
+///
+/// Returns [`Error::NonFiniteCoordinate`] when an input or translated
+/// coordinate is not finite.
+pub fn translate_path_d(path: &[PointD], dx: f64, dy: f64) -> Result<PathD, Error> {
+    if !dx.is_finite() || !dy.is_finite() {
+        return Err(Error::NonFiniteCoordinate { point_index: 0 });
+    }
+    path.iter()
+        .enumerate()
+        .map(|(point_index, point)| {
+            let translated = PointD::new(point.x + dx, point.y + dy);
+            if point.x.is_finite()
+                && point.y.is_finite()
+                && translated.x.is_finite()
+                && translated.y.is_finite()
+            {
+                Ok(translated)
+            } else {
+                Err(Error::NonFiniteCoordinate { point_index })
+            }
+        })
+        .collect()
+}
+
+/// Removes redundant collinear vertices from an integer path.
+///
+/// Consecutive duplicates and a repeated closing point are removed first. For
+/// closed paths the first and last vertices are treated as adjacent; for open
+/// paths the two endpoints are preserved.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPath`] for a non-empty path shorter than the
+/// minimum for `kind`, or [`Error::ArithmeticOverflow`] for a checked cross or
+/// dot product that does not fit in `i128`.
+pub fn trim_collinear64(path: &[Point64], kind: PathKind) -> Result<Path64, Error> {
+    validate_path64(path, kind)?;
+    let mut points = normalize_path64(path, kind);
+    loop {
+        if points.len() < 3 {
+            return Ok(points);
+        }
+        let mut changed = false;
+        let mut cleaned = Vec::with_capacity(points.len());
+        for index in 0..points.len() {
+            let removable = match kind {
+                PathKind::Closed => {
+                    let previous = points[(index + points.len() - 1) % points.len()];
+                    let current = points[index];
+                    let next = points[(index + 1) % points.len()];
+                    collinear_between64(previous, current, next)?
+                }
+                PathKind::Open if index > 0 && index + 1 < points.len() => {
+                    collinear_between64(points[index - 1], points[index], points[index + 1])?
+                }
+                PathKind::Open => false,
+            };
+            if removable {
+                changed = true;
+            } else {
+                cleaned.push(points[index]);
+            }
+        }
+        points = cleaned;
+        if !changed {
+            return Ok(points);
+        }
+    }
+}
+
+/// Removes redundant collinear vertices from a floating-point path.
+///
+/// The test is exact in the input `f64` values; nearly-collinear vertices are
+/// retained rather than silently changing the shape.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidPath`] or [`Error::NonFiniteCoordinate`] when the
+/// input violates the selected path contract.
+pub fn trim_collinear_d(path: &[PointD], kind: PathKind) -> Result<PathD, Error> {
+    validate_pathd(path, kind)?;
+    let mut points = normalize_pathd(path, kind);
+    loop {
+        if points.len() < 3 {
+            return Ok(points);
+        }
+        let mut changed = false;
+        let mut cleaned = Vec::with_capacity(points.len());
+        for index in 0..points.len() {
+            let removable = match kind {
+                PathKind::Closed => {
+                    let previous = points[(index + points.len() - 1) % points.len()];
+                    let current = points[index];
+                    let next = points[(index + 1) % points.len()];
+                    collinear_between_d(previous, current, next)
+                }
+                PathKind::Open if index > 0 && index + 1 < points.len() => {
+                    collinear_between_d(points[index - 1], points[index], points[index + 1])
+                }
+                PathKind::Open => false,
+            };
+            if removable {
+                changed = true;
+            } else {
+                cleaned.push(points[index]);
+            }
+        }
+        points = cleaned;
+        if !changed {
+            return Ok(points);
+        }
+    }
+}
+
+/// Simplifies integer paths by applying a union with the selected fill rule.
+///
+/// This resolves self-intersections and removes internal boundaries. Use
+/// [`trim_collinear64`] instead when only vertex cleanup is desired.
+///
+/// # Errors
+///
+/// Returns the same validation, arithmetic, and topology errors as
+/// [`crate::boolean_op`].
+pub fn simplify_paths64(paths: &[Path64], fill_rule: FillRule) -> Result<Paths64, Error> {
+    boolean_op(BooleanRequest::new(paths, &[], ClipType::Union, fill_rule))
+}
+
+/// Simplifies floating-point paths by applying a union with the selected fill
+/// rule.
+///
+/// # Errors
+///
+/// Returns the same validation, non-finite-coordinate, and topology errors as
+/// [`crate::boolean_opd`].
+pub fn simplify_paths_d(paths: &[PathD], fill_rule: FillRule) -> Result<PathsD, Error> {
+    boolean_opd(BooleanRequestD::new(paths, &[], ClipType::Union, fill_rule))
+}
+
+/// Clips integer paths to an axis-aligned rectangle.
+///
+/// # Errors
+///
+/// Returns the same validation, arithmetic, and topology errors as
+/// [`crate::boolean_op`].
+pub fn clip_to_rect64(
+    paths: &[Path64],
+    rectangle: Rect64,
+    fill_rule: FillRule,
+) -> Result<Paths64, Error> {
+    let clip = rectangle.path();
+    boolean_op(BooleanRequest::new(
+        paths,
+        std::slice::from_ref(&clip),
+        ClipType::Intersection,
+        fill_rule,
+    ))
+}
+
+/// Clips floating-point paths to an axis-aligned rectangle.
+///
+/// # Errors
+///
+/// Returns [`Error::NonFiniteCoordinate`] when any rectangle bound is not
+/// finite, in addition to the usual boolean-operation errors.
+pub fn clip_to_rect_d(
+    paths: &[PathD],
+    rectangle: RectD,
+    fill_rule: FillRule,
+) -> Result<PathsD, Error> {
+    if !rectangle.min_x.is_finite()
+        || !rectangle.min_y.is_finite()
+        || !rectangle.max_x.is_finite()
+        || !rectangle.max_y.is_finite()
+    {
+        return Err(Error::NonFiniteCoordinate { point_index: 0 });
+    }
+    let clip = rectangle.path();
+    boolean_opd(BooleanRequestD::new(
+        paths,
+        std::slice::from_ref(&clip),
+        ClipType::Intersection,
+        fill_rule,
+    ))
+}
+
+fn collinear_between64(previous: Point64, current: Point64, next: Point64) -> Result<bool, Error> {
+    if checked_cross(previous, current, next)? != 0 {
+        return Ok(false);
+    }
+    let first_x = i128::from(current.x) - i128::from(previous.x);
+    let first_y = i128::from(current.y) - i128::from(previous.y);
+    let second_x = i128::from(next.x) - i128::from(current.x);
+    let second_y = i128::from(next.y) - i128::from(current.y);
+    let dot = first_x
+        .checked_mul(second_x)
+        .and_then(|left| first_y.checked_mul(second_y).and_then(|right| left.checked_add(right)))
+        .ok_or(Error::ArithmeticOverflow)?;
+    Ok(dot >= 0)
+}
+
+fn collinear_between_d(previous: PointD, current: PointD, next: PointD) -> bool {
+    let first_x = current.x - previous.x;
+    let first_y = current.y - previous.y;
+    let second_x = next.x - current.x;
+    let second_y = next.y - current.y;
+    let cross = first_x * second_y - first_y * second_x;
+    let dot = first_x * second_x + first_y * second_y;
+    cross == 0.0 && dot >= 0.0
 }
 
 fn checked_cross(a: Point64, b: Point64, c: Point64) -> Result<i128, Error> {
@@ -479,5 +797,111 @@ mod tests {
             point_in_polygon(Point64::new(i64::MIN, 0), &extreme),
             Ok(PointLocation::Boundary)
         );
+    }
+
+    #[test]
+    fn transforms_and_trims_paths() {
+        let square = vec![A, B, C, Point64::new(0, 10)];
+        let with_collinear = vec![A, Point64::new(5, 0), B, C, Point64::new(0, 10), A];
+        assert_eq!(trim_collinear64(&with_collinear, PathKind::Closed), Ok(square.clone()));
+        assert_eq!(
+            trim_collinear64(&[A, Point64::new(5, 0), B, C], PathKind::Open,),
+            Ok(vec![A, B, C])
+        );
+        assert_eq!(reverse_path64(&square), vec![Point64::new(0, 10), C, B, A]);
+        assert_eq!(
+            translate_path64(&square, 5, -2),
+            Ok(vec![
+                Point64::new(5, -2),
+                Point64::new(15, -2),
+                Point64::new(15, 8),
+                Point64::new(5, 8),
+            ])
+        );
+        assert_eq!(
+            translate_path64(&[Point64::new(i64::MAX, 0)], 1, 0),
+            Err(Error::ArithmeticOverflow)
+        );
+
+        let double_path = vec![
+            PointD::new(0.0, 0.0),
+            PointD::new(10.0, 0.0),
+            PointD::new(10.0, 10.0),
+            PointD::new(0.0, 10.0),
+        ];
+        assert_eq!(
+            reverse_path_d(&double_path),
+            double_path.iter().copied().rev().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            trim_collinear_d(
+                &[
+                    PointD::new(0.0, 0.0),
+                    PointD::new(5.0, 0.0),
+                    PointD::new(10.0, 0.0),
+                    PointD::new(10.0, 10.0),
+                ],
+                PathKind::Open,
+            )
+            .unwrap()
+            .len(),
+            3
+        );
+        assert_eq!(
+            translate_path_d(&[PointD::new(1.0, 2.0)], 3.0, -1.0),
+            Ok(vec![PointD::new(4.0, 1.0)])
+        );
+        assert!(translate_path_d(&[PointD::new(1.0, 2.0)], f64::INFINITY, 0.0).is_err());
+    }
+
+    #[test]
+    fn simplifies_and_clips_to_rectangles() {
+        let bow_tie = vec![
+            Point64::new(0, 0),
+            Point64::new(20, 20),
+            Point64::new(0, 20),
+            Point64::new(20, 0),
+        ];
+        let simplified = simplify_paths64(&[bow_tie], FillRule::EvenOdd).unwrap();
+        assert_eq!(simplified.len(), 2);
+        assert_eq!(
+            simplified.iter().map(|path| signed_area2(path).unwrap().abs()).sum::<i128>(),
+            400
+        );
+
+        let subject = vec![
+            Point64::new(0, 0),
+            Point64::new(20, 0),
+            Point64::new(20, 20),
+            Point64::new(0, 20),
+        ];
+        let clipped =
+            clip_to_rect64(&[subject], Rect64::new(5, 5, 15, 15), FillRule::EvenOdd).unwrap();
+        assert_eq!(clipped.len(), 1);
+        assert_eq!(signed_area2(&clipped[0]), Ok(200));
+
+        let subject_d = vec![
+            PointD::new(0.0, 0.0),
+            PointD::new(20.0, 0.0),
+            PointD::new(20.0, 20.0),
+            PointD::new(0.0, 20.0),
+        ];
+        let clipped_d =
+            clip_to_rect_d(&[subject_d], RectD::new(5.5, 5.5, 15.5, 15.5), FillRule::EvenOdd)
+                .unwrap();
+        assert_eq!(clipped_d.len(), 1);
+        assert!((signed_area2_d(&clipped_d[0]).abs() - 200.0).abs() < f64::EPSILON);
+        assert!(
+            clip_to_rect_d(&[], RectD::new(f64::NAN, 0.0, 1.0, 1.0), FillRule::EvenOdd,).is_err()
+        );
+    }
+
+    fn signed_area2_d(path: &[PointD]) -> f64 {
+        path.iter()
+            .copied()
+            .zip(path.iter().copied().cycle().skip(1))
+            .take(path.len())
+            .map(|(first, second)| first.x * second.y - first.y * second.x)
+            .sum()
     }
 }

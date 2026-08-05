@@ -59,6 +59,9 @@ cargo run -p knipsa --example quickstart
 | Common EvenOdd booleans | `intersection`, `union`, `difference`, `xor` and `_d` variants |
 | Exact integer polygon booleans | `boolean_op` with `Point64` |
 | Fractional coordinates | `boolean_opd` with `PointD` |
+| Clean self-intersections or internal boundaries | `simplify_paths64` or `simplify_paths_d` |
+| Clip paths to an axis-aligned rectangle | `clip_to_rect64` or `clip_to_rect_d` |
+| Remove redundant collinear vertices | `trim_collinear64` or `trim_collinear_d` |
 | Polygon or polyline offsets | `offset_paths64` or `offset_paths_d` |
 | A single polygon's triangles | `triangulate_path64` or `triangulate_pathd` |
 | Multiple rings, holes, or islands | `triangulate64` or `triangulate_d` |
