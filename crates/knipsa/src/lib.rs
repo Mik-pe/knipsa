@@ -54,7 +54,7 @@ mod tests {
 
     #[test]
     fn public_contract_is_constructible() {
-        assert_eq!(API_VERSION, "0.0.0");
+        assert_eq!(API_VERSION, "0.1.0");
         assert_eq!(PathKind::Closed, PathKind::Closed);
         let request = BooleanRequest {
             subjects: &[],
