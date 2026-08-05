@@ -14,6 +14,7 @@ use crate::{
 const EPSILON: f64 = 1e-12;
 const ARC_TOLERANCE_RATIO: f64 = 0.002;
 const MAX_ARC_STEPS: usize = 4096;
+const SIMPLE_OUTLINE_FAST_PATH_LIMIT: usize = 256;
 
 /// The treatment of corners when a path is offset.
 ///
@@ -74,14 +75,54 @@ pub struct OffsetOptions {
 
 impl Default for OffsetOptions {
     fn default() -> Self {
-        Self {
-            join_type: JoinType::Round,
-            end_type: EndType::Polygon,
-            miter_limit: 2.0,
-            arc_tolerance: 0.0,
-            preserve_collinear: false,
-        }
+        Self::DEFAULT
     }
+}
+
+impl OffsetOptions {
+    /// Creates options for closed polygons with the selected corner style.
+    #[must_use]
+    pub const fn polygon(join_type: JoinType) -> Self {
+        Self { join_type, ..Self::DEFAULT }
+    }
+
+    /// Creates options for open polylines with the selected join and cap.
+    ///
+    /// Passing [`EndType::Polygon`] selects closed-polygon behavior, so open
+    /// callers should use `Joined`, `Butt`, `Square`, or `Round`.
+    #[must_use]
+    pub const fn polyline(join_type: JoinType, end_type: EndType) -> Self {
+        Self { join_type, end_type, ..Self::DEFAULT }
+    }
+
+    /// Returns these options with a different miter limit.
+    #[must_use]
+    pub const fn with_miter_limit(mut self, miter_limit: f64) -> Self {
+        self.miter_limit = miter_limit;
+        self
+    }
+
+    /// Returns these options with a different round-curve tolerance.
+    #[must_use]
+    pub const fn with_arc_tolerance(mut self, arc_tolerance: f64) -> Self {
+        self.arc_tolerance = arc_tolerance;
+        self
+    }
+
+    /// Returns these options with collinear output vertices preserved.
+    #[must_use]
+    pub const fn with_preserve_collinear(mut self, preserve_collinear: bool) -> Self {
+        self.preserve_collinear = preserve_collinear;
+        self
+    }
+
+    const DEFAULT: Self = Self {
+        join_type: JoinType::Round,
+        end_type: EndType::Polygon,
+        miter_limit: 2.0,
+        arc_tolerance: 0.0,
+        preserve_collinear: false,
+    };
 }
 
 /// Offsets integer-coordinate paths and rounds the resulting vertices to
@@ -161,6 +202,13 @@ pub fn offset_paths_d(
     if generated.is_empty() {
         return Ok(Vec::new());
     }
+    if generated.len() == 1
+        && generated[0].len() <= SIMPLE_OUTLINE_FAST_PATH_LIMIT
+        && signed_area2(&generated[0]).abs() > EPSILON
+        && !ring_self_intersects(&generated[0])
+    {
+        return Ok(generated);
+    }
 
     // Concave offsets can contain overlapping lobes and negative slivers. The
     // exact union is the topology cleanup stage and also merges overlapping
@@ -216,6 +264,10 @@ impl Vector {
 
     fn sub(self, other: Self) -> Self {
         Self { x: self.x - other.x, y: self.y - other.y }
+    }
+
+    fn add(self, other: Self) -> Self {
+        Self { x: self.x + other.x, y: self.y + other.y }
     }
 
     fn cross(self, other: Self) -> f64 {
@@ -315,8 +367,12 @@ fn closed_outline(path: &[PointD], delta: f64, options: OffsetOptions) -> Result
     }
     let orientation = if area.is_sign_positive() { 1.0 } else { -1.0 };
     let directions = closed_edge_directions(path)?;
-    let normals =
-        directions.iter().map(|direction| direction.right().scale(orientation)).collect::<Vec<_>>();
+    if delta * orientation < 0.0 && is_convex(path, orientation) {
+        return Ok(convex_inset(path, delta.abs(), orientation));
+    }
+    // A positive delta always moves to the right of the directed boundary.
+    // Consequently, correctly wound holes contract while outer rings expand.
+    let normals = directions.iter().map(|direction| direction.right()).collect::<Vec<_>>();
     let mut result = Vec::new();
     for index in 0..path.len() {
         let previous = (index + path.len() - 1) % path.len();
@@ -339,6 +395,61 @@ fn closed_outline(path: &[PointD], delta: f64, options: OffsetOptions) -> Result
         );
     }
     ensure_finite(result)
+}
+
+fn is_convex(path: &[PointD], orientation: f64) -> bool {
+    path.iter()
+        .copied()
+        .zip(path.iter().copied().cycle().skip(1))
+        .zip(path.iter().copied().cycle().skip(2))
+        .take(path.len())
+        .all(|((previous, current), next)| {
+            Vector::from(current)
+                .sub(Vector::from(previous))
+                .cross(Vector::from(next).sub(Vector::from(current)))
+                * orientation
+                >= -EPSILON
+        })
+}
+
+fn convex_inset(path: &[PointD], radius: f64, orientation: f64) -> PathD {
+    let mut output = path.to_vec();
+    for (start, end) in
+        path.iter().copied().zip(path.iter().copied().cycle().skip(1)).take(path.len())
+    {
+        if output.is_empty() {
+            break;
+        }
+        let edge = Vector::from(end).sub(Vector::from(start));
+        let threshold = radius * edge.length();
+        let signed_distance = |point: PointD| {
+            edge.cross(Vector::from(point).sub(Vector::from(start))) * orientation - threshold
+        };
+        let input = std::mem::take(&mut output);
+        let mut previous = input[input.len() - 1];
+        let mut previous_distance = signed_distance(previous);
+        for current in input {
+            let current_distance = signed_distance(current);
+            let previous_inside = previous_distance >= -EPSILON;
+            let current_inside = current_distance >= -EPSILON;
+            if previous_inside != current_inside {
+                let amount = previous_distance / (previous_distance - current_distance);
+                push_point(
+                    &mut output,
+                    PointD::new(
+                        previous.x + (current.x - previous.x) * amount,
+                        previous.y + (current.y - previous.y) * amount,
+                    ),
+                );
+            }
+            if current_inside {
+                push_point(&mut output, current);
+            }
+            previous = current;
+            previous_distance = current_distance;
+        }
+    }
+    clean_ring(output, false)
 }
 
 fn open_outline(path: &[PointD], radius: f64, options: OffsetOptions) -> Result<PathD, Error> {
@@ -430,7 +541,7 @@ fn offset_side(
     for index in 1..path.len() - 1 {
         let previous = shifted(path[index], normals[index - 1], radius);
         let next = shifted(path[index], normals[index], radius);
-        let outer = directions[index - 1].cross(directions[index]) * side > 0.0;
+        let outer = directions[index - 1].cross(directions[index]) * side < 0.0;
         append_join(
             &mut result,
             path[index],
@@ -488,20 +599,66 @@ fn append_join(
             delta.abs(),
             options.arc_tolerance,
         ),
-        JoinType::Miter | JoinType::Square => {
+        JoinType::Miter => {
             let intersection =
                 line_intersection(previous, previous_direction, next, next_direction);
-            let limit =
-                if options.join_type == JoinType::Miter { options.miter_limit } else { 2.0 };
-            if let Some(intersection) = intersection
-                .filter(|point| distance(*point, center) <= delta.abs() * limit + EPSILON)
-            {
+            if let Some(intersection) = intersection.filter(|point| {
+                distance(*point, center) <= delta.abs() * options.miter_limit + EPSILON
+            }) {
                 push_point(output, intersection);
             } else {
-                push_point(output, previous);
-                push_point(output, next);
+                append_square_join(
+                    output,
+                    center,
+                    previous,
+                    next,
+                    previous_direction,
+                    next_direction,
+                    delta,
+                );
             }
         }
+        JoinType::Square => append_square_join(
+            output,
+            center,
+            previous,
+            next,
+            previous_direction,
+            next_direction,
+            delta,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_square_join(
+    output: &mut PathD,
+    center: PointD,
+    previous: PointD,
+    next: PointD,
+    previous_direction: Vector,
+    next_direction: Vector,
+    delta: f64,
+) {
+    let radial = Vector::from(previous)
+        .sub(Vector::from(center))
+        .add(Vector::from(next).sub(Vector::from(center)))
+        .normalized();
+    let Some(radial) = radial else {
+        push_point(output, previous);
+        push_point(output, next);
+        return;
+    };
+    let cut_center = add_point(center, radial.scale(delta.abs()));
+    let cut_direction = radial.left();
+    let first = line_intersection(previous, previous_direction, cut_center, cut_direction);
+    let second = line_intersection(next, next_direction, cut_center, cut_direction);
+    if let (Some(first), Some(second)) = (first, second) {
+        push_point(output, first);
+        push_point(output, second);
+    } else {
+        push_point(output, previous);
+        push_point(output, next);
     }
 }
 
@@ -589,14 +746,19 @@ fn append_arc_with_sweep(
     radius: f64,
     arc_tolerance: f64,
 ) {
-    let start_angle = start.y.atan2(start.x);
     let steps = arc_steps(radius, sweep.abs(), arc_tolerance);
-    for step in 0..steps {
-        let angle = start_angle + sweep * step as f64 / steps as f64;
-        push_point(
-            output,
-            PointD::new(center.x + radius * angle.cos(), center.y + radius * angle.sin()),
-        );
+    let Some(unit) = start.normalized() else {
+        return;
+    };
+    let angle_step = sweep / steps as f64;
+    let (step_sine, step_cosine) = angle_step.sin_cos();
+    let mut radial = unit.scale(radius);
+    for _ in 0..steps {
+        push_point(output, add_point(center, radial));
+        radial = Vector {
+            x: radial.x * step_cosine - radial.y * step_sine,
+            y: radial.x * step_sine + radial.y * step_cosine,
+        };
     }
 }
 
@@ -667,7 +829,75 @@ fn signed_area2(path: &[PointD]) -> f64 {
         .sum()
 }
 
+fn ring_self_intersects(path: &[PointD]) -> bool {
+    for first in 0..path.len() {
+        let first_end = (first + 1) % path.len();
+        for second in (first + 1)..path.len() {
+            let second_end = (second + 1) % path.len();
+            if first_end == second || second_end == first {
+                continue;
+            }
+            if segments_intersect(path[first], path[first_end], path[second], path[second_end]) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn segments_intersect(
+    first: PointD,
+    first_end: PointD,
+    second: PointD,
+    second_end: PointD,
+) -> bool {
+    let first_box = (
+        first.x.min(first_end.x),
+        first.y.min(first_end.y),
+        first.x.max(first_end.x),
+        first.y.max(first_end.y),
+    );
+    let second_box = (
+        second.x.min(second_end.x),
+        second.y.min(second_end.y),
+        second.x.max(second_end.x),
+        second.y.max(second_end.y),
+    );
+    if first_box.2 + EPSILON < second_box.0
+        || second_box.2 + EPSILON < first_box.0
+        || first_box.3 + EPSILON < second_box.1
+        || second_box.3 + EPSILON < first_box.1
+    {
+        return false;
+    }
+    let first_direction = Vector::from(first_end).sub(Vector::from(first));
+    let second_direction = Vector::from(second_end).sub(Vector::from(second));
+    let ab_c = first_direction.cross(Vector::from(second).sub(Vector::from(first)));
+    let ab_d = first_direction.cross(Vector::from(second_end).sub(Vector::from(first)));
+    let cd_a = second_direction.cross(Vector::from(first).sub(Vector::from(second)));
+    let cd_b = second_direction.cross(Vector::from(first_end).sub(Vector::from(second)));
+    if ab_c.abs() <= EPSILON && point_on_segment(second, first, first_end)
+        || ab_d.abs() <= EPSILON && point_on_segment(second_end, first, first_end)
+        || cd_a.abs() <= EPSILON && point_on_segment(first, second, second_end)
+        || cd_b.abs() <= EPSILON && point_on_segment(first_end, second, second_end)
+    {
+        return true;
+    }
+    (ab_c > 0.0) != (ab_d > 0.0) && (cd_a > 0.0) != (cd_b > 0.0)
+}
+
+fn point_on_segment(point: PointD, start: PointD, end: PointD) -> bool {
+    point.x >= start.x.min(end.x) - EPSILON
+        && point.x <= start.x.max(end.x) + EPSILON
+        && point.y >= start.y.min(end.y) - EPSILON
+        && point.y <= start.y.max(end.y) + EPSILON
+}
+
 fn clean_ring(mut path: PathD, preserve_collinear: bool) -> PathD {
+    path.dedup();
+    if path.len() > 1 && path.first() == path.last() {
+        path.pop();
+    }
     if preserve_collinear || path.len() < 3 {
         return path;
     }
@@ -737,6 +967,92 @@ mod tests {
         let contracted = offset_paths_d(&[rectangle(0.0, 0.0, 10.0, 10.0)], -1.0, options).unwrap();
         assert_eq!(contracted.len(), 1);
         assert!((area2(&contracted[0]).abs() - 128.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn reference_regressions_for_square_holes_collapse_and_open_turns() {
+        let square = offset_paths_d(
+            &[rectangle(0.0, 0.0, 100.0, 100.0)],
+            10.0,
+            OffsetOptions { join_type: JoinType::Square, ..OffsetOptions::default() },
+        )
+        .unwrap();
+        assert_eq!(square[0].len(), 8);
+        assert!(square[0].iter().any(|point| {
+            (point.x + 10.0).abs() < 1e-9 && (point.y + 4.142_135_624).abs() < 1e-9
+        }));
+
+        let hole = vec![
+            PointD::new(30.0, 30.0),
+            PointD::new(30.0, 90.0),
+            PointD::new(90.0, 90.0),
+            PointD::new(90.0, 30.0),
+        ];
+        let donut = offset_paths_d(
+            &[rectangle(0.0, 0.0, 120.0, 120.0), hole],
+            8.0,
+            OffsetOptions { join_type: JoinType::Miter, ..OffsetOptions::default() },
+        )
+        .unwrap();
+        assert_eq!(donut.len(), 2);
+        assert!(donut.iter().flatten().any(|point| *point == PointD::new(38.0, 38.0)));
+
+        let collapsed = offset_paths_d(
+            &[rectangle(0.0, 0.0, 20.0, 20.0)],
+            -11.0,
+            OffsetOptions { join_type: JoinType::Miter, ..OffsetOptions::default() },
+        )
+        .unwrap();
+        assert!(collapsed.is_empty());
+
+        let line = vec![
+            PointD::new(0.0, 0.0),
+            PointD::new(40.0, 0.0),
+            PointD::new(55.0, 30.0),
+            PointD::new(90.0, 30.0),
+        ];
+        let raw_stroke = open_outline(
+            &line,
+            6.0,
+            OffsetOptions {
+                join_type: JoinType::Bevel,
+                end_type: EndType::Butt,
+                ..OffsetOptions::default()
+            },
+        )
+        .unwrap();
+        let raw_stroke = clean_ring(raw_stroke, false);
+        assert_eq!(raw_stroke.len(), 10, "raw stroke: {raw_stroke:?}");
+        assert!(!ring_self_intersects(&raw_stroke), "raw stroke: {raw_stroke:?}");
+        let stroke = offset_paths_d(
+            &[line],
+            6.0,
+            OffsetOptions {
+                join_type: JoinType::Bevel,
+                end_type: EndType::Butt,
+                ..OffsetOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(stroke[0].len(), 10);
+        assert!(stroke[0].iter().any(|point| *point == PointD::new(90.0, 24.0)));
+        assert!(stroke[0].iter().any(|point| {
+            (point.x - 45.366_563_146).abs() < 1e-9 && (point.y + 2.683_281_573).abs() < 1e-9
+        }));
+    }
+
+    #[test]
+    fn offset_option_constructors_are_chainable() {
+        assert_eq!(OffsetOptions::polygon(JoinType::Bevel).join_type, JoinType::Bevel);
+        let options = OffsetOptions::polyline(JoinType::Miter, EndType::Square)
+            .with_miter_limit(4.0)
+            .with_arc_tolerance(0.01)
+            .with_preserve_collinear(true);
+        assert_eq!(options.join_type, JoinType::Miter);
+        assert_eq!(options.end_type, EndType::Square);
+        assert!((options.miter_limit - 4.0).abs() < f64::EPSILON);
+        assert!((options.arc_tolerance - 0.01).abs() < f64::EPSILON);
+        assert!(options.preserve_collinear);
     }
 
     #[test]
@@ -1090,7 +1406,7 @@ mod tests {
                 false,
             )
             .len(),
-            1
+            2
         );
 
         for bad in [

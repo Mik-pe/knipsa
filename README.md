@@ -70,6 +70,23 @@ returning `f64` coordinates. The convenience operations use the
 orientation-independent `EvenOdd` rule; use `boolean_op`/`boolean_opd` when a
 different fill rule is required.
 
+Offset options have named constructors for the common modes:
+
+```rust
+use knipsa::{EndType, JoinType, OffsetOptions, offset_paths_d};
+
+# fn example(rings: &[knipsa::PathD], lines: &[knipsa::PathD]) -> Result<(), knipsa::Error> {
+let expanded = offset_paths_d(rings, 4.0, OffsetOptions::polygon(JoinType::Round))?;
+let stroke = offset_paths_d(
+    lines,
+    2.0,
+    OffsetOptions::polyline(JoinType::Round, EndType::Round).with_arc_tolerance(0.01),
+)?;
+# let _ = (expanded, stroke);
+# Ok(())
+# }
+```
+
 ## Geometry conventions
 
 - Boolean and triangulation inputs are closed rings. Do not repeat the first

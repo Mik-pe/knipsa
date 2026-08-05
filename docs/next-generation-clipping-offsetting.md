@@ -23,9 +23,20 @@ self-crossing union, shared-edge operations, and many horizontal edges. These
 results identify current profiling targets and supersede the speed conclusion,
 but not the reproducibility metadata, of the older checked-in report.
 
-Offsetting has no shared Knipsa/Clipper2 workload or native comparison in this
-repository. Any claim that either implementation wins offsetting is currently
-unsupported.
+Offsetting now has a separate 14-case Knipsa/Clipper2 matrix covering closed
+and open paths, every join and cap family, holes, overlap cleanup, collapse,
+large translated coordinates, and explicit round-curve error budgets. All 14
+cases matched on ring count, filled area, and bidirectional boundary distance
+after the fixes below. Five paired processes measured median Clipper2/Knipsa
+ratios from `1.42x` to `6.58x` on 12 cases, `1.03x` on the donut case, and
+`0.85x` on overlapping-offset cleanup. These are small-workload results, not a
+universal speed claim; the overlap union remains the measured offset target.
+
+The matrix also exposed an important oracle nuance: Clipper2 caps round-join
+tessellation as a function of radius, so its boundary can deviate more than the
+requested arc tolerance. The comparator therefore uses an explicit geometric
+error budget rather than demanding identical sampled vertices. Knipsa retains
+its tighter requested-tolerance tessellation.
 
 ## Constraints worth preserving
 
@@ -212,8 +223,8 @@ proof that local refinement never exceeds the public error bound.
 | Priority | Finding | Proposed action | Proof needed |
 | --- | --- | --- | --- |
 | P0 | Cross-operand containment indexes were incorrectly elided, causing 4/18 benchmark signature mismatches. | Keep the index whenever edges of the other operand exist; retain the focused regression. | 18/18 matrix, full tests, fuzz seeds. |
-| P0 | There is no offset conformance/performance matrix. | Add shared closed/open, join/cap, hole, collapse, large-coordinate, and tolerance workloads to Knipsa and Clipper2 adapters. | Canonical region/error comparison and three-process timings. |
-| P1 | Exact Boolean intersection discovery is all-pairs. | Add an exact event-discovery interface; feed its splits into the unchanged classifier/tracer first. | Differential equality against all-pairs oracle. |
+| P0 | The offset matrix found incorrect square joins, miter fallback, hole direction, over-collapse, inner open joins, and duplicate cleanup. | Fixed each case, added focused regressions, a convex half-plane inset, and a certified simple-outline bypass. | 14/14 topology, area, and boundary matrix; full tests and five paired timings. |
+| P1 | Overlapping offset cleanup is the only current offset workload behind Clipper2 (`0.85x` reference/Knipsa). | Improve the shared exact-union broad phase rather than adding an offset-only shortcut. | Differential equality against all-pairs oracle and a larger scale curve. |
 | P1 | `offset_paths64` used absolute `f64` conversion and rejected small shapes beyond 2^53. | Translate to a shared local origin, compute checked differences in `i128`, restore with checked `i128`. | Translation metamorphic tests and overflow edges. |
 | P1 | Fast-path classification and short-circuit helpers rescanned rings. | Path properties are now built once per general request and shared by dispatch, splitting, and containment. | Benchmark without changing selected result. |
 | P1 | Fixed 32-row containment buckets ignored input size/distribution. | The first implementation now selects a power-of-two count from edge count, capped at 64; y-distribution and inline storage remain future work. | Worst-case memory cap and profile evidence. |

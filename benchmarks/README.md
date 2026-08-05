@@ -42,3 +42,16 @@ correctness criterion.
 
 Reference adapters are comparison tools only; they are not runtime
 dependencies of knipsa.
+
+## Offset matrix
+
+Offsetting has a separate workload because round joins can represent the same
+curve with different vertices. The comparator checks ring count, filled area,
+and bidirectional boundary distance using per-case tolerances:
+
+```sh
+cargo bench -p knipsa --bench offset_workload -- --nocapture > target/knipsa-offset.jsonl
+benchmarks/reference/run-clipper2-offset.sh > target/clipper2-offset.jsonl
+python3 scripts/compare-offset-results.py benchmarks/offset-workloads.json \
+  target/knipsa-offset.jsonl target/clipper2-offset.jsonl
+```
