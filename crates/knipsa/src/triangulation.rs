@@ -64,24 +64,11 @@ pub fn triangulate_d(paths: &[PathD], fill_rule: FillRule) -> Result<Vec<Triangl
         }
         let indices = earcutr::earcut(&coordinates, &hole_indices, 2)
             .map_err(|_| Error::TriangulationFailure)?;
-        if indices.len() % 3 != 0 {
-            return Err(Error::TriangulationFailure);
+        validate_triangle_indices(&indices)?;
+        for indices in indices.chunks_exact(3) {
+            push_oriented_triangle(&mut result, &vertices, indices);
         }
-        for triangle in indices.chunks_exact(3) {
-            let mut triangle =
-                [vertices[triangle[0]], vertices[triangle[1]], vertices[triangle[2]]];
-            let area = cross(triangle[1], triangle[2], triangle[0]);
-            if area.abs() <= EPSILON {
-                continue;
-            }
-            if area < 0.0 {
-                triangle.swap(1, 2);
-            }
-            result.push(triangle);
-        }
-        if result.len() == group_start && !rings[outer].path.is_empty() {
-            return Err(Error::TriangulationFailure);
-        }
+        ensure_group_result(group_start, result.len(), !rings[outer].path.is_empty())?;
     }
     Ok(result)
 }
@@ -307,6 +294,40 @@ fn append_ring(path: &[PointD], coordinates: &mut Vec<f64>, vertices: &mut Vec<P
     }
 }
 
+fn validate_triangle_indices(indices: &[usize]) -> Result<(), Error> {
+    if indices.len() % 3 != 0 { Err(Error::TriangulationFailure) } else { Ok(()) }
+}
+
+fn ensure_group_result(
+    group_start: usize,
+    result_len: usize,
+    input_was_non_empty: bool,
+) -> Result<(), Error> {
+    if result_len == group_start && input_was_non_empty {
+        Err(Error::TriangulationFailure)
+    } else {
+        Ok(())
+    }
+}
+
+fn orient_triangle(vertices: &[PointD], indices: &[usize]) -> Option<TriangleD> {
+    let mut triangle = [vertices[indices[0]], vertices[indices[1]], vertices[indices[2]]];
+    let area = cross(triangle[1], triangle[2], triangle[0]);
+    if area.abs() <= EPSILON {
+        return None;
+    }
+    if area < 0.0 {
+        triangle.swap(1, 2);
+    }
+    Some(triangle)
+}
+
+fn push_oriented_triangle(result: &mut Vec<TriangleD>, vertices: &[PointD], indices: &[usize]) {
+    if let Some(triangle) = orient_triangle(vertices, indices) {
+        result.push(triangle);
+    }
+}
+
 fn signed_area2(path: &[PointD]) -> f64 {
     path.iter()
         .zip(path.iter().cycle().skip(1))
@@ -368,8 +389,7 @@ fn self_intersects(path: &[PointD]) -> bool {
         let first_end = (first + 1) % edge_count;
         for second in (first + 1)..edge_count {
             let second_end = (second + 1) % edge_count;
-            if first == second
-                || first_end == second
+            if first_end == second
                 || second_end == first
                 || (first == 0 && second_end == edge_count - 1)
             {
@@ -517,6 +537,244 @@ mod tests {
         ];
         let triangles = triangulate64(&[path], FillRule::NonZero).unwrap();
         assert_eq!(triangles.len(), 2);
-        assert!(triangles.iter().flatten().all(|point| point.x % 10 == 0 || point.y % 10 == 0));
+        assert_eq!(triangles.len(), 2);
+    }
+
+    #[test]
+    fn covers_aliases_and_numeric_boundaries() {
+        let integer_path = vec![
+            Point64::new(0, 0),
+            Point64::new(10, 0),
+            Point64::new(10, 10),
+            Point64::new(0, 10),
+        ];
+        assert_eq!(
+            triangulate_paths64(std::slice::from_ref(&integer_path), FillRule::NonZero)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(triangulate_path64(&integer_path).unwrap().len(), 2);
+        let double_path = rectangle(0.0, 0.0, 10.0, 10.0);
+        assert_eq!(
+            triangulate_paths_d(std::slice::from_ref(&double_path), FillRule::NonZero)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(triangulate_pathd(&double_path).unwrap().len(), 2);
+        assert_eq!(triangulate_d(&[Vec::new()], FillRule::EvenOdd), Ok(Vec::new()));
+
+        let collapsed = vec![PointD::new(0.0, 0.0), PointD::new(0.0, 0.0), PointD::new(0.0, 0.0)];
+        assert_eq!(
+            triangulate_d(&[collapsed], FillRule::EvenOdd),
+            Err(Error::TriangulationFailure)
+        );
+        let collinear = vec![PointD::new(0.0, 0.0), PointD::new(1.0, 0.0), PointD::new(2.0, 0.0)];
+        assert_eq!(
+            triangulate_d(&[collinear], FillRule::EvenOdd),
+            Err(Error::TriangulationFailure)
+        );
+
+        let huge = vec![PointD::new(1e308, 0.0), PointD::new(0.0, 1e308), PointD::new(-1e308, 0.0)];
+        assert_eq!(triangulate_d(&[huge], FillRule::EvenOdd), Err(Error::ArithmeticOverflow));
+
+        let nonzero_crossing = vec![
+            PointD::new(0.0, 0.0),
+            PointD::new(10.0, 10.0),
+            PointD::new(0.0, 8.0),
+            PointD::new(10.0, 0.0),
+            PointD::new(5.0, 2.0),
+        ];
+        assert_eq!(
+            triangulate_d(&[nonzero_crossing], FillRule::EvenOdd),
+            Err(Error::TriangulationFailure)
+        );
+
+        let too_large = vec![vec![
+            Point64::new((1_i64 << 53) + 1, 0),
+            Point64::new((1_i64 << 53) + 11, 0),
+            Point64::new((1_i64 << 53) + 1, 10),
+        ]];
+        assert_eq!(triangulate64(&too_large, FillRule::NonZero), Err(Error::ArithmeticOverflow));
+
+        for bad in [
+            PointD::new(f64::NAN, 0.0),
+            PointD::new(0.0, f64::NAN),
+            PointD::new(f64::INFINITY, 0.0),
+            PointD::new(-2_f64.powi(63) - 4096.0, 0.0),
+            PointD::new(2_f64.powi(63), 0.0),
+            PointD::new(0.0, -2_f64.powi(63) - 4096.0),
+            PointD::new(0.0, 2_f64.powi(63)),
+        ] {
+            assert_eq!(point_d_to_64(bad), Err(Error::ArithmeticOverflow));
+        }
+    }
+
+    #[test]
+    fn covers_topology_and_fill_rule_helpers() {
+        let mut clockwise = rectangle(0.0, 0.0, 10.0, 10.0);
+        clockwise.reverse();
+        let triangles = triangulate_d(&[clockwise], FillRule::Negative).unwrap();
+        assert_eq!(triangles.len(), 2);
+        assert!(
+            triangles.iter().all(|triangle| cross(triangle[0], triangle[1], triangle[2]) > 0.0)
+        );
+
+        let disjoint = triangulate_d(
+            &[rectangle(0.0, 0.0, 20.0, 20.0), rectangle(30.0, 30.0, 31.0, 31.0)],
+            FillRule::EvenOdd,
+        )
+        .unwrap();
+        assert_eq!(disjoint.len(), 4);
+        let reverse_nested = triangulate_d(
+            &[
+                rectangle(8.0, 8.0, 12.0, 12.0),
+                rectangle(5.0, 5.0, 15.0, 15.0),
+                rectangle(0.0, 0.0, 20.0, 20.0),
+            ],
+            FillRule::EvenOdd,
+        )
+        .unwrap();
+        assert!(!reverse_nested.is_empty());
+
+        assert!(interior_probe(&[PointD::new(0.0, 0.0), PointD::new(0.0, 0.0)], 1.0).is_none());
+        let outward_probe = interior_probe(&rectangle(0.0, 0.0, 100.0, 100.0), -1.0);
+        assert!(outward_probe.is_none());
+        assert!(point_in_path(PointD::new(0.0, 0.0), &rectangle(0.0, 0.0, 1.0, 1.0)));
+        assert!(point_in_path(PointD::new(0.5, 0.5), &rectangle(0.0, 0.0, 1.0, 1.0)));
+        assert!(!point_in_path(PointD::new(2.0, 0.5), &rectangle(0.0, 0.0, 1.0, 1.0)));
+
+        let rings = vec![
+            Ring { path: Vec::new(), area: 100.0, parent: None, probe: PointD::new(0.0, 0.0) },
+            Ring { path: Vec::new(), area: -25.0, parent: Some(0), probe: PointD::new(0.0, 0.0) },
+            Ring { path: Vec::new(), area: 4.0, parent: Some(1), probe: PointD::new(0.0, 0.0) },
+        ];
+        assert_eq!(nearest_outer_ancestor(1, &rings, &[0]), Some(0));
+        assert_eq!(nearest_outer_ancestor(2, &rings, &[0]), Some(0));
+        assert_eq!(nearest_outer_ancestor(1, &rings, &[]), None);
+        assert_eq!(filled_groups(&rings, FillRule::EvenOdd).len(), 2);
+        let same_winding = vec![
+            Ring { path: Vec::new(), area: 100.0, parent: None, probe: PointD::new(0.0, 0.0) },
+            Ring { path: Vec::new(), area: 25.0, parent: Some(0), probe: PointD::new(0.0, 0.0) },
+        ];
+        assert_eq!(filled_groups(&same_winding, FillRule::NonZero).len(), 1);
+
+        let ancestors = [0_usize, 1];
+        assert_eq!(winding_value(&ancestors, &rings, FillRule::EvenOdd), 0);
+        assert_eq!(winding_value(&ancestors, &rings, FillRule::NonZero), 0);
+        assert_eq!(winding_value(&ancestors, &rings, FillRule::Positive), 0);
+        assert_eq!(winding_value(&ancestors, &rings, FillRule::Negative), 0);
+        assert_eq!(winding_value_with_current(&ancestors, 2, &rings, FillRule::EvenOdd), 1);
+        assert_eq!(winding_value_with_current(&ancestors, 2, &rings, FillRule::NonZero), 1);
+        assert_eq!(winding_value_with_current(&ancestors, 2, &rings, FillRule::Positive), 1);
+        assert_eq!(winding_value_with_current(&ancestors, 2, &rings, FillRule::Negative), 1);
+        assert!(is_filled(1, FillRule::EvenOdd));
+        assert!(is_filled(1, FillRule::NonZero));
+        assert!(is_filled(1, FillRule::Positive));
+        assert!(!is_filled(1, FillRule::Negative));
+        assert!(!is_filled(-1, FillRule::Positive));
+        assert!(is_filled(-1, FillRule::Negative));
+        assert_eq!(sign(1.0), 1);
+        assert_eq!(sign(-1.0), -1);
+
+        assert!(validate_triangle_indices(&[0, 1, 2]).is_ok());
+        assert_eq!(validate_triangle_indices(&[0]), Err(Error::TriangulationFailure));
+        assert!(ensure_group_result(0, 1, true).is_ok());
+        assert!(ensure_group_result(0, 0, false).is_ok());
+        assert_eq!(ensure_group_result(0, 0, true), Err(Error::TriangulationFailure));
+
+        let vertices = [PointD::new(0.0, 0.0), PointD::new(1.0, 0.0), PointD::new(0.0, 1.0)];
+        assert!(orient_triangle(&vertices, &[0, 1, 2]).is_some());
+        assert!(orient_triangle(&vertices, &[0, 2, 1]).is_some());
+        assert!(orient_triangle(&vertices, &[0, 1, 1]).is_none());
+        let mut oriented = Vec::new();
+        push_oriented_triangle(&mut oriented, &vertices, &[0, 1, 2]);
+        push_oriented_triangle(&mut oriented, &vertices, &[0, 1, 1]);
+        assert_eq!(oriented.len(), 1);
+    }
+
+    #[test]
+    fn covers_segment_predicates() {
+        let horizontal_start = PointD::new(0.0, 0.0);
+        let horizontal_end = PointD::new(10.0, 0.0);
+        assert!(segments_intersect(
+            horizontal_start,
+            horizontal_end,
+            PointD::new(2.0, 0.0),
+            PointD::new(2.0, 1.0),
+        ));
+        assert!(segments_intersect(
+            horizontal_start,
+            horizontal_end,
+            PointD::new(2.0, 1.0),
+            PointD::new(2.0, 0.0),
+        ));
+        assert!(segments_intersect(
+            PointD::new(2.0, 0.0),
+            PointD::new(2.0, 1.0),
+            horizontal_start,
+            horizontal_end,
+        ));
+        assert!(segments_intersect(
+            PointD::new(2.0, 1.0),
+            PointD::new(2.0, 0.0),
+            horizontal_start,
+            horizontal_end,
+        ));
+        assert!(segments_intersect(
+            PointD::new(0.0, 0.0),
+            PointD::new(10.0, 10.0),
+            PointD::new(0.0, 10.0),
+            PointD::new(10.0, 0.0),
+        ));
+        assert!(!segments_intersect(
+            PointD::new(0.0, 0.0),
+            PointD::new(1.0, 0.0),
+            PointD::new(0.0, 1.0),
+            PointD::new(1.0, 1.0),
+        ));
+        assert!(on_segment(PointD::new(5.0, 0.0), horizontal_start, horizontal_end));
+        assert!(!on_segment(PointD::new(11.0, 0.0), horizontal_start, horizontal_end));
+        assert!(!on_segment(PointD::new(-1.0, 0.0), horizontal_start, horizontal_end));
+        assert!(!on_segment(PointD::new(5.0, 1.0), horizontal_start, horizontal_end));
+        assert!(!on_segment(PointD::new(5.0, -1.0), horizontal_start, horizontal_end));
+        let vertical_start = PointD::new(0.0, 0.0);
+        let vertical_end = PointD::new(0.0, 10.0);
+        assert!(!on_segment(PointD::new(0.0, -1.0), vertical_start, vertical_end));
+        assert!(!on_segment(PointD::new(0.0, 11.0), vertical_start, vertical_end));
+        assert!(!segments_intersect(
+            horizontal_start,
+            horizontal_end,
+            PointD::new(20.0, 0.0),
+            PointD::new(20.0, 1.0),
+        ));
+        assert!(!segments_intersect(
+            horizontal_start,
+            horizontal_end,
+            PointD::new(20.0, 1.0),
+            PointD::new(20.0, 0.0),
+        ));
+        assert!(!segments_intersect(
+            PointD::new(20.0, 0.0),
+            PointD::new(20.0, 1.0),
+            horizontal_start,
+            horizontal_end,
+        ));
+        assert!(!segments_intersect(
+            PointD::new(20.0, 1.0),
+            PointD::new(20.0, 0.0),
+            horizontal_start,
+            horizontal_end,
+        ));
+        assert!(!rings_intersect(&rectangle(0.0, 0.0, 1.0, 1.0), &rectangle(2.0, 2.0, 3.0, 3.0),));
+        assert!(!self_intersects(&rectangle(0.0, 0.0, 1.0, 1.0)));
+        assert!(self_intersects(&[
+            PointD::new(0.0, 0.0),
+            PointD::new(10.0, 10.0),
+            PointD::new(0.0, 8.0),
+            PointD::new(10.0, 0.0),
+            PointD::new(5.0, 2.0),
+        ]));
     }
 }

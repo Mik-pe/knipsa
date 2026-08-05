@@ -135,12 +135,7 @@ pub fn offset_paths_d(
         } else {
             open_outline(path, delta.abs(), options)?
         };
-        if outline.len() >= 3 {
-            let outline = clean_ring(outline, options.preserve_collinear);
-            if outline.len() >= 3 {
-                generated.push(outline);
-            }
-        }
+        add_generated_outline(&mut generated, outline, options.preserve_collinear);
     }
     if generated.is_empty() {
         return Ok(Vec::new());
@@ -622,6 +617,16 @@ fn ensure_finite(path: &PathD) -> Result<PathD, Error> {
     }
 }
 
+fn add_generated_outline(generated: &mut Vec<PathD>, outline: PathD, preserve_collinear: bool) {
+    if outline.len() < 3 {
+        return;
+    }
+    let outline = clean_ring(outline, preserve_collinear);
+    if outline.len() >= 3 {
+        generated.push(outline);
+    }
+}
+
 fn signed_area2(path: &[PointD]) -> f64 {
     path.iter()
         .zip(path.iter().cycle().skip(1))
@@ -781,5 +786,288 @@ mod tests {
         )
         .unwrap();
         assert!(integer[0].contains(&Point64::new(-1, -1)));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn covers_zero_delta_empty_and_degenerate_inputs() {
+        let path = rectangle(0.0, 0.0, 10.0, 10.0);
+        assert_eq!(offset_paths_d(&[], 1.0, OffsetOptions::default()), Ok(Vec::new()));
+        assert_eq!(
+            offset_paths_d(std::slice::from_ref(&path), 0.0, OffsetOptions::default()),
+            Ok(vec![path.clone()])
+        );
+
+        let line = vec![PointD::new(0.0, 0.0), PointD::new(10.0, 0.0)];
+        assert_eq!(
+            offset_paths_d(
+                std::slice::from_ref(&line),
+                0.0,
+                OffsetOptions { end_type: EndType::Butt, ..OffsetOptions::default() },
+            ),
+            Ok(Vec::new())
+        );
+        assert_eq!(
+            offset_paths(std::slice::from_ref(&path), 0.0, OffsetOptions::default()).unwrap(),
+            vec![path.clone()]
+        );
+
+        let too_large = vec![vec![
+            Point64::new((1_i64 << 53) + 1, 0),
+            Point64::new((1_i64 << 53) + 11, 0),
+            Point64::new((1_i64 << 53) + 1, 10),
+        ]];
+        assert_eq!(
+            offset_paths64(&too_large, 1.0, OffsetOptions::default()),
+            Err(Error::ArithmeticOverflow)
+        );
+
+        let options = OffsetOptions { miter_limit: f64::NAN, ..OffsetOptions::default() };
+        assert_eq!(validate_options(1.0, options), Err(Error::InvalidOffset));
+        let options = OffsetOptions { arc_tolerance: f64::NAN, ..OffsetOptions::default() };
+        assert_eq!(validate_options(1.0, options), Err(Error::InvalidOffset));
+        let options = OffsetOptions { arc_tolerance: -1.0, ..OffsetOptions::default() };
+        assert_eq!(validate_options(1.0, options), Err(Error::InvalidOffset));
+        assert_eq!(
+            validate_options(f64::INFINITY, OffsetOptions::default()),
+            Err(Error::InvalidOffset)
+        );
+
+        assert_eq!(closed_outline(&[], 1.0, OffsetOptions::default()), Ok(Vec::new()));
+        assert_eq!(
+            closed_outline(
+                &[PointD::new(0.0, 0.0), PointD::new(1.0, 0.0), PointD::new(2.0, 0.0),],
+                1.0,
+                OffsetOptions::default(),
+            ),
+            Err(Error::InvalidOffset)
+        );
+        assert_eq!(open_outline(&[], 1.0, OffsetOptions::default()), Ok(Vec::new()));
+        assert_eq!(
+            open_outline(&[PointD::new(0.0, 0.0)], 1.0, OffsetOptions::default()),
+            Ok(Vec::new())
+        );
+        assert_eq!(open_outline(&line, 0.0, OffsetOptions::default()), Ok(Vec::new()));
+        let bent = vec![PointD::new(0.0, 0.0), PointD::new(10.0, 0.0), PointD::new(10.0, 10.0)];
+        assert!(
+            open_outline(
+                &bent,
+                1.0,
+                OffsetOptions { end_type: EndType::Butt, ..OffsetOptions::default() },
+            )
+            .unwrap()
+            .len()
+                >= 3
+        );
+        assert!(
+            open_outline(
+                &bent,
+                1.0,
+                OffsetOptions {
+                    end_type: EndType::Joined,
+                    join_type: JoinType::Miter,
+                    ..OffsetOptions::default()
+                },
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            offset_paths_d(
+                &[Vec::new()],
+                1.0,
+                OffsetOptions { end_type: EndType::Butt, ..OffsetOptions::default() },
+            ),
+            Ok(Vec::new())
+        );
+        let mut reversed = path.clone();
+        reversed.reverse();
+        assert_eq!(offset_paths_d(&[reversed], 1.0, OffsetOptions::default()).unwrap().len(), 1);
+        assert!(matches!(
+            edge_directions(&[PointD::new(0.0, 0.0), PointD::new(0.0, 0.0)]),
+            Err(Error::InvalidOffset)
+        ));
+        assert!(matches!(
+            closed_edge_directions(&[
+                PointD::new(0.0, 0.0),
+                PointD::new(1.0, 0.0),
+                PointD::new(0.0, 0.0),
+            ]),
+            Err(Error::InvalidOffset)
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn covers_offset_helper_branches() {
+        let center = PointD::new(0.0, 0.0);
+        let horizontal = Vector { x: 1.0, y: 0.0 };
+        let vertical = Vector { x: 0.0, y: 1.0 };
+        let converted: PointD = horizontal.into();
+        assert_eq!(converted, PointD::new(1.0, 0.0));
+        let previous = PointD::new(0.0, 1.0);
+        let next = PointD::new(1.0, 0.0);
+        let mut output = Vec::new();
+        let mut generated = Vec::new();
+        add_generated_outline(&mut generated, Vec::new(), false);
+        add_generated_outline(
+            &mut generated,
+            vec![PointD::new(0.0, 0.0), PointD::new(1.0, 0.0), PointD::new(2.0, 0.0)],
+            false,
+        );
+        assert!(generated.is_empty());
+
+        append_join(
+            &mut output,
+            center,
+            previous,
+            next,
+            horizontal,
+            vertical,
+            horizontal,
+            vertical,
+            1.0,
+            false,
+            OffsetOptions::default(),
+        );
+        assert_eq!(output.len(), 1);
+        output.clear();
+        append_join(
+            &mut output,
+            center,
+            previous,
+            PointD::new(1.0, 1.0),
+            horizontal,
+            horizontal,
+            horizontal,
+            horizontal,
+            1.0,
+            false,
+            OffsetOptions::default(),
+        );
+        assert_eq!(output.len(), 2);
+
+        for join_type in [JoinType::Bevel, JoinType::Round, JoinType::Miter, JoinType::Square] {
+            output.clear();
+            append_join(
+                &mut output,
+                center,
+                previous,
+                next,
+                horizontal,
+                vertical,
+                horizontal,
+                vertical,
+                1.0,
+                true,
+                OffsetOptions { join_type, arc_tolerance: 0.5, ..OffsetOptions::default() },
+            );
+            assert!(!output.is_empty());
+        }
+        output.clear();
+        append_join(
+            &mut output,
+            center,
+            PointD::new(0.0, 1.0),
+            PointD::new(10.0, 0.0),
+            horizontal,
+            vertical,
+            horizontal,
+            vertical,
+            1.0,
+            true,
+            OffsetOptions {
+                join_type: JoinType::Miter,
+                miter_limit: 1.0,
+                ..OffsetOptions::default()
+            },
+        );
+        assert_eq!(output.len(), 2);
+        output.clear();
+        append_join(
+            &mut output,
+            center,
+            PointD::new(0.0, 1.0),
+            PointD::new(10.0, 0.0),
+            horizontal,
+            vertical,
+            horizontal,
+            vertical,
+            1.0,
+            true,
+            OffsetOptions { join_type: JoinType::Square, ..OffsetOptions::default() },
+        );
+        assert_eq!(output.len(), 2);
+
+        output.clear();
+        append_round_join(&mut output, center, horizontal, horizontal, 1.0, 0.0);
+        assert_eq!(output.len(), 1);
+        output.clear();
+        append_round_join(&mut output, center, horizontal, vertical, 0.0, 0.0);
+        assert_eq!(output, vec![center]);
+
+        output.clear();
+        append_cap(&mut output, center, previous, next, horizontal, 1.0, EndType::Butt, 0.0);
+        append_cap(&mut output, center, previous, next, Vector::ZERO, 1.0, EndType::Square, 0.0);
+        append_cap(&mut output, center, previous, next, horizontal, 1.0, EndType::Round, 0.5);
+        append_cap(&mut output, center, previous, next, horizontal, 1.0, EndType::Polygon, 0.0);
+        append_cap(&mut output, center, previous, next, horizontal, 1.0, EndType::Joined, 0.0);
+        assert!(!output.is_empty());
+
+        assert_eq!(arc_steps(1.0, 0.0, 0.0), 1);
+        assert!(arc_steps(1.0, 100.0, 1e-20) <= MAX_ARC_STEPS);
+        assert_eq!(line_intersection(previous, horizontal, next, horizontal), None);
+        assert!(line_intersection(previous, horizontal, next, vertical).is_some());
+        assert!((distance(center, PointD::new(3.0, 4.0)) - 5.0).abs() < f64::EPSILON);
+
+        let mut points = vec![center];
+        push_point(&mut points, center);
+        push_point(&mut points, next);
+        assert_eq!(points.len(), 2);
+        assert_eq!(ensure_finite(&points), Ok(points.clone()));
+        assert_eq!(
+            ensure_finite(&vec![PointD::new(f64::NAN, 0.0)]),
+            Err(Error::ArithmeticOverflow)
+        );
+
+        assert_eq!(clean_ring(vec![center, next], false), vec![center, next]);
+        assert_eq!(clean_ring(vec![center, next, PointD::new(2.0, 0.0)], true).len(), 3);
+        let cleaned = clean_ring(
+            vec![
+                PointD::new(0.0, 0.0),
+                PointD::new(1.0, 0.0),
+                PointD::new(2.0, 0.0),
+                PointD::new(2.0, 1.0),
+                PointD::new(0.0, 1.0),
+            ],
+            false,
+        );
+        assert_eq!(cleaned.len(), 4);
+        assert_eq!(
+            clean_ring(
+                vec![PointD::new(0.0, 0.0), PointD::new(1.0, 0.0), PointD::new(2.0, 0.0),],
+                false,
+            )
+            .len(),
+            2
+        );
+        assert_eq!(
+            clean_ring(
+                vec![PointD::new(0.0, 0.0), PointD::new(1.0, 0.0), PointD::new(0.0, 0.0),],
+                false,
+            )
+            .len(),
+            1
+        );
+
+        for bad in [
+            PointD::new(f64::NAN, 0.0),
+            PointD::new(0.0, f64::NAN),
+            PointD::new(-2_f64.powi(63) - 4096.0, 0.0),
+            PointD::new(2_f64.powi(63), 0.0),
+            PointD::new(0.0, -2_f64.powi(63) - 4096.0),
+            PointD::new(0.0, 2_f64.powi(63)),
+        ] {
+            assert_eq!(round_path(vec![bad]), Err(Error::ArithmeticOverflow));
+        }
     }
 }

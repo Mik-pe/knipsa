@@ -363,6 +363,8 @@ pub extern "C" fn knipsa_offset64(
         return KnipsaStatus::InvalidArgument;
     };
     let operation = catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        test_panic_if_requested();
         let paths = copy_paths64(paths, path_count)?;
         offset_paths64(&paths, delta, options)
             .map(paths64_to_d)
@@ -405,6 +407,8 @@ pub extern "C" fn knipsa_offset_d(
         return KnipsaStatus::InvalidArgument;
     };
     let operation = catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        test_panic_if_requested();
         let paths = copy_paths_d(paths, path_count)?;
         offset_paths_d(&paths, delta, options).map_err(|error| status_from_error(&error))
     }));
@@ -439,6 +443,8 @@ pub extern "C" fn knipsa_triangulate64(
         return KnipsaStatus::InvalidArgument;
     };
     let operation = catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        test_panic_if_requested();
         let paths = copy_paths64(paths, path_count)?;
         triangulate64(&paths, fill_rule)
             .map(|triangles| {
@@ -477,6 +483,8 @@ pub extern "C" fn knipsa_triangulate_d(
         return KnipsaStatus::InvalidArgument;
     };
     let operation = catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        test_panic_if_requested();
         let paths = copy_paths_d(paths, path_count)?;
         triangulate_d(&paths, fill_rule)
             .map(|triangles| {
@@ -1102,6 +1110,158 @@ mod tests {
         );
         assert_eq!(triangles_d.path_count, 2);
         knipsa_free_paths_d(std::ptr::from_mut(&mut triangles_d));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn covers_offset_and_triangulation_error_paths() {
+        for join_type in 0..=3 {
+            for end_type in 0..=4 {
+                assert!(offset_options_from_u8(join_type, end_type, 2.0, 0.0, 1).is_some());
+            }
+        }
+
+        let invalid_64 = KnipsaPath64 { points: TRIANGLE.as_ptr(), point_count: 2 };
+        let invalid_d = KnipsaPathD { points: TRIANGLE_D.as_ptr(), point_count: 2 };
+        let mut result_d = KnipsaPathsD::default();
+        assert_eq!(
+            knipsa_offset64(
+                std::ptr::null(),
+                0,
+                1.0,
+                KnipsaJoinType::Round as u8,
+                KnipsaEndType::Polygon as u8,
+                2.0,
+                0.0,
+                0,
+                std::ptr::null_mut(),
+            ),
+            KnipsaStatus::NullPointer
+        );
+        assert_eq!(
+            knipsa_offset64(
+                std::ptr::null(),
+                0,
+                1.0,
+                99,
+                KnipsaEndType::Polygon as u8,
+                2.0,
+                0.0,
+                0,
+                std::ptr::from_mut(&mut result_d),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
+        assert_eq!(
+            knipsa_offset64(
+                std::ptr::from_ref(&invalid_64),
+                1,
+                1.0,
+                KnipsaJoinType::Round as u8,
+                KnipsaEndType::Polygon as u8,
+                2.0,
+                0.0,
+                0,
+                std::ptr::from_mut(&mut result_d),
+            ),
+            KnipsaStatus::InvalidPath
+        );
+        assert_eq!(
+            knipsa_offset_d(
+                std::ptr::from_ref(&invalid_d),
+                1,
+                1.0,
+                KnipsaJoinType::Round as u8,
+                KnipsaEndType::Polygon as u8,
+                2.0,
+                0.0,
+                0,
+                std::ptr::from_mut(&mut result_d),
+            ),
+            KnipsaStatus::InvalidPath
+        );
+
+        let mut result_64 = KnipsaPaths64::default();
+        assert_eq!(
+            knipsa_triangulate64(
+                std::ptr::null(),
+                0,
+                FillRule::EvenOdd as u8,
+                std::ptr::null_mut()
+            ),
+            KnipsaStatus::NullPointer
+        );
+        assert_eq!(
+            knipsa_triangulate64(
+                std::ptr::from_ref(&invalid_64),
+                1,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result_64),
+            ),
+            KnipsaStatus::InvalidPath
+        );
+        assert_eq!(
+            knipsa_triangulate_d(std::ptr::null(), 0, 99, std::ptr::from_mut(&mut result_d),),
+            KnipsaStatus::InvalidArgument
+        );
+        assert_eq!(
+            knipsa_triangulate_d(
+                std::ptr::from_ref(&invalid_d),
+                1,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result_d),
+            ),
+            KnipsaStatus::InvalidPath
+        );
+
+        FORCE_BOOLEAN_PANIC.with(|panic| panic.set(true));
+        assert_eq!(
+            knipsa_offset64(
+                std::ptr::null(),
+                0,
+                1.0,
+                KnipsaJoinType::Round as u8,
+                KnipsaEndType::Polygon as u8,
+                2.0,
+                0.0,
+                0,
+                std::ptr::from_mut(&mut result_d),
+            ),
+            KnipsaStatus::InternalError
+        );
+        assert_eq!(
+            knipsa_offset_d(
+                std::ptr::null(),
+                0,
+                1.0,
+                KnipsaJoinType::Round as u8,
+                KnipsaEndType::Polygon as u8,
+                2.0,
+                0.0,
+                0,
+                std::ptr::from_mut(&mut result_d),
+            ),
+            KnipsaStatus::InternalError
+        );
+        assert_eq!(
+            knipsa_triangulate64(
+                std::ptr::null(),
+                0,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result_64),
+            ),
+            KnipsaStatus::InternalError
+        );
+        assert_eq!(
+            knipsa_triangulate_d(
+                std::ptr::null(),
+                0,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result_d),
+            ),
+            KnipsaStatus::InternalError
+        );
+        FORCE_BOOLEAN_PANIC.with(|panic| panic.set(false));
     }
 
     #[test]
