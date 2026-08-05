@@ -398,12 +398,12 @@ fn run<P: PathSlice>(
         fill_rule,
         path_properties.get(subjects.len()).map(|properties| properties.simple),
     );
-    let subject_paths = if subject_sides.is_some() {
+    let subject_paths = if clips.is_empty() && subject_sides.is_some() {
         Vec::new()
     } else {
         containment_paths_with_properties(subjects, &path_properties[..subjects.len()])
     };
-    let clip_paths = if clip_sides.is_some() {
+    let clip_paths = if subjects.is_empty() && clip_sides.is_some() {
         Vec::new()
     } else {
         containment_paths_with_properties(clips, &path_properties[subjects.len()..])
@@ -1880,6 +1880,23 @@ mod tests {
 
     fn point(x: f64, y: f64) -> Point {
         Point { x, y }
+    }
+
+    #[test]
+    fn simple_operand_sides_are_classified_across_crossing_edges() {
+        let subject = vec![point(0.0, 0.0), point(10.0, 0.0), point(10.0, 10.0), point(0.0, 10.0)];
+        let clip = vec![point(5.0, 0.0), point(15.0, 0.0), point(15.0, 10.0), point(5.0, 10.0)];
+
+        let result = run(
+            std::slice::from_ref(&subject),
+            std::slice::from_ref(&clip),
+            ClipType::Intersection,
+            FillRule::EvenOdd,
+        )
+        .expect("well-conditioned rectangles should remain on the fast path");
+
+        assert_eq!(result.len(), 1);
+        assert!((area2(&result[0]).abs() - 100.0).abs() <= f64::EPSILON);
     }
 
     fn edge(start: Point, end: Point) -> Edge {

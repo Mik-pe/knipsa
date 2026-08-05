@@ -90,7 +90,10 @@ impl Default for OffsetOptions {
 /// Use [`offset_paths_d`] when fractional output is significant. Positive
 /// deltas expand closed paths according to their winding direction. Open
 /// paths use the absolute delta as their half-width. Integer coordinates are
-/// rounded after the floating-point outline has been cleaned.
+/// rounded after the floating-point outline has been cleaned. Computation is
+/// translated to a local origin, so absolute coordinates may span the full
+/// `i64` range as long as all coordinate differences from that origin fit the
+/// exact integer range of `f64` (2^53).
 ///
 /// # Errors
 ///
@@ -102,8 +105,11 @@ pub fn offset_paths64(
     delta: f64,
     options: OffsetOptions,
 ) -> Result<Paths64, Error> {
-    let paths_d = paths64_to_d(paths)?;
-    offset_paths_d(&paths_d, delta, options)?.into_iter().map(round_path).collect()
+    let (origin, paths_d) = paths64_to_local_d(paths)?;
+    offset_paths_d(&paths_d, delta, options)?
+        .into_iter()
+        .map(|path| round_path_with_origin(path, origin))
+        .collect()
 }
 
 /// Offsets floating-point paths and returns floating-point polygon outlines.
@@ -246,22 +252,28 @@ fn validate_options(delta: f64, options: OffsetOptions) -> Result<(), Error> {
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn paths64_to_d(paths: &[Path64]) -> Result<Vec<PathD>, Error> {
-    paths
+fn paths64_to_local_d(paths: &[Path64]) -> Result<(Point64, Vec<PathD>), Error> {
+    let origin =
+        paths.iter().find_map(|path| path.first()).copied().unwrap_or_else(|| Point64::new(0, 0));
+    let local = paths
         .iter()
         .map(|path| {
             path.iter()
                 .map(|point| {
-                    Ok(PointD::new(i64_to_exact_f64(point.x)?, i64_to_exact_f64(point.y)?))
+                    Ok(PointD::new(
+                        i128_to_exact_f64(i128::from(point.x) - i128::from(origin.x))?,
+                        i128_to_exact_f64(i128::from(point.y) - i128::from(origin.y))?,
+                    ))
                 })
                 .collect()
         })
-        .collect()
+        .collect::<Result<Vec<_>, Error>>()?;
+    Ok((origin, local))
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn i64_to_exact_f64(value: i64) -> Result<f64, Error> {
-    const MAX_EXACT_INTEGER: u64 = 1 << 53;
+fn i128_to_exact_f64(value: i128) -> Result<f64, Error> {
+    const MAX_EXACT_INTEGER: u128 = 1 << 53;
     if value.unsigned_abs() > MAX_EXACT_INTEGER {
         return Err(Error::ArithmeticOverflow);
     }
@@ -269,7 +281,7 @@ fn i64_to_exact_f64(value: i64) -> Result<f64, Error> {
 }
 
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-fn round_path(path: PathD) -> Result<Path64, Error> {
+fn round_path_with_origin(path: PathD, origin: Point64) -> Result<Path64, Error> {
     path.into_iter()
         .map(|point| {
             let x = point.x.round();
@@ -283,7 +295,12 @@ fn round_path(path: PathD) -> Result<Path64, Error> {
             {
                 return Err(Error::ArithmeticOverflow);
             }
-            Ok(Point64::new(x as i64, y as i64))
+            let x = i128::from(x as i64) + i128::from(origin.x);
+            let y = i128::from(y as i64) + i128::from(origin.y);
+            Ok(Point64::new(
+                i64::try_from(x).map_err(|_| Error::ArithmeticOverflow)?,
+                i64::try_from(y).map_err(|_| Error::ArithmeticOverflow)?,
+            ))
         })
         .collect()
 }
@@ -321,7 +338,7 @@ fn closed_outline(path: &[PointD], delta: f64, options: OffsetOptions) -> Result
             options,
         );
     }
-    ensure_finite(&result)
+    ensure_finite(result)
 }
 
 fn open_outline(path: &[PointD], radius: f64, options: OffsetOptions) -> Result<PathD, Error> {
@@ -358,7 +375,7 @@ fn open_outline(path: &[PointD], radius: f64, options: OffsetOptions) -> Result<
         end_style,
         options.arc_tolerance,
     );
-    ensure_finite(&result)
+    ensure_finite(result)
 }
 
 fn edge_directions(path: &[PointD]) -> Result<Vec<Vector>, Error> {
@@ -624,9 +641,9 @@ fn push_point(output: &mut PathD, point: PointD) {
     }
 }
 
-fn ensure_finite(path: &PathD) -> Result<PathD, Error> {
+fn ensure_finite(path: PathD) -> Result<PathD, Error> {
     if path.iter().all(|point| point.x.is_finite() && point.y.is_finite()) {
-        Ok(path.clone())
+        Ok(path)
     } else {
         Err(Error::ArithmeticOverflow)
     }
@@ -827,15 +844,20 @@ mod tests {
             vec![path.clone()]
         );
 
-        let too_large = vec![vec![
-            Point64::new((1_i64 << 53) + 1, 0),
-            Point64::new((1_i64 << 53) + 11, 0),
-            Point64::new((1_i64 << 53) + 1, 10),
+        let translated_origin = (1_i64 << 53) + 1;
+        let translated = vec![vec![
+            Point64::new(translated_origin, 0),
+            Point64::new(translated_origin + 10, 0),
+            Point64::new(translated_origin + 10, 10),
+            Point64::new(translated_origin, 10),
         ]];
-        assert_eq!(
-            offset_paths64(&too_large, 1.0, OffsetOptions::default()),
-            Err(Error::ArithmeticOverflow)
-        );
+        let translated_offset = offset_paths64(
+            &translated,
+            1.0,
+            OffsetOptions { join_type: JoinType::Miter, ..OffsetOptions::default() },
+        )
+        .expect("small integer geometry should not depend on its absolute origin");
+        assert!(translated_offset[0].contains(&Point64::new(translated_origin - 1, -1)));
 
         let options = OffsetOptions { miter_limit: f64::NAN, ..OffsetOptions::default() };
         assert_eq!(validate_options(1.0, options), Err(Error::InvalidOffset));
@@ -1038,11 +1060,8 @@ mod tests {
         push_point(&mut points, center);
         push_point(&mut points, next);
         assert_eq!(points.len(), 2);
-        assert_eq!(ensure_finite(&points), Ok(points.clone()));
-        assert_eq!(
-            ensure_finite(&vec![PointD::new(f64::NAN, 0.0)]),
-            Err(Error::ArithmeticOverflow)
-        );
+        assert_eq!(ensure_finite(points.clone()), Ok(points));
+        assert_eq!(ensure_finite(vec![PointD::new(f64::NAN, 0.0)]), Err(Error::ArithmeticOverflow));
 
         assert_eq!(clean_ring(vec![center, next], false), vec![center, next]);
         assert_eq!(clean_ring(vec![center, next, PointD::new(2.0, 0.0)], true).len(), 3);
@@ -1082,7 +1101,10 @@ mod tests {
             PointD::new(0.0, -2_f64.powi(63) - 4096.0),
             PointD::new(0.0, 2_f64.powi(63)),
         ] {
-            assert_eq!(round_path(vec![bad]), Err(Error::ArithmeticOverflow));
+            assert_eq!(
+                round_path_with_origin(vec![bad], Point64::new(0, 0)),
+                Err(Error::ArithmeticOverflow)
+            );
         }
     }
 }
