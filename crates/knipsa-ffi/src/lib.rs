@@ -1,4 +1,4 @@
-#![doc = include_str!("../../../docs/ffi.md")]
+#![doc = include_str!("lib.md")]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 #![doc(test(attr(deny(warnings))))]

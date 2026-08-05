@@ -1,4 +1,4 @@
-#![doc = include_str!("../../../README.md")]
+#![doc = include_str!("lib.md")]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 #![doc(test(attr(deny(warnings))))]

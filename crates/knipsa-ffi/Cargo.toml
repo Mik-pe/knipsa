@@ -7,7 +7,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "The stable C-compatible FFI for the knipsa polygon clipping engine"
+description = "C-compatible FFI for the knipsa polygon clipping engine"
 readme = "../../README.md"
 documentation = "https://docs.rs/knipsa-ffi"
 keywords = ["geometry", "polygon", "clipping", "ffi"]
@@ -17,7 +17,7 @@ categories = ["api-bindings", "graphics", "mathematics"]
 crate-type = ["cdylib", "rlib", "staticlib"]
 
 [dependencies]
-knipsa = { path = "../knipsa" }
+knipsa = { path = "../knipsa", version = "0.0.0" }
 
 [lints]
 workspace = true
