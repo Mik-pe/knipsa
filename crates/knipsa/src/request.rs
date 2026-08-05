@@ -202,6 +202,35 @@ mod tests {
     }
 
     #[test]
+    fn constructors_preserve_borrowed_inputs_and_options() {
+        let integer_subject = vec![crate::Point64::new(0, 0)];
+        let integer_clip = vec![crate::Point64::new(1, 1)];
+        let integer_request = BooleanRequest::new(
+            std::slice::from_ref(&integer_subject),
+            std::slice::from_ref(&integer_clip),
+            ClipType::Difference,
+            FillRule::Positive,
+        );
+        assert!(std::ptr::eq(integer_request.subjects[0].as_ptr(), integer_subject.as_ptr()));
+        assert!(std::ptr::eq(integer_request.clips[0].as_ptr(), integer_clip.as_ptr()));
+        assert_eq!(integer_request.clip_type, ClipType::Difference);
+        assert_eq!(integer_request.fill_rule, FillRule::Positive);
+
+        let double_subject = vec![crate::PointD::new(0.0, 0.0)];
+        let double_clip = vec![crate::PointD::new(1.0, 1.0)];
+        let double_request = BooleanRequestD::new(
+            std::slice::from_ref(&double_subject),
+            std::slice::from_ref(&double_clip),
+            ClipType::Xor,
+            FillRule::Negative,
+        );
+        assert!(std::ptr::eq(double_request.subjects[0].as_ptr(), double_subject.as_ptr()));
+        assert!(std::ptr::eq(double_request.clips[0].as_ptr(), double_clip.as_ptr()));
+        assert_eq!(double_request.clip_type, ClipType::Xor);
+        assert_eq!(double_request.fill_rule, FillRule::Negative);
+    }
+
+    #[test]
     fn validates_then_executes_union_with_empty_clip() {
         let square =
             vec![crate::Point64::new(0, 0), crate::Point64::new(1, 0), crate::Point64::new(1, 1)];

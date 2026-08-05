@@ -13,13 +13,21 @@ mkdir -p target/coverage
 cargo +nightly llvm-cov --workspace --all-features \
   --branch \
   --lcov --output-path target/coverage/lcov.info \
-  --summary-only \
   --fail-under-lines 100 \
   --fail-under-functions 100
 
 branch_found=$(awk -F: '/^BRF:/{ total += $2 } END { print total + 0 }' target/coverage/lcov.info)
-branch_hit=$(awk -F: '/^BRH:/{ total += $2 } END { print total + 0 }' target/coverage/lcov.info)
-if [ "$branch_found" -ne "$branch_hit" ]; then
-  echo "branch coverage is ${branch_hit}/${branch_found}, expected 100%" >&2
+branch_records=$(awk '/^BRDA:/{ total += 1 } END { print total + 0 }' target/coverage/lcov.info)
+branch_missed=$(awk -F, '/^BRDA:/ && ($4 == "-" || $4 == "" || ($4 + 0) == 0) { total += 1 } END { print total + 0 }' target/coverage/lcov.info)
+
+# BRH is an aggregate summary that can undercount Rust generic instantiations.
+# Gate the individual BRDA records instead: every true/false branch must have
+# a non-zero execution count, and every branch declared by BRF must be present.
+if [ "$branch_records" -ne "$branch_found" ]; then
+  echo "branch detail records are ${branch_records}/${branch_found}; expected one BRDA record per branch" >&2
+  exit 1
+fi
+if [ "$branch_missed" -ne 0 ]; then
+  echo "branch coverage has ${branch_missed} missed detailed branch records" >&2
   exit 1
 fi

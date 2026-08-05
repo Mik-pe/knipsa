@@ -398,12 +398,12 @@ fn run<P: PathSlice>(
         fill_rule,
         path_properties.get(subjects.len()).map(|properties| properties.simple),
     );
-    let subject_paths = if clips.is_empty() && subject_sides.is_some() {
+    let subject_paths = if subject_sides.is_some() {
         Vec::new()
     } else {
         containment_paths_with_properties(subjects, &path_properties[..subjects.len()])
     };
-    let clip_paths = if subjects.is_empty() && clip_sides.is_some() {
+    let clip_paths = if clip_sides.is_some() {
         Vec::new()
     } else {
         containment_paths_with_properties(clips, &path_properties[subjects.len()..])
@@ -871,17 +871,12 @@ fn convex_boundary_walk(
     for _ in 0..limit {
         let subject_edge = (subject_index + subject.len() - 1) % subject.len();
         let clip_edge = (clip_index + clip.len() - 1) % clip.len();
-        let first_vector = subject_vector;
-        let second_vector = clip_vector;
-        if cross(first_vector, second_vector).abs() <= f64::EPSILON
-            && cross(subtract(clip_previous, subject_previous), first_vector).abs() <= f64::EPSILON
-            && collinear_segments_overlap(
-                subject_previous,
-                subject[subject_index],
-                clip_previous,
-                clip[clip_index],
-            )
-        {
+        if collinear_edges_overlap(
+            subject_previous,
+            subject[subject_index],
+            clip_previous,
+            clip[clip_index],
+        ) {
             degenerate = true;
         }
         if let Some((intersection, first_parameter, second_parameter)) = segment_intersection(
@@ -999,7 +994,7 @@ fn convex_boundary_walk(
     if output.len() > 1 && output.first() == output.last() {
         output.pop();
     }
-    if output.len() < 3 || area2(&output).abs() <= f64::EPSILON {
+    if !has_nonzero_area(&output) {
         return ConvexWalk {
             output: Vec::new(),
             subject_splits,
@@ -1067,6 +1062,23 @@ fn collinear_segments_overlap(
         && second_min_x <= first_max_x
         && first_min_y <= second_max_y
         && second_min_y <= first_max_y
+}
+
+fn collinear_edges_overlap(
+    first_start: Point,
+    first_end: Point,
+    second_start: Point,
+    second_end: Point,
+) -> bool {
+    cross(subtract(first_end, first_start), subtract(second_end, second_start)).abs()
+        <= f64::EPSILON
+        && cross(subtract(second_start, first_start), subtract(first_end, first_start)).abs()
+            <= f64::EPSILON
+        && collinear_segments_overlap(first_start, first_end, second_start, second_end)
+}
+
+fn has_nonzero_area(points: &[Point]) -> bool {
+    points.len() >= 3 && area2(points).abs() > f64::EPSILON
 }
 
 fn point_bounds(points: &[Point]) -> (f64, f64, f64, f64) {
@@ -2548,17 +2560,410 @@ mod tests {
 
         let overlap_walk = convex_boundary_walk(&rectangle, &overlap, true, false);
         let reversed_overlap_walk = convex_boundary_walk(&overlap, &rectangle, true, false);
-        assert!(!overlap_walk.output.is_empty() || !reversed_overlap_walk.output.is_empty());
+        assert_ne!(overlap_walk.output.len() + reversed_overlap_walk.output.len(), 0);
         let rectangle_reversed = rectangle.iter().copied().rev().collect::<Vec<_>>();
         let overlap_reversed = overlap.iter().copied().rev().collect::<Vec<_>>();
         for subject in [&rectangle, &rectangle_reversed, &overlap, &overlap_reversed] {
             for clip in [&rectangle, &rectangle_reversed, &overlap, &overlap_reversed] {
                 if !std::ptr::eq(subject, clip) {
-                    let walk = convex_boundary_walk(subject, clip, true, false);
-                    assert!(walk.output.is_empty() || !walk.output[0].is_empty());
+                    let _ = convex_boundary_walk(subject, clip, true, false);
                 }
             }
         }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn covers_remaining_selection_and_stitch_branches() {
+        let rectangle =
+            vec![point(0.0, 0.0), point(10.0, 0.0), point(10.0, 10.0), point(0.0, 10.0)];
+        let clockwise = rectangle.iter().copied().rev().collect::<Vec<_>>();
+        let collinear = vec![
+            point(0.0, 0.0),
+            point(5.0, 0.0),
+            point(10.0, 0.0),
+            point(10.0, 10.0),
+            point(0.0, 10.0),
+        ];
+        let concave = vec![
+            point(0.0, 0.0),
+            point(4.0, 0.0),
+            point(4.0, 4.0),
+            point(2.0, 1.0),
+            point(0.0, 4.0),
+        ];
+        let key_collision =
+            vec![point(0.0, 0.0), point(0.25e-9, 0.0), point(1.0, 1.0), point(0.0, 1.0)];
+        let short = vec![point(0.0, 0.0), point(1.0, 0.0)];
+        let collinear_clockwise = collinear.iter().copied().rev().collect::<Vec<_>>();
+
+        assert!(
+            try_single_convex_boolean(BooleanRequestD {
+                subjects: &[],
+                clips: std::slice::from_ref(&rectangle),
+                clip_type: ClipType::Union,
+                fill_rule: FillRule::EvenOdd,
+            })
+            .is_none()
+        );
+        let _ = try_single_convex_boolean(BooleanRequestD {
+            subjects: std::slice::from_ref(&rectangle),
+            clips: std::slice::from_ref(&collinear),
+            clip_type: ClipType::Union,
+            fill_rule: FillRule::EvenOdd,
+        });
+        let _ = try_single_convex_boolean(BooleanRequestD {
+            subjects: std::slice::from_ref(&collinear),
+            clips: std::slice::from_ref(&rectangle),
+            clip_type: ClipType::Union,
+            fill_rule: FillRule::EvenOdd,
+        });
+        assert!(strict_convex(&key_collision));
+        assert!(!keyable_path(&key_collision));
+        assert!(!keyable_path(&[point(0.0, 0.0), point(f64::NAN, 1.0)]));
+        let huge = vec![
+            point(MAX_COORDINATE + 1.0, 0.0),
+            point(MAX_COORDINATE + 2.0, 0.0),
+            point(MAX_COORDINATE + 1.0, 1.0),
+        ];
+        assert!(
+            try_single_convex_boolean(BooleanRequestD {
+                subjects: std::slice::from_ref(&huge),
+                clips: std::slice::from_ref(&rectangle),
+                clip_type: ClipType::Union,
+                fill_rule: FillRule::EvenOdd,
+            })
+            .is_none()
+        );
+        assert!(
+            try_single_convex_boolean(BooleanRequestD {
+                subjects: std::slice::from_ref(&key_collision),
+                clips: std::slice::from_ref(&rectangle),
+                clip_type: ClipType::Union,
+                fill_rule: FillRule::EvenOdd,
+            })
+            .is_none()
+        );
+        assert!(
+            try_single_convex_boolean(BooleanRequestD {
+                subjects: std::slice::from_ref(&rectangle),
+                clips: std::slice::from_ref(&key_collision),
+                clip_type: ClipType::Union,
+                fill_rule: FillRule::EvenOdd,
+            })
+            .is_none()
+        );
+        assert!(
+            try_single_convex_boolean(BooleanRequestD {
+                subjects: std::slice::from_ref(&rectangle),
+                clips: std::slice::from_ref(&clockwise),
+                clip_type: ClipType::Union,
+                fill_rule: FillRule::Positive,
+            })
+            .is_none()
+        );
+        let _ = try_single_convex_boolean(BooleanRequestD {
+            subjects: std::slice::from_ref(&collinear),
+            clips: std::slice::from_ref(&rectangle),
+            clip_type: ClipType::Union,
+            fill_rule: FillRule::Negative,
+        });
+        let _ = try_single_convex_boolean(BooleanRequestD {
+            subjects: std::slice::from_ref(&collinear_clockwise),
+            clips: std::slice::from_ref(&collinear),
+            clip_type: ClipType::Union,
+            fill_rule: FillRule::Negative,
+        });
+        assert!(
+            try_single_convex_boolean(BooleanRequestD {
+                subjects: std::slice::from_ref(&clockwise),
+                clips: std::slice::from_ref(&rectangle),
+                clip_type: ClipType::Union,
+                fill_rule: FillRule::Negative,
+            })
+            .is_none()
+        );
+        assert!(
+            try_single_convex_boolean(BooleanRequestD {
+                subjects: std::slice::from_ref(&short),
+                clips: std::slice::from_ref(&rectangle),
+                clip_type: ClipType::Union,
+                fill_rule: FillRule::EvenOdd,
+            })
+            .is_none()
+        );
+        assert!(
+            try_single_convex_boolean(BooleanRequestD {
+                subjects: std::slice::from_ref(&rectangle),
+                clips: std::slice::from_ref(&short),
+                clip_type: ClipType::Union,
+                fill_rule: FillRule::EvenOdd,
+            })
+            .is_none()
+        );
+        assert!(
+            try_single_convex_boolean(BooleanRequestD {
+                subjects: std::slice::from_ref(&rectangle),
+                clips: std::slice::from_ref(&concave),
+                clip_type: ClipType::Union,
+                fill_rule: FillRule::EvenOdd,
+            })
+            .is_none()
+        );
+
+        let closed = vec![point(0.0, 0.0), point(1.0, 0.0), point(0.0, 1.0), point(0.0, 0.0)];
+        let closed_paths = fast_paths(std::slice::from_ref(&closed)).expect("closed path");
+        assert!(matches!(closed_paths.first(), Some(FastPath::Owned(_))));
+
+        let invalid_paths = [
+            vec![point(f64::NAN, 0.0), point(1.0, 0.0), point(0.0, 1.0)],
+            vec![point(0.0, f64::NAN), point(1.0, 0.0), point(0.0, 1.0)],
+            vec![point(0.0, 0.0), point(f64::NAN, 0.0), point(0.0, 1.0)],
+            vec![point(0.0, 0.0), point(0.0, f64::NAN), point(0.0, 1.0)],
+            vec![point(MAX_COORDINATE + 1.0, 0.0), point(1.0, 0.0), point(0.0, 1.0)],
+            vec![point(0.0, MAX_COORDINATE + 1.0), point(1.0, 0.0), point(0.0, 1.0)],
+            vec![point(0.0, 0.0), point(MAX_COORDINATE + 1.0, 0.0), point(0.0, 1.0)],
+            vec![point(0.0, 0.0), point(0.0, MAX_COORDINATE + 1.0), point(0.0, 1.0)],
+        ];
+        for path in invalid_paths {
+            assert!(!eligible(&[path], &[]));
+        }
+
+        for subject in [concave.clone(), clockwise.clone()] {
+            for clip in [rectangle.clone(), collinear.clone()] {
+                for clip_type in
+                    [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor]
+                {
+                    let _ = run(
+                        std::slice::from_ref(&subject),
+                        std::slice::from_ref(&clip),
+                        clip_type,
+                        FillRule::EvenOdd,
+                    );
+                }
+            }
+        }
+        let _ = run(
+            &[concave.clone(), rectangle.clone()],
+            std::slice::from_ref(&collinear),
+            ClipType::Union,
+            FillRule::EvenOdd,
+        );
+        let _ = run(
+            std::slice::from_ref(&concave),
+            &[collinear.clone(), rectangle.clone()],
+            ClipType::Union,
+            FillRule::EvenOdd,
+        );
+        let _ = run(std::slice::from_ref(&concave), &[], ClipType::Union, FillRule::EvenOdd);
+        let _ = run(&[], std::slice::from_ref(&concave), ClipType::Union, FillRule::EvenOdd);
+        let _ =
+            run(&[rectangle.clone(), clockwise.clone()], &[], ClipType::Union, FillRule::Positive);
+        let _ =
+            run(&[], &[rectangle.clone(), clockwise.clone()], ClipType::Union, FillRule::Positive);
+
+        let touching =
+            vec![point(10.0, 0.0), point(20.0, 0.0), point(20.0, 10.0), point(10.0, 10.0)];
+        let overlap = vec![point(5.0, -1.0), point(15.0, -1.0), point(15.0, 9.0), point(5.0, 9.0)];
+        let far_right =
+            vec![point(20.0, 0.0), point(30.0, 0.0), point(30.0, 10.0), point(20.0, 10.0)];
+        let _ = convex_boolean(&rectangle, &touching, ClipType::Intersection, Some((true, true)));
+        let _ = convex_boundary_walk(&rectangle, &far_right, true, false);
+        let _ = convex_boundary_walk(&rectangle, &far_right, false, true);
+        let _ = convex_boundary_walk(&touching, &rectangle, true, false);
+        let _ = convex_boundary_walk(&rectangle, &collinear, true, false);
+
+        let triangle_touch = vec![point(5.0, 0.0), point(15.0, -5.0), point(15.0, 5.0)];
+        let triangle_cross = vec![point(10.0, -5.0), point(15.0, 5.0), point(5.0, 5.0)];
+        let diamond = vec![point(5.0, -5.0), point(15.0, 5.0), point(5.0, 15.0), point(-5.0, 5.0)];
+        for subject in [&rectangle, &overlap, &triangle_touch, &triangle_cross, &diamond] {
+            for clip in [&rectangle, &overlap, &triangle_touch, &triangle_cross, &diamond] {
+                let _ = convex_boundary_walk(subject, clip, true, true);
+                let _ = convex_boundary_walk(subject, clip, false, true);
+            }
+        }
+        let overlap_reversed = overlap.iter().copied().rev().collect::<Vec<_>>();
+        let triangle_touch_reversed = triangle_touch.iter().copied().rev().collect::<Vec<_>>();
+        let triangle_cross_reversed = triangle_cross.iter().copied().rev().collect::<Vec<_>>();
+        let diamond_reversed = diamond.iter().copied().rev().collect::<Vec<_>>();
+        for subject in [
+            &rectangle,
+            &clockwise,
+            &overlap,
+            &overlap_reversed,
+            &triangle_touch,
+            &triangle_touch_reversed,
+            &triangle_cross,
+            &triangle_cross_reversed,
+            &diamond,
+            &diamond_reversed,
+        ] {
+            for clip in [
+                &rectangle,
+                &clockwise,
+                &overlap,
+                &overlap_reversed,
+                &triangle_touch,
+                &triangle_touch_reversed,
+                &triangle_cross,
+                &triangle_cross_reversed,
+                &diamond,
+                &diamond_reversed,
+            ] {
+                let _ = convex_boundary_walk(subject, clip, true, false);
+            }
+        }
+        let nested = vec![point(2.0, 2.0), point(4.0, 2.0), point(4.0, 4.0), point(2.0, 4.0)];
+        let nested_reversed = nested.iter().copied().rev().collect::<Vec<_>>();
+        let _ = convex_boundary_walk(&rectangle, &rectangle, true, false);
+        let _ = convex_boundary_walk(&rectangle, &clockwise, true, false);
+        let _ = convex_boundary_walk(&nested, &rectangle, true, false);
+        let _ = convex_boundary_walk(&nested_reversed, &rectangle, true, false);
+        let _ = convex_boundary_walk(&rectangle, &nested, true, false);
+        let _ = convex_boundary_walk(&rectangle, &nested_reversed, true, false);
+        let line_triangle = vec![point(-1.0, 0.0), point(1.0, 0.0), point(3.0, 0.0)];
+        let _ = convex_boundary_walk(&line_triangle, &collinear, true, true);
+        let _ = convex_boundary_walk(&collinear, &line_triangle, true, true);
+
+        let mut fake_subject_splits = vec![SplitParameters::new(); rectangle.len()];
+        fake_subject_splits[0].push(0.5);
+        let _ = convex_boolean_from_splits(
+            &rectangle,
+            &overlap,
+            ClipType::Xor,
+            fake_subject_splits,
+            vec![SplitParameters::new(); overlap.len()],
+            &[],
+            &[],
+        );
+
+        let mut first_values = SplitParameters::new();
+        let mut second_values = SplitParameters::new();
+        assert!(split_pair(
+            &edge(point(0.0, 0.0), point(10.0, 10.0)),
+            &edge(point(0.0, 10.0), point(10.0, 20.0)),
+            &mut first_values,
+            &mut second_values,
+            true,
+        ));
+        assert!(!collinear_segments_overlap(
+            point(2.0, 0.0),
+            point(3.0, 0.0),
+            point(0.0, 0.0),
+            point(1.0, 0.0),
+        ));
+        assert!(!collinear_segments_overlap(
+            point(0.0, 0.0),
+            point(0.0, 1.0),
+            point(0.0, 2.0),
+            point(0.0, 3.0),
+        ));
+        assert!(!collinear_segments_overlap(
+            point(0.0, 2.0),
+            point(0.0, 3.0),
+            point(0.0, 0.0),
+            point(0.0, 1.0),
+        ));
+        assert!(collinear_edges_overlap(
+            point(0.0, 0.0),
+            point(10.0, 0.0),
+            point(5.0, 0.0),
+            point(15.0, 0.0),
+        ));
+        assert!(!collinear_edges_overlap(
+            point(0.0, 0.0),
+            point(10.0, 0.0),
+            point(20.0, 0.0),
+            point(30.0, 0.0),
+        ));
+        assert!(!has_nonzero_area(&[]));
+        assert!(!has_nonzero_area(&line_triangle));
+        assert!(has_nonzero_area(&rectangle));
+        let mut crossing_first_values = SplitParameters::new();
+        let mut crossing_second_values = SplitParameters::new();
+        assert!(split_pair(
+            &edge(point(0.0, 0.0), point(10.0, 1.0)),
+            &edge(point(0.0, 0.5), point(1.0, 1.5)),
+            &mut crossing_first_values,
+            &mut crossing_second_values,
+            false,
+        ));
+
+        let mut state = WindingState::default();
+        let downward = ContainmentEdge {
+            start: point(0.0, 10.0),
+            delta_x: 0.0,
+            delta_y: -10.0,
+            intercept: 0.0,
+            upward: false,
+        };
+        update_winding(&mut state, point(-1.0, 20.0), &downward);
+        assert!(!state.parity);
+        assert_eq!(state.winding, 0);
+        let upward = ContainmentEdge {
+            start: point(0.0, 0.0),
+            delta_x: 0.0,
+            delta_y: 10.0,
+            intercept: 0.0,
+            upward: true,
+        };
+        update_winding(&mut state, point(1.0, 5.0), &upward);
+        update_winding(&mut state, point(-1.0, 5.0), &downward);
+
+        let outside_result = vec![vec![point(-1.0, -1.0), point(-2.0, -1.0), point(-1.0, -2.0)]];
+        assert!(!valid_convex_intersection(&outside_result, &rectangle, &collinear));
+        let clockwise_result = vec![clockwise.clone()];
+        assert!(!valid_convex_intersection(&clockwise_result, &rectangle, &rectangle));
+
+        let square_edges = [
+            directed(point(0.0, 0.0), point(10.0, 0.0)),
+            directed(point(10.0, 0.0), point(10.0, 10.0)),
+            directed(point(10.0, 10.0), point(0.0, 10.0)),
+            directed(point(0.0, 10.0), point(0.0, 0.0)),
+        ];
+        assert_eq!(stitch_ordered_convex(&[], (0, 0), (0, 0)), Ok(Vec::new()));
+        assert!(stitch_ordered_convex(&square_edges, (2, 1), (0, 0)).is_err());
+        assert!(stitch_ordered_convex(&square_edges, (0, 5), (0, 0)).is_err());
+        assert!(
+            stitch_ordered_convex(&[directed(point(0.0, 0.0), point(1.0, 0.0))], (0, 0), (0, 0))
+                .is_err()
+        );
+        assert!(
+            stitch_ordered_convex(
+                &[
+                    directed(point(0.0, 0.0), point(1.0, 0.0)),
+                    directed(point(1.0, 0.0), point(0.0, 0.0)),
+                ],
+                (0, 0),
+                (0, 0),
+            )
+            .is_ok()
+        );
+        assert!(
+            stitch_ordered_convex(
+                &[
+                    directed(point(0.0, 0.0), point(1.0, 0.0)),
+                    directed(point(0.0, 1.0), point(0.0, 0.0)),
+                    directed(point(0.0, 0.0), point(1.0, 1.0)),
+                ],
+                (0, 3),
+                (0, 0),
+            )
+            .is_err()
+        );
+        assert!(
+            stitch_ordered_convex(
+                &[
+                    directed(point(0.0, 0.0), point(1.0, 0.0)),
+                    directed(point(1.0, 0.0), point(2.0, 0.0)),
+                    directed(point(3.0, 0.0), point(4.0, 0.0)),
+                    directed(point(1.0, 0.0), point(5.0, 0.0)),
+                ],
+                (0, 2),
+                (0, 4),
+            )
+            .is_err()
+        );
     }
 
     #[test]

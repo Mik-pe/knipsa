@@ -1225,7 +1225,7 @@ mod tests {
 
         let clockwise =
             vec![exact_point(0, 0), exact_point(0, 10), exact_point(10, 10), exact_point(10, 0)];
-        assert!(direct_paths(&[clockwise])[0][0] == exact_point(0, 0));
+        assert_eq!(direct_paths(&[clockwise])[0][0], exact_point(0, 0));
         assert!(paths_are_simple_and_disjoint(&[Vec::new()]));
         assert!(paths_are_simple_and_disjoint(&[subject[0].clone(), Vec::new()]));
         assert!(paths_are_simple_and_disjoint(&[subject[0].clone(), disjoint[0].clone()]));

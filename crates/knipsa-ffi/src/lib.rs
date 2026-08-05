@@ -1237,6 +1237,81 @@ mod tests {
     }
 
     #[test]
+    fn covers_path_kind_result_guards_and_integer_conversion_overflow() {
+        assert_eq!(PathKind::from(KnipsaPathKind::Closed), PathKind::Closed);
+        assert_eq!(PathKind::from(KnipsaPathKind::Open), PathKind::Open);
+        assert_eq!(knipsa_validate_paths_d(std::ptr::null(), 0, 99), KnipsaStatus::InvalidArgument);
+        let bad_d_pointer = KnipsaPathD { points: std::ptr::null(), point_count: 1 };
+        assert_eq!(
+            knipsa_validate_paths_d(
+                std::ptr::from_ref(&bad_d_pointer),
+                1,
+                KnipsaPathKind::Closed as u8,
+            ),
+            KnipsaStatus::NullPointer
+        );
+
+        let options = KnipsaOffsetOptions::default();
+        let mut occupied_d_path = KnipsaPathD { points: std::ptr::null(), point_count: 0 };
+        let mut occupied_d =
+            KnipsaPathsD { paths: std::ptr::from_mut(&mut occupied_d_path), path_count: 1 };
+        assert_eq!(
+            knipsa_offset64(
+                std::ptr::null(),
+                0,
+                1.0,
+                std::ptr::from_ref(&options),
+                std::ptr::from_mut(&mut occupied_d),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
+        occupied_d = KnipsaPathsD::default();
+        let mut occupied_d_path = KnipsaPathD { points: std::ptr::null(), point_count: 0 };
+        occupied_d.paths = std::ptr::from_mut(&mut occupied_d_path);
+        occupied_d.path_count = 1;
+        assert_eq!(
+            knipsa_offset_d(
+                std::ptr::null(),
+                0,
+                1.0,
+                std::ptr::from_ref(&options),
+                std::ptr::from_mut(&mut occupied_d),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
+
+        let mut occupied_64_path = KnipsaPath64 { points: std::ptr::null(), point_count: 0 };
+        let mut occupied_64 =
+            KnipsaPaths64 { paths: std::ptr::from_mut(&mut occupied_64_path), path_count: 1 };
+        assert_eq!(
+            knipsa_triangulate64(
+                std::ptr::null(),
+                0,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut occupied_64),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
+        let mut occupied_d_path = KnipsaPathD { points: std::ptr::null(), point_count: 0 };
+        let mut occupied_d =
+            KnipsaPathsD { paths: std::ptr::from_mut(&mut occupied_d_path), path_count: 1 };
+        assert_eq!(
+            knipsa_triangulate_d(
+                std::ptr::null(),
+                0,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut occupied_d),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
+
+        let x_overflow = vec![Point64::new((1_i64 << 53) + 1, 0)];
+        assert_eq!(paths64_to_d(&[x_overflow]), Err(KnipsaStatus::ArithmeticOverflow));
+        let y_overflow = vec![Point64::new(0, (1_i64 << 53) + 1)];
+        assert_eq!(paths64_to_d(&[y_overflow]), Err(KnipsaStatus::ArithmeticOverflow));
+    }
+
+    #[test]
     fn classifies_points_and_rejects_bad_output_pointer() {
         let path = KnipsaPath64 { points: TRIANGLE.as_ptr(), point_count: TRIANGLE.len() };
         assert_eq!(
@@ -1356,45 +1431,83 @@ mod tests {
         assert_eq!(result, KnipsaPaths64::default());
         knipsa_free_paths64(std::ptr::from_mut(&mut result));
         knipsa_free_paths64(std::ptr::null_mut());
+    }
 
-        let subject_d = KnipsaPathD { points: TRIANGLE_D.as_ptr(), point_count: 3 };
-        let mut result_d = KnipsaPathsD::default();
+    #[test]
+    fn executes_and_releases_double_boolean_results() {
+        let subject = KnipsaPathD { points: TRIANGLE_D.as_ptr(), point_count: 3 };
+        let mut result = KnipsaPathsD::default();
         assert_eq!(
             knipsa_boolean_d(
-                std::ptr::from_ref(&subject_d),
+                std::ptr::from_ref(&subject),
                 1,
                 std::ptr::null(),
                 0,
                 ClipType::Union as u8,
                 FillRule::EvenOdd as u8,
-                std::ptr::from_mut(&mut result_d),
+                std::ptr::from_mut(&mut result),
             ),
             KnipsaStatus::Ok
         );
-        assert_eq!(result_d.path_count, 1);
+        assert_eq!(result.path_count, 1);
         assert_eq!(
             knipsa_boolean_d(
-                std::ptr::from_ref(&subject_d),
+                std::ptr::from_ref(&subject),
                 1,
                 std::ptr::null(),
                 0,
                 ClipType::Union as u8,
                 FillRule::EvenOdd as u8,
-                std::ptr::from_mut(&mut result_d),
+                std::ptr::from_mut(&mut result),
             ),
             KnipsaStatus::InvalidArgument
         );
         // SAFETY: The result belongs to this test and was returned by the
         // floating-point boolean function with the reported descriptor count.
         unsafe {
-            let paths = slice::from_raw_parts(result_d.paths, result_d.path_count);
+            let paths = slice::from_raw_parts(result.paths, result.path_count);
             assert_eq!(paths[0].point_count, 3);
             assert_eq!((*paths[0].points).x.to_bits(), 0.0_f64.to_bits());
         }
-        knipsa_free_paths_d(std::ptr::from_mut(&mut result_d));
-        assert_eq!(result_d, KnipsaPathsD::default());
-        knipsa_free_paths_d(std::ptr::from_mut(&mut result_d));
+        knipsa_free_paths_d(std::ptr::from_mut(&mut result));
+        assert_eq!(result, KnipsaPathsD::default());
+        knipsa_free_paths_d(std::ptr::from_mut(&mut result));
         knipsa_free_paths_d(std::ptr::null_mut());
+
+        let subject_square = [
+            KnipsaPointD { x: 0.0, y: 0.0 },
+            KnipsaPointD { x: 10.0, y: 0.0 },
+            KnipsaPointD { x: 10.0, y: 10.0 },
+            KnipsaPointD { x: 0.0, y: 10.0 },
+        ];
+        let clip_square = [
+            KnipsaPointD { x: 5.0, y: -1.0 },
+            KnipsaPointD { x: 15.0, y: -1.0 },
+            KnipsaPointD { x: 15.0, y: 9.0 },
+            KnipsaPointD { x: 5.0, y: 9.0 },
+        ];
+        let subject_path =
+            KnipsaPathD { points: subject_square.as_ptr(), point_count: subject_square.len() };
+        let clip_path =
+            KnipsaPathD { points: clip_square.as_ptr(), point_count: clip_square.len() };
+        for clip_type in
+            [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor]
+        {
+            assert_eq!(
+                knipsa_boolean_d(
+                    std::ptr::from_ref(&subject_path),
+                    1,
+                    std::ptr::from_ref(&clip_path),
+                    1,
+                    clip_type as u8,
+                    FillRule::EvenOdd as u8,
+                    std::ptr::from_mut(&mut result),
+                ),
+                KnipsaStatus::Ok
+            );
+            assert_ne!(result.path_count, 0);
+            knipsa_free_paths_d(std::ptr::from_mut(&mut result));
+        }
     }
 
     #[test]

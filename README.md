@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Mik-pe/knipsa/actions/workflows/ci.yml/badge.svg)](https://github.com/Mik-pe/knipsa/actions/workflows/ci.yml)
 
-![A crab claw clipping a triangle](assets/knipsa-crab-clips-triangle.png)
+![A crab claw clipping a triangle](https://raw.githubusercontent.com/Mik-pe/knipsa/main/assets/knipsa-crab-clips-triangle.png)
 
 `knipsa` is a Rust polygon toolkit for boolean operations, offsets, point
 queries, and triangulation. It has a safe Rust API and a small C-compatible
