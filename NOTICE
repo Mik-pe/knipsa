@@ -1,4 +1,7 @@
 Knipsa is an independent Rust implementation project. It is not affiliated
 with or endorsed by the authors of other polygon-clipping libraries.
 
-No third-party source code is included in this initial repository state.
+The Rust crate depends on the independently licensed `earcutr` 0.5.0 crate
+under the ISC license. Reference builds for benchmarks are kept outside the
+Rust library and retain their upstream licenses; no Clipper2 source is copied
+into this repository.

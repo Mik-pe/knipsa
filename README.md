@@ -9,9 +9,9 @@ C-compatible interface for both integer and `double` coordinates.
 ## Status
 
 Early development. The current code provides checked integer geometry,
-polygon booleans, an exact fallback for difficult coordinates, a conservative
-f64 fast path, and the C API. Offsets and open-path operations are not part of
-the current surface.
+polygon booleans with four fill rules, polygon and polyline offsets,
+triangulation with holes, an exact fallback for difficult coordinates, a
+conservative f64 fast path, and the C API.
 
 ## Workspace
 
@@ -19,7 +19,7 @@ the current surface.
 - `crates/knipsa-ffi` — the C-compatible library and public header;
 - `tests/c` — a C11 ABI smoke test;
 - `fuzz` — fuzz targets for geometry inputs;
-- `docs/benchmark-results-2026-08-05.md` — reproducible conformance and timing baseline.
+- `docs/benchmark-results-2026-08-05.md` — reproducible conformance and timing baseline, including native Clipper2.
 
 ## Development
 

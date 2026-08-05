@@ -17,6 +17,17 @@ the reference machine:
 benchmarks/reference/run-geos.sh benchmarks/workloads.json
 ```
 
+The native Clipper2 adapter builds the pinned C++ reference in an ignored
+`target/` directory and keeps the timing inside the C++ call:
+
+```sh
+benchmarks/reference/run-clipper2.sh benchmarks/workloads.json
+```
+
+The checkout is pinned to revision
+`f9c5eb6e14a59f6f5d65fbfb3564519a561cf4fd`. It is a benchmark dependency only
+and is not linked into the Rust library.
+
 To compare the optimized Rust run with an adapter:
 
 ```sh

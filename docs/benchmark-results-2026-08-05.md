@@ -10,7 +10,7 @@ This is the reproducible baseline for the versioned 18-case workload.
 - Rust: `rustc 1.96.0`, optimized `cargo bench` profile
 - workload SHA-256: `04f1408c1b9231d1eef0d7b23c2b3b403e4c991bfebaef14083f415d1ea706dd`
 - samples: 25 per case, 3 warm-ups
-- references: Shapely 2.0.7 / GEOS 3.11.4 and `martinez-polygon-clipping` 0.8.1
+- references: Clipper2 2.0.1 (`f9c5eb6e14a59f6f5d65fbfb3564519a561cf4fd`), Shapely 2.0.7 / GEOS 3.11.4, and `martinez-polygon-clipping` 0.8.1
 
 The GEOS numbers measure the pinned Shapely adapter, including its Python
 boundary. They are useful as an end-to-end reference, not as a native GEOS C
@@ -19,7 +19,7 @@ API claim.
 ## Correctness
 
 Knipsa matched the canonical filled-region signature in all 18/18 cases
-against both references.
+against Clipper2, GEOS/Shapely, and Martinez.
 
 ## Median latency
 
@@ -51,6 +51,41 @@ Knipsa was faster in 17/18 cases against GEOS/Shapely and 18/18 against
 Martinez. The high-vertex XOR case is the current optimization target: it is
 slightly slower than the GEOS adapter and only narrowly ahead of Martinez.
 
+## Native Clipper2 comparison
+
+The Clipper2 adapter is built from the pinned C++ checkout by
+`benchmarks/reference/build-clipper2.sh`. Its timings exclude JSON parsing and
+the process boundary; they measure the native `BooleanOp` call. Values are
+microseconds and use the same 25 samples and 3 warm-ups as the Rust run. A
+ratio above `1.00x` in the last column favors Clipper2.
+
+| Case | Knipsa | Clipper2 native | Clipper2 / Knipsa |
+| --- | ---: | ---: | ---: |
+| overlap-intersection | 10.542 | 2.750 | 0.26x |
+| overlap-union | 11.292 | 2.667 | 0.24x |
+| overlap-difference | 9.958 | 1.958 | 0.20x |
+| overlap-xor | 11.042 | 2.666 | 0.24x |
+| nested-hole | 10.375 | 2.333 | 0.22x |
+| disjoint-union | 2.125 | 2.334 | 1.10x |
+| edge-touch-union | 10.292 | 2.334 | 0.23x |
+| vertex-touch-xor | 9.125 | 2.083 | 0.23x |
+| concave-crossing | 13.959 | 2.792 | 0.20x |
+| fractional-crossing | 10.000 | 2.000 | 0.20x |
+| self-crossing-even-odd | 6.667 | 1.666 | 0.25x |
+| many-horizontal-edges | 15.584 | 3.250 | 0.21x |
+| contained-intersection | 9.084 | 1.792 | 0.20x |
+| contained-xor | 9.042 | 2.292 | 0.25x |
+| repeated-collinear-union | 10.250 | 2.375 | 0.23x |
+| near-touch-union | 1.833 | 2.334 | 1.27x |
+| high-vertex-intersection | 79.625 | 7.042 | 0.09x |
+| high-vertex-xor | 97.125 | 11.000 | 0.11x |
+
+Across this small workload, Clipper2 is about 4.05x faster geometrically on
+the geometric mean and 4.40x faster at the median case. Knipsa still matches
+all 18 filled-region signatures; the current performance gap is concentrated
+in arrangement construction and high-vertex cases rather than a semantic
+mismatch.
+
 ## Reproduce
 
 From the repository root:
@@ -60,6 +95,8 @@ mkdir -p target/reports
 cargo bench -p knipsa --bench workload -- --nocapture > target/reports/knipsa.jsonl
 benchmarks/reference/run-geos.sh benchmarks/workloads.json > target/reports/geos.jsonl
 benchmarks/reference/run-martinez.sh benchmarks/workloads.json > target/reports/martinez.jsonl
+benchmarks/reference/run-clipper2.sh benchmarks/workloads.json > target/reports/clipper2.jsonl
 python3 scripts/compare-benchmark-results.py target/reports/knipsa.jsonl target/reports/geos.jsonl
 python3 scripts/compare-benchmark-results.py target/reports/knipsa.jsonl target/reports/martinez.jsonl
+python3 scripts/compare-benchmark-results.py target/reports/knipsa.jsonl target/reports/clipper2.jsonl
 ```

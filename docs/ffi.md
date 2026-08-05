@@ -19,10 +19,15 @@ chosen for interoperability, not an attempt to reproduce Clipper's ABI.
   never free Rust memory with their platform allocator.
 - `knipsa_boolean_d` provides the same boolean contract for finite C `double`
   coordinates, with `KnipsaPathsD` released by `knipsa_free_paths_d`.
+- `knipsa_offset64` and `knipsa_offset_d` expose polygon and polyline offsets;
+  the integer entry point returns rounded coordinates in `KnipsaPathsD` so
+  joins and round caps are not truncated by the ABI.
+- `knipsa_triangulate64` and `knipsa_triangulate_d` return each triangle as a
+  three-point path and use the same fill-rule enum as boolean operations.
 - ABI additions are versioned. Existing fields and enum values are never
   repurposed.
 
-The initial API contains validation, point-location, and integer and
-floating-point boolean calls. Boolean output is an owned array of
+The API contains validation, point-location, boolean, offset, and triangulation
+calls. Output is an owned array of
 borrowed-looking path descriptors; the descriptors and their point arrays are
 both released by the single matching free function for that coordinate type.

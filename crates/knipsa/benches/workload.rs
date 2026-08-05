@@ -161,13 +161,38 @@ fn signature(paths: &PathsD) -> String {
 }
 
 fn canonical_ring(path: &[PointD]) -> Vec<[f64; 2]> {
-    let points =
-        path.iter().map(|point| [quantize(point.x), quantize(point.y)]).collect::<Vec<_>>();
+    let points = remove_collinear(
+        path.iter().map(|point| [quantize(point.x), quantize(point.y)]).collect::<Vec<_>>(),
+    );
     let forward = rotate_to_minimum(points.clone());
     let mut reversed = points;
     reversed.reverse();
     let reversed = rotate_to_minimum(reversed);
     if forward < reversed { forward } else { reversed }
+}
+
+fn remove_collinear(mut points: Vec<[f64; 2]>) -> Vec<[f64; 2]> {
+    let mut changed = true;
+    while changed && points.len() >= 3 {
+        changed = false;
+        let mut cleaned = Vec::with_capacity(points.len());
+        for index in 0..points.len() {
+            let previous = points[(index + points.len() - 1) % points.len()];
+            let current = points[index];
+            let next = points[(index + 1) % points.len()];
+            let first = [current[0] - previous[0], current[1] - previous[1]];
+            let second = [next[0] - current[0], next[1] - current[1]];
+            let cross = first[0] * second[1] - first[1] * second[0];
+            let dot = first[0] * second[0] + first[1] * second[1];
+            if cross.abs() <= 1e-12 && dot >= -1e-12 {
+                changed = true;
+            } else {
+                cleaned.push(current);
+            }
+        }
+        points = cleaned;
+    }
+    points
 }
 
 fn rotate_to_minimum(mut points: Vec<[f64; 2]>) -> Vec<[f64; 2]> {

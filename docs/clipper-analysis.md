@@ -31,6 +31,20 @@ The C++ library exposes:
 - optional Z-value callbacks;
 - constrained Delaunay triangulation, which upstream currently warns is buggy.
 
+## Benchmark integration
+
+The native comparison is built by
+[`benchmarks/reference/build-clipper2.sh`](../benchmarks/reference/build-clipper2.sh)
+from the pinned revision above. The adapter calls Clipper2's native C++
+`BooleanOp` API directly for the shared 18-case workload; it is not linked
+into Knipsa and its source remains in the ignored `target/` checkout.
+
+Knipsa's public feature surface is intentionally independent: its offset
+implementation performs its own geometric construction and exact-union
+cleanup, while triangulation uses the separately licensed `earcutr` backend.
+No Clipper2 implementation source is copied or translated into the Rust
+crates.
+
 The C++ core in the inspected checkout was approximately 9,857 lines across
 the public headers and implementation files. The GoogleTest suite was
 approximately 1,855 lines across 17 test translation units, backed by text

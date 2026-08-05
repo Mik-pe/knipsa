@@ -13,8 +13,10 @@ use std::{
 use std::cell::Cell;
 
 use knipsa::{
-    BooleanRequest, BooleanRequestD, ClipType, Error, FillRule, Path64, PathD, PathKind, Point64,
-    PointD, PointLocation, boolean_op, boolean_opd, point_in_polygon, validate_paths64,
+    BooleanRequest, BooleanRequestD, ClipType, EndType, Error, FillRule, JoinType, OffsetOptions,
+    Path64, PathD, PathKind, Point64, PointD, PointLocation, boolean_op, boolean_opd,
+    offset_paths_d, offset_paths64, point_in_polygon, triangulate_d, triangulate64,
+    validate_paths64,
 };
 
 /// A fixed-layout integer point for FFI callers.
@@ -92,6 +94,36 @@ pub struct KnipsaPathsD {
     pub path_count: usize,
 }
 
+/// The corner style accepted by offset operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub enum KnipsaJoinType {
+    /// A square corner.
+    Square = 0,
+    /// A bevelled corner.
+    Bevel = 1,
+    /// A circular corner.
+    Round = 2,
+    /// A mitered corner.
+    Miter = 3,
+}
+
+/// The endpoint style accepted by offset operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub enum KnipsaEndType {
+    /// Treat paths as closed polygons.
+    Polygon = 0,
+    /// Join the two sides of an open path.
+    Joined = 1,
+    /// Butt cap.
+    Butt = 2,
+    /// Square cap.
+    Square = 3,
+    /// Round cap.
+    Round = 4,
+}
+
 /// Whether an FFI path is closed or open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
@@ -131,6 +163,8 @@ pub enum KnipsaStatus {
     InvalidArgument = 6,
     /// A Rust panic was contained at the ABI boundary.
     InternalError = 7,
+    /// Input paths intersect where a triangulation requires disjoint rings.
+    IntersectingPaths = 8,
 }
 
 /// Point classification returned by `knipsa_point_in_polygon64`.
@@ -154,6 +188,7 @@ const STATUS_NON_INTEGRAL: &[u8] = b"result contains a non-integral coordinate\0
 const STATUS_TOPOLOGY: &[u8] = b"polygon arrangement did not close\0";
 const STATUS_ARGUMENT: &[u8] = b"invalid operation or fill rule\0";
 const STATUS_INTERNAL: &[u8] = b"internal error\0";
+const STATUS_INTERSECTING: &[u8] = b"input paths intersect\0";
 
 #[cfg(test)]
 thread_local! {
@@ -183,6 +218,7 @@ pub extern "C" fn knipsa_status_message(status: KnipsaStatus) -> *const c_char {
         KnipsaStatus::TopologyFailure => STATUS_TOPOLOGY.as_ptr().cast(),
         KnipsaStatus::InvalidArgument => STATUS_ARGUMENT.as_ptr().cast(),
         KnipsaStatus::InternalError => STATUS_INTERNAL.as_ptr().cast(),
+        KnipsaStatus::IntersectingPaths => STATUS_INTERSECTING.as_ptr().cast(),
     }
 }
 
@@ -287,6 +323,165 @@ pub extern "C" fn knipsa_boolean_d(
         let subjects = copy_paths_d(subjects, subject_count)?;
         let clips = copy_paths_d(clips, clip_count)?;
         boolean_opd(BooleanRequestD { subjects: &subjects, clips: &clips, clip_type, fill_rule })
+            .map_err(|error| status_from_error(&error))
+    }));
+    match operation {
+        Ok(Ok(paths)) => {
+            write_paths_d(paths, result);
+            KnipsaStatus::Ok
+        }
+        Ok(Err(status)) => status,
+        Err(_) => KnipsaStatus::InternalError,
+    }
+}
+
+/// Offsets integer-coordinate paths and returns rounded results as double
+/// paths so fractional joins are not lost at the ABI boundary.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments, clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn knipsa_offset64(
+    paths: *const KnipsaPath64,
+    path_count: usize,
+    delta: f64,
+    join_type: u8,
+    end_type: u8,
+    miter_limit: f64,
+    arc_tolerance: f64,
+    preserve_collinear: u8,
+    result: *mut KnipsaPathsD,
+) -> KnipsaStatus {
+    if result.is_null() {
+        return KnipsaStatus::NullPointer;
+    }
+    // SAFETY: `result` was checked for null and is writable for this call.
+    unsafe {
+        *result = KnipsaPathsD::default();
+    }
+    let Some(options) =
+        offset_options_from_u8(join_type, end_type, miter_limit, arc_tolerance, preserve_collinear)
+    else {
+        return KnipsaStatus::InvalidArgument;
+    };
+    let operation = catch_unwind(AssertUnwindSafe(|| {
+        let paths = copy_paths64(paths, path_count)?;
+        offset_paths64(&paths, delta, options)
+            .map(paths64_to_d)
+            .map_err(|error| status_from_error(&error))
+    }));
+    match operation {
+        Ok(Ok(paths)) => {
+            write_paths_d(paths, result);
+            KnipsaStatus::Ok
+        }
+        Ok(Err(status)) => status,
+        Err(_) => KnipsaStatus::InternalError,
+    }
+}
+
+/// Offsets floating-point paths and returns floating-point polygon outlines.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments, clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn knipsa_offset_d(
+    paths: *const KnipsaPathD,
+    path_count: usize,
+    delta: f64,
+    join_type: u8,
+    end_type: u8,
+    miter_limit: f64,
+    arc_tolerance: f64,
+    preserve_collinear: u8,
+    result: *mut KnipsaPathsD,
+) -> KnipsaStatus {
+    if result.is_null() {
+        return KnipsaStatus::NullPointer;
+    }
+    // SAFETY: `result` was checked for null and is writable for this call.
+    unsafe {
+        *result = KnipsaPathsD::default();
+    }
+    let Some(options) =
+        offset_options_from_u8(join_type, end_type, miter_limit, arc_tolerance, preserve_collinear)
+    else {
+        return KnipsaStatus::InvalidArgument;
+    };
+    let operation = catch_unwind(AssertUnwindSafe(|| {
+        let paths = copy_paths_d(paths, path_count)?;
+        offset_paths_d(&paths, delta, options).map_err(|error| status_from_error(&error))
+    }));
+    match operation {
+        Ok(Ok(paths)) => {
+            write_paths_d(paths, result);
+            KnipsaStatus::Ok
+        }
+        Ok(Err(status)) => status,
+        Err(_) => KnipsaStatus::InternalError,
+    }
+}
+
+/// Triangulates integer-coordinate rings. Each returned triangle is exposed
+/// as a three-point path in `KnipsaPaths64`.
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn knipsa_triangulate64(
+    paths: *const KnipsaPath64,
+    path_count: usize,
+    fill_rule: u8,
+    result: *mut KnipsaPaths64,
+) -> KnipsaStatus {
+    if result.is_null() {
+        return KnipsaStatus::NullPointer;
+    }
+    // SAFETY: `result` was checked for null and is writable for this call.
+    unsafe {
+        *result = KnipsaPaths64::default();
+    }
+    let Some(fill_rule) = fill_rule_from_u8(fill_rule) else {
+        return KnipsaStatus::InvalidArgument;
+    };
+    let operation = catch_unwind(AssertUnwindSafe(|| {
+        let paths = copy_paths64(paths, path_count)?;
+        triangulate64(&paths, fill_rule)
+            .map(|triangles| {
+                triangles.into_iter().map(|triangle| triangle.into_iter().collect()).collect()
+            })
+            .map_err(|error| status_from_error(&error))
+    }));
+    match operation {
+        Ok(Ok(paths)) => {
+            write_paths64(paths, result);
+            KnipsaStatus::Ok
+        }
+        Ok(Err(status)) => status,
+        Err(_) => KnipsaStatus::InternalError,
+    }
+}
+
+/// Triangulates floating-point rings. Each returned triangle is exposed as a
+/// three-point path in `KnipsaPathsD`.
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn knipsa_triangulate_d(
+    paths: *const KnipsaPathD,
+    path_count: usize,
+    fill_rule: u8,
+    result: *mut KnipsaPathsD,
+) -> KnipsaStatus {
+    if result.is_null() {
+        return KnipsaStatus::NullPointer;
+    }
+    // SAFETY: `result` was checked for null and is writable for this call.
+    unsafe {
+        *result = KnipsaPathsD::default();
+    }
+    let Some(fill_rule) = fill_rule_from_u8(fill_rule) else {
+        return KnipsaStatus::InvalidArgument;
+    };
+    let operation = catch_unwind(AssertUnwindSafe(|| {
+        let paths = copy_paths_d(paths, path_count)?;
+        triangulate_d(&paths, fill_rule)
+            .map(|triangles| {
+                triangles.into_iter().map(|triangle| triangle.into_iter().collect()).collect()
+            })
             .map_err(|error| status_from_error(&error))
     }));
     match operation {
@@ -408,8 +603,51 @@ fn status_from_error(error: &Error) -> KnipsaStatus {
         Error::InvalidPath { .. } | Error::NonFiniteCoordinate { .. } => KnipsaStatus::InvalidPath,
         Error::ArithmeticOverflow => KnipsaStatus::ArithmeticOverflow,
         Error::NonIntegralResult => KnipsaStatus::NonIntegralResult,
-        Error::TopologyFailure => KnipsaStatus::TopologyFailure,
+        Error::TopologyFailure | Error::TriangulationFailure => KnipsaStatus::TopologyFailure,
+        Error::InvalidOffset => KnipsaStatus::InvalidArgument,
+        Error::IntersectingPaths => KnipsaStatus::IntersectingPaths,
     }
+}
+
+fn offset_options_from_u8(
+    join_type: u8,
+    end_type: u8,
+    miter_limit: f64,
+    arc_tolerance: f64,
+    preserve_collinear: u8,
+) -> Option<OffsetOptions> {
+    let join_type = match join_type {
+        0 => JoinType::Square,
+        1 => JoinType::Bevel,
+        2 => JoinType::Round,
+        3 => JoinType::Miter,
+        _ => return None,
+    };
+    let end_type = match end_type {
+        0 => EndType::Polygon,
+        1 => EndType::Joined,
+        2 => EndType::Butt,
+        3 => EndType::Square,
+        4 => EndType::Round,
+        _ => return None,
+    };
+    Some(OffsetOptions {
+        join_type,
+        end_type,
+        miter_limit,
+        arc_tolerance,
+        preserve_collinear: preserve_collinear != 0,
+    })
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn paths64_to_d(paths: Vec<Path64>) -> Vec<PathD> {
+    paths
+        .into_iter()
+        .map(|path| {
+            path.into_iter().map(|point| PointD::new(point.x as f64, point.y as f64)).collect()
+        })
+        .collect()
 }
 
 fn clip_type_from_u8(value: u8) -> Option<ClipType> {
@@ -604,6 +842,10 @@ mod tests {
                 CStr::from_ptr(knipsa_status_message(KnipsaStatus::InternalError)).to_str(),
                 Ok("internal error")
             );
+            assert_eq!(
+                CStr::from_ptr(knipsa_status_message(KnipsaStatus::IntersectingPaths)).to_str(),
+                Ok("input paths intersect")
+            );
         }
     }
 
@@ -709,6 +951,9 @@ mod tests {
         assert_eq!(status_from_error(&Error::ArithmeticOverflow), KnipsaStatus::ArithmeticOverflow);
         assert_eq!(status_from_error(&Error::NonIntegralResult), KnipsaStatus::NonIntegralResult);
         assert_eq!(status_from_error(&Error::TopologyFailure), KnipsaStatus::TopologyFailure);
+        assert_eq!(status_from_error(&Error::InvalidOffset), KnipsaStatus::InvalidArgument);
+        assert_eq!(status_from_error(&Error::TriangulationFailure), KnipsaStatus::TopologyFailure);
+        assert_eq!(status_from_error(&Error::IntersectingPaths), KnipsaStatus::IntersectingPaths);
     }
 
     #[test]
@@ -772,6 +1017,141 @@ mod tests {
         assert_eq!(result_d, KnipsaPathsD::default());
         knipsa_free_paths_d(std::ptr::from_mut(&mut result_d));
         knipsa_free_paths_d(std::ptr::null_mut());
+    }
+
+    #[test]
+    fn executes_offsets_and_triangulation() {
+        let square = [
+            KnipsaPointD { x: 0.0, y: 0.0 },
+            KnipsaPointD { x: 10.0, y: 0.0 },
+            KnipsaPointD { x: 10.0, y: 10.0 },
+            KnipsaPointD { x: 0.0, y: 10.0 },
+        ];
+        let square_path = KnipsaPathD { points: square.as_ptr(), point_count: square.len() };
+        let mut offset = KnipsaPathsD::default();
+        assert_eq!(
+            knipsa_offset_d(
+                std::ptr::from_ref(&square_path),
+                1,
+                1.0,
+                KnipsaJoinType::Miter as u8,
+                KnipsaEndType::Polygon as u8,
+                2.0,
+                0.0,
+                0,
+                std::ptr::from_mut(&mut offset),
+            ),
+            KnipsaStatus::Ok
+        );
+        assert_eq!(offset.path_count, 1);
+        // SAFETY: The output was allocated by the offset function and the
+        // descriptor count was checked above.
+        unsafe {
+            assert!(slice::from_raw_parts(offset.paths, offset.path_count)[0].point_count >= 4);
+        }
+        knipsa_free_paths_d(std::ptr::from_mut(&mut offset));
+
+        let integer_path = KnipsaPath64 { points: TRIANGLE.as_ptr(), point_count: TRIANGLE.len() };
+        let mut integer_offset = KnipsaPathsD::default();
+        assert_eq!(
+            knipsa_offset64(
+                std::ptr::from_ref(&integer_path),
+                1,
+                1.0,
+                KnipsaJoinType::Bevel as u8,
+                KnipsaEndType::Polygon as u8,
+                2.0,
+                0.0,
+                0,
+                std::ptr::from_mut(&mut integer_offset),
+            ),
+            KnipsaStatus::Ok
+        );
+        assert_eq!(integer_offset.path_count, 1);
+        knipsa_free_paths_d(std::ptr::from_mut(&mut integer_offset));
+
+        let mut triangles = KnipsaPaths64::default();
+        assert_eq!(
+            knipsa_triangulate64(
+                std::ptr::from_ref(&integer_path),
+                1,
+                FillRule::NonZero as u8,
+                std::ptr::from_mut(&mut triangles),
+            ),
+            KnipsaStatus::Ok
+        );
+        assert_eq!(triangles.path_count, 1);
+        // SAFETY: The output was allocated by the triangulation function.
+        unsafe {
+            assert_eq!(
+                slice::from_raw_parts(triangles.paths, triangles.path_count)[0].point_count,
+                3
+            );
+        }
+        knipsa_free_paths64(std::ptr::from_mut(&mut triangles));
+
+        let mut triangles_d = KnipsaPathsD::default();
+        assert_eq!(
+            knipsa_triangulate_d(
+                std::ptr::from_ref(&square_path),
+                1,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut triangles_d),
+            ),
+            KnipsaStatus::Ok
+        );
+        assert_eq!(triangles_d.path_count, 2);
+        knipsa_free_paths_d(std::ptr::from_mut(&mut triangles_d));
+    }
+
+    #[test]
+    fn rejects_bad_offset_and_triangulation_arguments() {
+        assert_eq!(offset_options_from_u8(99, 0, 2.0, 0.0, 0), None);
+        assert_eq!(offset_options_from_u8(0, 99, 2.0, 0.0, 0), None);
+        assert!(offset_options_from_u8(0, 0, 2.0, 0.0, 1).is_some());
+        let mut offset = KnipsaPathsD::default();
+        assert_eq!(
+            knipsa_offset_d(
+                std::ptr::null(),
+                0,
+                1.0,
+                99,
+                KnipsaEndType::Polygon as u8,
+                2.0,
+                0.0,
+                0,
+                std::ptr::from_mut(&mut offset),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
+        assert_eq!(
+            knipsa_offset_d(
+                std::ptr::null(),
+                0,
+                1.0,
+                KnipsaJoinType::Round as u8,
+                KnipsaEndType::Polygon as u8,
+                2.0,
+                0.0,
+                0,
+                std::ptr::null_mut(),
+            ),
+            KnipsaStatus::NullPointer
+        );
+        let mut triangles = KnipsaPaths64::default();
+        assert_eq!(
+            knipsa_triangulate64(std::ptr::null(), 0, 99, std::ptr::from_mut(&mut triangles),),
+            KnipsaStatus::InvalidArgument
+        );
+        assert_eq!(
+            knipsa_triangulate_d(
+                std::ptr::null(),
+                0,
+                FillRule::EvenOdd as u8,
+                std::ptr::null_mut(),
+            ),
+            KnipsaStatus::NullPointer
+        );
     }
 
     #[test]

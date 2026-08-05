@@ -8,10 +8,14 @@ Their output may be used as test data; their source and upstream fixtures are
 not automatically part of this repository.
 
 The checked-in adapter commands currently fetch or use, outside the Rust
-crates, `martinez-polygon-clipping` 0.8.1 under MIT and Shapely 2.0.7 under
-BSD-3-Clause (the wheel bundles GEOS 3.11.4 under LGPL-2.1). These are test and
-benchmark tooling dependencies only; they are not redistributed by the
-knipsa libraries or C ABI.
+crates, Clipper2 at the pinned revision under the Boost Software License 1.0,
+`earcutr` 0.5.0 under ISC, `martinez-polygon-clipping` 0.8.1 under MIT, and
+Shapely 2.0.7 under BSD-3-Clause (the wheel bundles GEOS 3.11.4 under
+LGPL-2.1). These are test, triangulation, and benchmark tooling dependencies;
+the Clipper2 source is kept in an ignored build directory and is not linked
+into the Rust library. The Rust API uses `earcutr` as a declared dependency,
+so its ISC license is part of the dependency audit but no source is copied
+into this repository.
 
 ## Rules for future work
 

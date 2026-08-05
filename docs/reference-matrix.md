@@ -8,7 +8,7 @@ the Rust library.
 
 | Reference | Role | Pinned adapter/version | License | Independence |
 | --- | --- | --- | --- |
-| [Clipper2](https://github.com/AngusJohnson/Clipper2) | Integer clipping, offsets, open paths | Source revision in `clipper-analysis.md`; adapter pending | Boost Software License 1.0 | Scanline/Vatti family |
+| [Clipper2](https://github.com/AngusJohnson/Clipper2) | Integer clipping, offsets, open paths | Native C++ adapter at pinned revision in `clipper-analysis.md` | Boost Software License 1.0 | Scanline/Vatti family |
 | [GEOS](https://github.com/libgeos/geos) | OGC-style topology and robust overlay | Shapely 2.0.7 wheel, GEOS 3.11.4 | LGPL-2.1 | Same lineage as JTS |
 | [JTS](https://github.com/locationtech/jts) | Large topology test corpus and Java oracle | Adapter pending; record version before use | EPL-2.0 or EDL-1.0 | Same lineage as GEOS |
 | [Boost.Geometry](https://www.boost.org/library/latest/geometry/) | Generic polygon overlay and validity cases | Adapter pending; record Boost branch before use | Boost Software License 1.0 | Separate implementation |

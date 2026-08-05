@@ -11,7 +11,14 @@ Every public geometry type, checked arithmetic path, validation error, enum,
 and FFI status must have deterministic tests. These are the tests covered by
 the initial 100% coverage gate.
 
-### 2. Multi-reference corpus tests
+### 2. Feature contract tests
+
+Offsets cover closed polygons, open polylines, every join and cap family,
+positive and negative deltas, and the cleanup of concave/self-overlapping
+outlines. Triangulation covers simple rings, holes, nested islands, all fill
+rules, winding normalization, and rejection of intersecting paths.
+
+### 3. Multi-reference corpus tests
 
 Run a versioned corpus through the reference matrix in
 [`reference-matrix.md`](reference-matrix.md). The first mandatory profile is
@@ -19,7 +26,7 @@ the shared integer closed-polygon profile; feature-specific cases are gated
 separately. Each case gets a stable identifier and an expected semantic result,
 not merely a count or an area.
 
-### 3. Algebraic property tests
+### 4. Algebraic property tests
 
 For bounded integer coordinates and valid closed paths, test properties such
 as:
@@ -33,26 +40,26 @@ as:
   vertices;
 - area and containment agree with the returned topology.
 
-### 4. Differential tests
+### 5. Differential tests
 
 Run the same serialized cases through every required reference adapter and
 Knipsa. Compare canonicalized filled regions and topology, not raw ring order.
 Any exception, hang, overflow, non-finite result, or unexplained mismatch is a
 failing case saved as a regression fixture or a documented semantic split.
 
-### 5. Fuzzing and adversarial geometry
+### 6. Fuzzing and adversarial geometry
 
 Fuzz malformed inputs, repeated points, horizontal edges, touching rings,
 self-intersections, extreme coordinates, very small features, and operations
 that create nested holes. Fuzzing must have a deterministic seed replay path.
 
-### 6. FFI tests
+### 7. FFI tests
 
 Compile a C smoke client against the public header, exercise null/empty/valid
 inputs, and verify exported symbols. Add language-level clients for at least
 Python, Go, and one managed language before stabilizing the first release.
 
-### 7. Benchmarks
+### 8. Benchmarks
 
 Follow [`benchmarking.md`](benchmarking.md) for representative small, medium,
 pathological, and high-vertex cases. Record compiler, optimization flags, CPU,

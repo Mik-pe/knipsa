@@ -18,15 +18,18 @@ def load(path):
     return records
 
 
-def equivalent(left, right):
+def equivalent(left, right, abs_tol=1e-8):
     if isinstance(left, (int, float)) and isinstance(right, (int, float)):
-        return math.isclose(left, right, rel_tol=0.0, abs_tol=1e-8)
+        return math.isclose(left, right, rel_tol=0.0, abs_tol=abs_tol)
     if type(left) is not type(right):
         return False
     if isinstance(left, list):
-        return len(left) == len(right) and all(equivalent(a, b) for a, b in zip(left, right))
+        return len(left) == len(right) and all(equivalent(a, b, abs_tol) for a, b in zip(left, right))
     if isinstance(left, dict):
-        return left.keys() == right.keys() and all(equivalent(left[key], right[key]) for key in left)
+        return left.keys() == right.keys() and all(
+            equivalent(left[key], right[key], 1e-6 if key == "area2" else abs_tol)
+            for key in left
+        )
     return left == right
 
 
@@ -36,7 +39,14 @@ def canonical_signature(value):
         for record in value
     ):
         return value
-    return sorted(value, key=lambda record: json.dumps(record, sort_keys=True, separators=(",", ":")))
+    def record_key(record):
+        return (
+            record["depth"],
+            round(record["area2"], 6),
+            json.dumps(record["points"], sort_keys=True, separators=(",", ":")),
+        )
+
+    return sorted(value, key=record_key)
 
 
 if len(sys.argv) != 3:

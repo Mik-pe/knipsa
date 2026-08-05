@@ -26,6 +26,12 @@ pub enum Error {
     NonIntegralResult,
     /// The arrangement could not be closed into valid output rings.
     TopologyFailure,
+    /// An offset option or offset input is not geometrically meaningful.
+    InvalidOffset,
+    /// A triangulation input is self-intersecting or cannot be triangulated.
+    TriangulationFailure,
+    /// A set of paths that must be disjoint contains an intersection.
+    IntersectingPaths,
 }
 
 impl fmt::Display for Error {
@@ -45,6 +51,11 @@ impl fmt::Display for Error {
                 formatter.write_str("the exact result contains a non-integral coordinate")
             }
             Self::TopologyFailure => formatter.write_str("the polygon arrangement did not close"),
+            Self::InvalidOffset => formatter.write_str("the offset parameters are invalid"),
+            Self::TriangulationFailure => {
+                formatter.write_str("the polygon could not be triangulated")
+            }
+            Self::IntersectingPaths => formatter.write_str("the input paths intersect"),
         }
     }
 }

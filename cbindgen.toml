@@ -11,6 +11,8 @@ include = [
     "KnipsaLocation",
     "KnipsaClipType",
     "KnipsaFillRule",
+    "KnipsaJoinType",
+    "KnipsaEndType",
     "KnipsaPath64",
     "KnipsaPathD",
     "KnipsaPathKind",

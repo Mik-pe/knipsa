@@ -32,5 +32,20 @@ int main(void) {
   assert(result_d.paths[0].point_count == 3);
   knipsa_free_paths_d(&result_d);
   assert(result_d.path_count == 0);
+
+  KnipsaPathsD offset = {0};
+  assert(knipsa_offset64(&path, 1, 1.0, KNIPSA_JOIN_MITER,
+                         KNIPSA_END_POLYGON, 2.0, 0.0, 0, &offset) ==
+         KNIPSA_STATUS_OK);
+  assert(offset.path_count == 1);
+  knipsa_free_paths_d(&offset);
+
+  KnipsaPaths64 triangles = {0};
+  assert(knipsa_triangulate64(&path, 1, KNIPSA_FILL_NON_ZERO, &triangles) ==
+         KNIPSA_STATUS_OK);
+  assert(triangles.path_count == 1);
+  assert(triangles.paths[0].point_count == 3);
+  knipsa_free_paths64(&triangles);
+
   return 0;
 }

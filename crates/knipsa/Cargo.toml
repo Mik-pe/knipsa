@@ -13,6 +13,7 @@ keywords = ["geometry", "polygon", "clipping", "offsetting"]
 categories = ["algorithms", "graphics", "mathematics"]
 
 [dependencies]
+earcutr = "0.5.0"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
 

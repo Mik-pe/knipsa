@@ -58,6 +58,7 @@ function normalizeRing(ring) {
   if (points.length > 1 && points[0][0] === points.at(-1)[0] && points[0][1] === points.at(-1)[1]) {
     points.pop();
   }
+  removeCollinear(points);
   const candidates = [points, points.slice().reverse()];
   const rotated = candidates.map((candidate) => {
     let minimum = 0;
@@ -71,6 +72,26 @@ function normalizeRing(ring) {
   });
   rotated.sort(comparePointArrays);
   return rotated[0].map(([x, y]) => [quantize(x), quantize(y)]);
+}
+
+function removeCollinear(points) {
+  let changed = true;
+  while (changed && points.length >= 3) {
+    changed = false;
+    const cleaned = [];
+    for (let index = 0; index < points.length; index += 1) {
+      const previous = points[(index + points.length - 1) % points.length];
+      const current = points[index];
+      const next = points[(index + 1) % points.length];
+      const first = [current[0] - previous[0], current[1] - previous[1]];
+      const second = [next[0] - current[0], next[1] - current[1]];
+      const cross = first[0] * second[1] - first[1] * second[0];
+      const dot = first[0] * second[0] + first[1] * second[1];
+      if (Math.abs(cross) <= 1e-12 && dot >= -1e-12) changed = true;
+      else cleaned.push(current);
+    }
+    points.splice(0, points.length, ...cleaned);
+  }
 }
 
 function comparePointArrays(left, right) {

@@ -6,7 +6,9 @@ mod boolean;
 mod error;
 mod fast;
 mod geometry;
+mod offset;
 mod request;
+mod triangulation;
 
 pub use error::Error;
 pub use geometry::{
@@ -14,9 +16,14 @@ pub use geometry::{
     normalize_pathd, orientation, point_in_polygon, signed_area2, validate_path64, validate_pathd,
     validate_paths64,
 };
+pub use offset::{EndType, JoinType, OffsetOptions, offset_paths, offset_paths_d, offset_paths64};
 pub use request::{
     BooleanRequest, BooleanRequestD, ClipType, FillRule, boolean_op, boolean_opd, validate_request,
     validate_requestd,
+};
+pub use triangulation::{
+    Triangle64, TriangleD, triangulate_d, triangulate_path64, triangulate_pathd,
+    triangulate_paths_d, triangulate_paths64, triangulate64,
 };
 
 /// Whether a path describes a closed region or an open line.
@@ -56,6 +63,9 @@ mod tests {
             Error::ArithmeticOverflow,
             Error::NonIntegralResult,
             Error::TopologyFailure,
+            Error::InvalidOffset,
+            Error::TriangulationFailure,
+            Error::IntersectingPaths,
         ];
         for error in errors {
             assert!(!error.to_string().is_empty());

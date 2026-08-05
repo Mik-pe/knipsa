@@ -64,11 +64,33 @@ def compare_points(left, right):
 
 def canonical_ring(ring):
     points = [[quantize(point[0]), quantize(point[1])] for point in ring[:-1]]
+    points = remove_collinear(points)
     candidates = []
     for candidate in (points, list(reversed(points))):
         minimum = min(range(len(candidate)), key=lambda index: candidate[index])
         candidates.append(candidate[minimum:] + candidate[:minimum])
     return min(candidates, key=lambda candidate: PointKey(candidate))
+
+
+def remove_collinear(points):
+    points = list(points)
+    changed = True
+    while changed and len(points) >= 3:
+        changed = False
+        cleaned = []
+        for index, current in enumerate(points):
+            previous = points[index - 1]
+            following = points[(index + 1) % len(points)]
+            first = [current[0] - previous[0], current[1] - previous[1]]
+            second = [following[0] - current[0], following[1] - current[1]]
+            cross = first[0] * second[1] - first[1] * second[0]
+            dot = first[0] * second[0] + first[1] * second[1]
+            if abs(cross) <= 1e-12 and dot >= -1e-12:
+                changed = True
+            else:
+                cleaned.append(current)
+        points = cleaned
+    return points
 
 
 class PointKey(list):

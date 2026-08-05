@@ -38,6 +38,21 @@ typedef struct KnipsaPathsD {
   size_t path_count;
 } KnipsaPathsD;
 
+typedef enum KnipsaJoinType {
+  KNIPSA_JOIN_SQUARE = 0,
+  KNIPSA_JOIN_BEVEL = 1,
+  KNIPSA_JOIN_ROUND = 2,
+  KNIPSA_JOIN_MITER = 3,
+} KnipsaJoinType;
+
+typedef enum KnipsaEndType {
+  KNIPSA_END_POLYGON = 0,
+  KNIPSA_END_JOINED = 1,
+  KNIPSA_END_BUTT = 2,
+  KNIPSA_END_SQUARE = 3,
+  KNIPSA_END_ROUND = 4,
+} KnipsaEndType;
+
 typedef enum KnipsaPathKind {
   KNIPSA_PATH_CLOSED = 0,
   KNIPSA_PATH_OPEN = 1,
@@ -52,6 +67,7 @@ typedef enum KnipsaStatus {
   KNIPSA_STATUS_TOPOLOGY_FAILURE = 5,
   KNIPSA_STATUS_INVALID_ARGUMENT = 6,
   KNIPSA_STATUS_INTERNAL_ERROR = 7,
+  KNIPSA_STATUS_INTERSECTING_PATHS = 8,
 } KnipsaStatus;
 
 typedef enum KnipsaClipType {
@@ -100,6 +116,36 @@ KnipsaStatus knipsa_boolean_d(const KnipsaPathD *subjects,
                               uint8_t clip_type,
                               uint8_t fill_rule,
                               KnipsaPathsD *result);
+
+KnipsaStatus knipsa_offset64(const KnipsaPath64 *paths,
+                             size_t path_count,
+                             double delta,
+                             uint8_t join_type,
+                             uint8_t end_type,
+                             double miter_limit,
+                             double arc_tolerance,
+                             uint8_t preserve_collinear,
+                             KnipsaPathsD *result);
+
+KnipsaStatus knipsa_offset_d(const KnipsaPathD *paths,
+                             size_t path_count,
+                             double delta,
+                             uint8_t join_type,
+                             uint8_t end_type,
+                             double miter_limit,
+                             double arc_tolerance,
+                             uint8_t preserve_collinear,
+                             KnipsaPathsD *result);
+
+KnipsaStatus knipsa_triangulate64(const KnipsaPath64 *paths,
+                                  size_t path_count,
+                                  uint8_t fill_rule,
+                                  KnipsaPaths64 *result);
+
+KnipsaStatus knipsa_triangulate_d(const KnipsaPathD *paths,
+                                  size_t path_count,
+                                  uint8_t fill_rule,
+                                  KnipsaPathsD *result);
 
 void knipsa_free_paths64(KnipsaPaths64 *result);
 void knipsa_free_paths_d(KnipsaPathsD *result);
