@@ -6,7 +6,8 @@
 //! away from zero.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 
 use crate::{BooleanRequestD, ClipType, Error, FillRule, PathD, PathsD, PointD, normalize_pathd};
 
@@ -16,16 +17,66 @@ const PREDICATE_TOLERANCE: f64 = 1.0e-12;
 const SAMPLE_SCALE: f64 = 1.0e-9;
 const CONTAINMENT_BUCKETS: usize = 32;
 
+#[derive(Default)]
+struct FastHasher(u64);
+
+impl Hasher for FastHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.write_u64(u64::from(*byte));
+        }
+    }
+
+    fn write_i64(&mut self, value: i64) {
+        self.write_u64(u64::from_ne_bytes(value.to_ne_bytes()));
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 ^= value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        self.0 = self.0.rotate_left(27).wrapping_mul(0x3c79_ac49_2ba7_b653);
+    }
+}
+
+// These tables are private and keyed only by quantized geometry. A fixed
+// lightweight hasher avoids paying SipHash's general-purpose cost in the hot
+// arrangement path while keeping the public API independent of the choice.
+type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
+type FastSet<T> = HashSet<T, BuildHasherDefault<FastHasher>>;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct PointKey {
     x: i64,
     y: i64,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Point {
-    x: f64,
-    y: f64,
+type Point = PointD;
+
+trait PathSlice {
+    fn points(&self) -> &[Point];
+}
+
+impl PathSlice for Vec<Point> {
+    fn points(&self) -> &[Point] {
+        self
+    }
+}
+
+enum FastPath<'a> {
+    Borrowed(&'a [Point]),
+    Owned(Vec<Point>),
+}
+
+impl PathSlice for FastPath<'_> {
+    fn points(&self) -> &[Point] {
+        match self {
+            Self::Borrowed(points) => points,
+            Self::Owned(points) => points,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -34,11 +85,14 @@ struct Edge {
     end: Point,
     start_key: PointKey,
     end_key: PointKey,
+    path_id: usize,
     subject: bool,
     min_x: f64,
     min_y: f64,
     max_x: f64,
     max_y: f64,
+    min_x_key: u64,
+    max_x_key: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -70,6 +124,11 @@ struct LocalSides {
     right: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct PathProperties {
+    simple: bool,
+}
+
 pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<PathsD, ()>> {
     let subjects = fast_paths(request.subjects)?;
     let clips = fast_paths(request.clips)?;
@@ -79,41 +138,59 @@ pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<Pat
     Some(run(&subjects, &clips, request.clip_type, request.fill_rule).map_err(|_| ()))
 }
 
-fn fast_paths(paths: &[PathD]) -> Option<Vec<Vec<Point>>> {
+fn fast_paths(paths: &[PathD]) -> Option<Vec<FastPath<'_>>> {
     paths
         .iter()
         .map(|path| {
-            let points: Vec<Point> = normalize_pathd(path, crate::PathKind::Closed)
-                .into_iter()
-                .map(|point| Point { x: point.x, y: point.y })
-                .collect();
-            if points.len() >= 3 && points.iter().any(|point| key(*point).is_none()) {
+            let points = if path.windows(2).any(|window| window[0] == window[1])
+                || (path.len() > 1 && path.first() == path.last())
+            {
+                FastPath::Owned(normalize_pathd(path, crate::PathKind::Closed))
+            } else {
+                FastPath::Borrowed(path)
+            };
+            if points.points().len() >= 3 && !keyable_path(points.points()) {
                 None
             } else {
                 Some(points)
             }
         })
         .collect::<Option<Vec<_>>>()
-        .map(|paths| paths.into_iter().filter(|path| path.len() >= 3).collect())
+        .map(|paths| paths.into_iter().filter(|path| path.points().len() >= 3).collect())
 }
 
-fn eligible(subjects: &[Vec<Point>], clips: &[Vec<Point>]) -> bool {
-    let edges = subjects.iter().chain(clips).flat_map(|path| path_edges(path)).collect::<Vec<_>>();
-    if edges.is_empty() {
-        return true;
+fn keyable_path(points: &[Point]) -> bool {
+    let Some(first) = points.first().copied().and_then(key) else { return false };
+    let mut previous = first;
+    for point in points.iter().skip(1).copied() {
+        let Some(current) = key(point) else { return false };
+        if current == previous {
+            return false;
+        }
+        previous = current;
     }
-    if edges.iter().any(|edge| {
-        [
-            edge.start.x.abs() > MAX_COORDINATE,
-            edge.start.y.abs() > MAX_COORDINATE,
-            edge.end.x.abs() > MAX_COORDINATE,
-            edge.end.y.abs() > MAX_COORDINATE,
-            edge.start_key == edge.end_key,
-        ]
-        .into_iter()
-        .any(|out_of_range| out_of_range)
-    }) {
-        return false;
+    previous != first
+}
+
+fn eligible<P: PathSlice>(subjects: &[P], clips: &[P]) -> bool {
+    for path in subjects.iter().chain(clips) {
+        let points = path.points();
+        if points.len() < 3 {
+            continue;
+        }
+        for (start, end) in points.iter().zip(points.iter().cycle().skip(1)).take(points.len()) {
+            if !start.x.is_finite()
+                || !start.y.is_finite()
+                || !end.x.is_finite()
+                || !end.y.is_finite()
+                || start.x.abs() > MAX_COORDINATE
+                || start.y.abs() > MAX_COORDINATE
+                || end.x.abs() > MAX_COORDINATE
+                || end.y.abs() > MAX_COORDINATE
+            {
+                return false;
+            }
+        }
     }
     true
 }
@@ -125,9 +202,10 @@ fn boxes_disjoint(first: &Edge, second: &Edge) -> bool {
         || second.max_y < first.min_y
 }
 
-fn run(
-    subjects: &[Vec<Point>],
-    clips: &[Vec<Point>],
+#[allow(clippy::too_many_lines)]
+fn run<P: PathSlice>(
+    subjects: &[P],
+    clips: &[P],
     clip_type: ClipType,
     fill_rule: FillRule,
 ) -> Result<PathsD, Error> {
@@ -135,40 +213,64 @@ fn run(
         return Ok(result);
     }
     let mut edges = Vec::new();
-    for path in subjects {
-        edges.extend(path_edges(path).into_iter().map(|mut edge| {
+    let mut path_properties = Vec::with_capacity(subjects.len() + clips.len());
+    for (path_id, path) in subjects.iter().enumerate() {
+        let points = path.points();
+        path_properties.push(classify_path(points));
+        edges.extend(path_edges(points).into_iter().map(|mut edge| {
+            edge.path_id = path_id;
             edge.subject = true;
             edge
         }));
     }
-    for path in clips {
-        edges.extend(path_edges(path));
+    for (clip_index, path) in clips.iter().enumerate() {
+        let path_id = subjects.len() + clip_index;
+        let points = path.points();
+        path_properties.push(classify_path(points));
+        edges.extend(path_edges(points).into_iter().map(|mut edge| {
+            edge.path_id = path_id;
+            edge
+        }));
     }
     if edges.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut parameters = vec![vec![0.0, 1.0]; edges.len()];
-    for first in 0..edges.len() {
-        for second in (first + 1)..edges.len() {
-            let (before, after) = parameters.split_at_mut(second);
-            if !split_pair(&edges[first], &edges[second], &mut before[first], &mut after[0]) {
-                return Err(Error::TopologyFailure);
-            }
-        }
+    if !split_pairs(&edges, &path_properties, &mut parameters) {
+        return Err(Error::TopologyFailure);
     }
 
     let scale = maximum_coordinate(subjects, clips).max(1.0);
     let sample = SAMPLE_SCALE / scale;
-    let subject_paths = containment_paths(subjects);
-    let clip_paths = containment_paths(clips);
-    let subject_sides = simple_local_sides(subjects, fill_rule);
-    let clip_sides = simple_local_sides(clips, fill_rule);
-    let mut directed = Vec::new();
-    let mut seen = HashSet::new();
+    let subject_sides = simple_local_sides_with_hint(
+        subjects,
+        fill_rule,
+        path_properties.first().map(|properties| properties.simple),
+    );
+    let clip_sides = simple_local_sides_with_hint(
+        clips,
+        fill_rule,
+        path_properties.get(subjects.len()).map(|properties| properties.simple),
+    );
+    let subject_paths = if clips.is_empty() && subject_sides.is_some() {
+        Vec::new()
+    } else {
+        containment_paths(subjects)
+    };
+    let clip_paths = if subjects.is_empty() && clip_sides.is_some() {
+        Vec::new()
+    } else {
+        containment_paths(clips)
+    };
+    let mut directed = Vec::with_capacity(edges.len());
+    let mut seen: FastSet<(PointKey, PointKey)> =
+        FastSet::with_capacity_and_hasher(edges.len(), BuildHasherDefault::default());
     for (edge, values) in edges.iter().zip(parameters.iter_mut()) {
-        values.sort_by(f64::total_cmp);
-        values.dedup_by(|left, right| (*left - *right).abs() <= 1.0e-12);
+        if values.len() > 2 {
+            values.sort_unstable_by(f64::total_cmp);
+            values.dedup_by(|left, right| (*left - *right).abs() <= 1.0e-12);
+        }
         for pair in values.windows(2) {
             let start = point_at(*edge, pair[0]);
             let end = point_at(*edge, pair[1]);
@@ -215,9 +317,62 @@ fn run(
     stitch(&directed)
 }
 
-fn short_circuit(
-    subjects: &[Vec<Point>],
-    clips: &[Vec<Point>],
+/// Calls the exact floating-point pair predicate only for edges whose X
+/// intervals overlap. The active list is kept in sweep order, so disjoint
+/// edge pairs never reach the comparatively expensive intersection math.
+fn split_pairs(
+    edges: &[Edge],
+    path_properties: &[PathProperties],
+    parameters: &mut [Vec<f64>],
+) -> bool {
+    let mut order = (0..edges.len()).collect::<Vec<_>>();
+    order.sort_unstable_by_key(|index| (edges[*index].min_x_key, edges[*index].max_x_key, *index));
+
+    let mut active: Vec<usize> = Vec::with_capacity(edges.len());
+    for &index in &order {
+        let min_x = edges[index].min_x;
+        active.retain(|other| edges[*other].max_x >= min_x);
+        for &other in &active {
+            let (first, second) = if other < index { (other, index) } else { (index, other) };
+            if edges[first].path_id == edges[second].path_id
+                && path_properties[edges[first].path_id].simple
+            {
+                continue;
+            }
+            let (before, after) = parameters.split_at_mut(second);
+            if !split_pair(&edges[first], &edges[second], &mut before[first], &mut after[0]) {
+                return false;
+            }
+        }
+        active.push(index);
+    }
+    true
+}
+
+fn classify_path(path: &[Point]) -> PathProperties {
+    if path.len() < 3 {
+        return PathProperties::default();
+    }
+    if is_convex_simple(path) {
+        return PathProperties { simple: true };
+    }
+    let edges = path_edges(path);
+    for (first, edge) in edges.iter().enumerate() {
+        for (other_index, other) in edges.iter().enumerate().skip(first + 1) {
+            if other_index == first + 1 || (first == 0 && other_index + 1 == edges.len()) {
+                continue;
+            }
+            if edges_intersect(edge, other) {
+                return PathProperties::default();
+            }
+        }
+    }
+    PathProperties { simple: true }
+}
+
+fn short_circuit<P: PathSlice>(
+    subjects: &[P],
+    clips: &[P],
     clip_type: ClipType,
     fill_rule: FillRule,
 ) -> Option<PathsD> {
@@ -260,20 +415,20 @@ fn short_circuit(
     None
 }
 
-fn direct_if_simple_and_disjoint(paths: &[Vec<Point>]) -> Option<PathsD> {
+fn direct_if_simple_and_disjoint<P: PathSlice>(paths: &[P]) -> Option<PathsD> {
     paths_are_simple_and_disjoint(paths).then(|| direct_paths(paths))
 }
 
-fn direct_paths(paths: &[Vec<Point>]) -> PathsD {
+fn direct_paths<P: PathSlice>(paths: &[P]) -> PathsD {
     let mut result = paths
         .iter()
-        .cloned()
-        .map(|mut path| {
-            if area2(&path) < 0.0 {
-                path.reverse();
+        .map(|path| {
+            let mut points = path.points().to_vec();
+            if area2(&points) < 0.0 {
+                points.reverse();
             }
-            canonicalize(&mut path);
-            path.into_iter().map(|point| PointD::new(point.x, point.y)).collect()
+            canonicalize(&mut points);
+            points.into_iter().map(|point| PointD::new(point.x, point.y)).collect()
         })
         .collect::<PathsD>();
     result.sort_by(compare_paths);
@@ -281,10 +436,11 @@ fn direct_paths(paths: &[Vec<Point>]) -> PathsD {
 }
 
 #[rustfmt::skip]
-fn paths_are_simple_and_disjoint(paths: &[Vec<Point>]) -> bool {
+fn paths_are_simple_and_disjoint<P: PathSlice>(paths: &[P]) -> bool {
     for (index, path) in paths.iter().enumerate() {
-        if !is_convex_simple(path) {
-            let edges = path_edges(path);
+        let points = path.points();
+        if !is_convex_simple(points) {
+            let edges = path_edges(points);
             for (first, edge) in edges.iter().enumerate() {
                 for (other_index, other) in edges.iter().enumerate().skip(first + 1) {
                     if other_index == first + 1 || (first == 0 && other_index + 1 == edges.len()) {
@@ -319,8 +475,8 @@ fn edges_intersect(first: &Edge, second: &Edge) -> bool {
     cross(between, first_vector).abs() <= f64::EPSILON
 }
 
-fn bbox(paths: &[Vec<Point>]) -> Option<(f64, f64, f64, f64)> {
-    paths.iter().flat_map(|path| path.iter()).fold(None, |bounds, point| {
+fn bbox<P: PathSlice>(paths: &[P]) -> Option<(f64, f64, f64, f64)> {
+    paths.iter().flat_map(|path| path.points().iter()).fold(None, |bounds, point| {
         Some(match bounds {
             None => (point.x, point.y, point.x, point.y),
             Some((min_x, min_y, max_x, max_y)) => {
@@ -342,11 +498,14 @@ fn path_edges(path: &[Point]) -> Vec<Edge> {
                 end: *end,
                 start_key,
                 end_key,
+                path_id: 0,
                 subject: false,
                 min_x: start.x.min(end.x),
                 min_y: start.y.min(end.y),
                 max_x: start.x.max(end.x),
                 max_y: start.y.max(end.y),
+                min_x_key: total_order_key(start.x.min(end.x)),
+                max_x_key: total_order_key(start.x.max(end.x)),
             })
         })
         .collect()
@@ -361,6 +520,14 @@ fn key(point: Point) -> Option<PointKey> {
     } else {
         Some(PointKey { x: x as i64, y: y as i64 })
     }
+}
+
+#[inline]
+fn total_order_key(value: f64) -> u64 {
+    let bits = value.to_bits();
+    let signed = i64::from_ne_bytes(bits.to_ne_bytes());
+    let sign_mask = u64::from_ne_bytes((signed >> 63).to_ne_bytes()) >> 1;
+    bits ^ sign_mask ^ (1_u64 << 63)
 }
 
 fn split_pair(
@@ -451,6 +618,7 @@ fn on_segment(point: Point, start: Point, end: Point) -> bool {
         && point.y <= start.y.max(end.y) + f64::EPSILON
 }
 
+#[inline]
 fn apply_operation(subject: bool, clip: bool, clip_type: ClipType) -> bool {
     match clip_type {
         ClipType::Intersection => subject && clip,
@@ -460,6 +628,7 @@ fn apply_operation(subject: bool, clip: bool, clip_type: ClipType) -> bool {
     }
 }
 
+#[inline]
 fn containment_sides(
     left: Point,
     right: Point,
@@ -467,29 +636,26 @@ fn containment_sides(
     known: Option<LocalSides>,
     fill_rule: FillRule,
 ) -> (bool, bool) {
-    known.map_or_else(
-        || paths_contain_pair(left, right, paths, fill_rule),
-        |sides| (sides.left, sides.right),
-    )
+    if let Some(sides) = known {
+        (sides.left, sides.right)
+    } else {
+        paths_contain_pair(left, right, paths, fill_rule)
+    }
 }
 
-fn simple_local_sides(paths: &[Vec<Point>], fill_rule: FillRule) -> Option<LocalSides> {
-    if paths.len() != 1 || paths[0].len() < 3 {
+fn simple_local_sides_with_hint<P: PathSlice>(
+    paths: &[P],
+    fill_rule: FillRule,
+    simple_hint: Option<bool>,
+) -> Option<LocalSides> {
+    if paths.len() != 1 || paths[0].points().len() < 3 {
         return None;
     }
-    if !is_convex_simple(&paths[0]) {
-        let edges = path_edges(&paths[0]);
-        for (first_index, first) in edges.iter().enumerate() {
-            for (second_index, second) in edges.iter().enumerate().skip(first_index + 1) {
-                let adjacent = second_index == first_index + 1
-                    || (first_index == 0 && second_index + 1 == edges.len());
-                if !adjacent && edges_intersect(first, second) {
-                    return None;
-                }
-            }
-        }
+    let points = paths[0].points();
+    if !simple_hint.unwrap_or_else(|| classify_path(points).simple) {
+        return None;
     }
-    let positive_winding_on_left = area2(&paths[0]) > 0.0;
+    let positive_winding_on_left = area2(points) > 0.0;
     Some(match fill_rule {
         FillRule::EvenOdd | FillRule::NonZero => {
             LocalSides { left: positive_winding_on_left, right: !positive_winding_on_left }
@@ -500,7 +666,7 @@ fn simple_local_sides(paths: &[Vec<Point>], fill_rule: FillRule) -> Option<Local
 }
 
 fn is_convex_simple(path: &[Point]) -> bool {
-    let mut keys = HashSet::new();
+    let mut keys: FastSet<PointKey> = FastSet::default();
     for point in path {
         let Some(point_key) = key(*point) else { return false };
         if !keys.insert(point_key) {
@@ -610,20 +776,21 @@ fn containment_bucket_if_inside(
         .then(|| containment_bucket(point.y, min_y, max_y))
 }
 
-fn containment_paths(paths: &[Vec<Point>]) -> Vec<ContainmentPath> {
+fn containment_paths<P: PathSlice>(paths: &[P]) -> Vec<ContainmentPath> {
     paths
         .iter()
         .map(|path| {
-            let bounds = path.iter().fold(
+            let points = path.points();
+            let bounds = points.iter().fold(
                 (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
                 |(min_x, min_y, max_x, max_y), point| {
                     (min_x.min(point.x), min_y.min(point.y), max_x.max(point.x), max_y.max(point.y))
                 },
             );
-            let edges: Vec<ContainmentEdge> = path
+            let edges: Vec<ContainmentEdge> = points
                 .iter()
-                .zip(path.iter().cycle().skip(1))
-                .take(path.len())
+                .zip(points.iter().cycle().skip(1))
+                .take(points.len())
                 .map(|(start, end)| {
                     let delta_x = end.x - start.x;
                     let delta_y = end.y - start.y;
@@ -664,38 +831,53 @@ fn stitch(edges: &[DirectedEdge]) -> Result<PathsD, Error> {
     if edges.is_empty() {
         return Ok(Vec::new());
     }
-    let mut outgoing: BTreeMap<PointKey, Vec<usize>> = BTreeMap::new();
+    let mut single_outgoing: FastMap<PointKey, usize> =
+        FastMap::with_capacity_and_hasher(edges.len(), BuildHasherDefault::default());
+    let mut has_branch = false;
     for (index, edge) in edges.iter().enumerate() {
-        outgoing.entry(edge.start_key).or_default().push(index);
-    }
-    for indices in outgoing.values_mut() {
-        if indices.len() < 2 {
-            continue;
+        if single_outgoing.insert(edge.start_key, index).is_some() {
+            has_branch = true;
         }
-        let origin_point = edges[*indices.first().ok_or(Error::TopologyFailure)?].start;
-        indices.sort_by(|left, right| {
-            compare_angle(
-                subtract(edges[*left].end, origin_point),
-                subtract(edges[*right].end, origin_point),
-            )
-        });
     }
     let mut next = vec![0; edges.len()];
-    for (index, edge) in edges.iter().enumerate() {
-        let candidates = outgoing.get(&edge.end_key).ok_or(Error::TopologyFailure)?;
-        if candidates.len() == 1 {
-            next[index] = candidates[0];
-            continue;
+    if has_branch {
+        let mut outgoing: FastMap<PointKey, Vec<usize>> =
+            FastMap::with_capacity_and_hasher(edges.len(), BuildHasherDefault::default());
+        for (index, edge) in edges.iter().enumerate() {
+            outgoing.entry(edge.start_key).or_default().push(index);
         }
-        let reverse = subtract(edge.start, edge.end);
-        let insertion = candidates
-            .iter()
-            .position(|candidate| {
-                compare_angle(subtract(edges[*candidate].end, edges[*candidate].start), reverse)
-                    != Ordering::Less
-            })
-            .unwrap_or(candidates.len());
-        next[index] = candidates[(insertion + candidates.len() - 1) % candidates.len()];
+        for indices in outgoing.values_mut() {
+            if indices.len() < 2 {
+                continue;
+            }
+            let origin_point = edges[*indices.first().ok_or(Error::TopologyFailure)?].start;
+            indices.sort_by(|left, right| {
+                compare_angle(
+                    subtract(edges[*left].end, origin_point),
+                    subtract(edges[*right].end, origin_point),
+                )
+            });
+        }
+        for (index, edge) in edges.iter().enumerate() {
+            let candidates = outgoing.get(&edge.end_key).ok_or(Error::TopologyFailure)?;
+            if candidates.len() == 1 {
+                next[index] = candidates[0];
+                continue;
+            }
+            let reverse = subtract(edge.start, edge.end);
+            let insertion = candidates
+                .iter()
+                .position(|candidate| {
+                    compare_angle(subtract(edges[*candidate].end, edges[*candidate].start), reverse)
+                        != Ordering::Less
+                })
+                .unwrap_or(candidates.len());
+            next[index] = candidates[(insertion + candidates.len() - 1) % candidates.len()];
+        }
+    } else {
+        for (index, edge) in edges.iter().enumerate() {
+            next[index] = *single_outgoing.get(&edge.end_key).ok_or(Error::TopologyFailure)?;
+        }
     }
     let mut visited = vec![false; edges.len()];
     let mut paths = Vec::new();
@@ -766,11 +948,11 @@ fn compare_paths(left: &PathD, right: &PathD) -> Ordering {
         .unwrap_or_else(|| left.len().cmp(&right.len()))
 }
 
-fn maximum_coordinate(subjects: &[Vec<Point>], clips: &[Vec<Point>]) -> f64 {
+fn maximum_coordinate<P: PathSlice>(subjects: &[P], clips: &[P]) -> f64 {
     subjects
         .iter()
         .chain(clips)
-        .flat_map(|path| path.iter())
+        .flat_map(|path| path.points().iter())
         .flat_map(|point| [point.x.abs(), point.y.abs()])
         .fold(0.0, f64::max)
 }
@@ -818,11 +1000,14 @@ mod tests {
             end,
             start_key: key(start).expect("test point key"),
             end_key: key(end).expect("test point key"),
+            path_id: 0,
             subject: false,
             min_x: start.x.min(end.x),
             min_y: start.y.min(end.y),
             max_x: start.x.max(end.x),
             max_y: start.y.max(end.y),
+            min_x_key: total_order_key(start.x.min(end.x)),
+            max_x_key: total_order_key(start.x.max(end.x)),
         }
     }
 
@@ -855,6 +1040,11 @@ mod tests {
         assert!(
             fast_paths(&[vec![PointD::new(f64::INFINITY, 0.0), PointD::new(1.0, 0.0)]]).is_some()
         );
+        let borrowed = fast_paths(std::slice::from_ref(&rectangle)).expect("borrowed path");
+        assert!(matches!(borrowed.first(), Some(FastPath::Borrowed(_))));
+        let duplicated = vec![point(0.0, 0.0), point(1.0, 0.0), point(1.0, 0.0), point(0.0, 1.0)];
+        let owned = fast_paths(std::slice::from_ref(&duplicated)).expect("normalized path");
+        assert!(matches!(owned.first(), Some(FastPath::Owned(_))));
         let no_paths: Vec<Vec<Point>> = Vec::new();
         assert!(eligible(&no_paths, &[]));
         assert!(eligible(std::slice::from_ref(&rectangle), &[]));
@@ -871,8 +1061,23 @@ mod tests {
         assert!(
             !eligible(&[vec![point(0.0, 0.0), point(2_000_000.0, 0.0), point(0.0, 1.0)]], &[],)
         );
+        assert!(!eligible(&[vec![point(f64::NAN, 0.0), point(1.0, 0.0), point(0.0, 1.0)]], &[],));
         assert!(eligible(&[vec![point(0.0, 0.0), point(0.0, 1.0)]], &[]));
-        assert!(bbox(&[]).is_none());
+        assert!(keyable_path(&rectangle));
+        assert!(!keyable_path(&[point(0.0, 0.0), point(0.0, 0.0), point(1.0, 0.0),]));
+        assert!(!keyable_path(&[point(0.0, 0.0), point(1.0, 0.0), point(0.0, 0.0),]));
+        assert!(!keyable_path(&[point(f64::NAN, 0.0), point(1.0, 0.0), point(0.0, 1.0),]));
+        assert!(total_order_key(-1.0) < total_order_key(0.0));
+        assert!(total_order_key(-0.0) < total_order_key(0.0));
+        let mut bytes_hasher = FastHasher::default();
+        bytes_hasher.write(&[1, 2, 3]);
+        let mut integer_hasher = FastHasher::default();
+        integer_hasher.write_i64(1);
+        integer_hasher.write_i64(2);
+        integer_hasher.write_i64(3);
+        assert_eq!(bytes_hasher.finish(), integer_hasher.finish());
+        let empty_paths: Vec<Vec<Point>> = Vec::new();
+        assert!(bbox(&empty_paths).is_none());
         assert_eq!(bbox(std::slice::from_ref(&rectangle)), Some((0.0, 0.0, 10.0, 10.0)));
         assert!(path_edges(&[]).is_empty());
         assert_eq!(path_edges(&[point(0.0, 0.0), point(0.0, 0.0)]).len(), 0);
@@ -957,7 +1162,9 @@ mod tests {
         {
             let _ = apply_operation(true, false, clip_type);
         }
-        assert!(short_circuit(&[], &[], ClipType::Union, FillRule::EvenOdd).is_some());
+        assert!(
+            short_circuit(&empty_paths, &empty_paths, ClipType::Union, FillRule::EvenOdd).is_some()
+        );
         assert!(
             short_circuit(&[rectangle.clone()], &[], ClipType::Intersection, FillRule::EvenOdd)
                 .is_some()
@@ -1070,7 +1277,7 @@ mod tests {
             FillRule::EvenOdd,
         );
         assert!(!paths_are_simple_and_disjoint(std::slice::from_ref(&self_crossing)));
-        assert!(paths_are_simple_and_disjoint(&[]));
+        assert!(paths_are_simple_and_disjoint(&empty_paths));
         assert!(paths_are_simple_and_disjoint(&[Vec::new()]));
         assert!(paths_are_simple_and_disjoint(&[rectangle.clone(), disjoint.clone()]));
         assert!(paths_are_simple_and_disjoint(&[rectangle.clone(), left_disjoint.clone()]));
@@ -1092,9 +1299,11 @@ mod tests {
         assert!(reversed[0][1].x >= reversed[0][0].x);
         assert!(direct_if_simple_and_disjoint(&[rectangle.clone()]).is_some());
         assert!(direct_if_simple_and_disjoint(&[self_crossing.clone()]).is_none());
-        assert!(simple_local_sides(&[], FillRule::EvenOdd).is_none());
-        assert!(simple_local_sides(&[rectangle.clone()], FillRule::EvenOdd).is_some());
-        assert!(simple_local_sides(&[clockwise], FillRule::Positive).is_some());
+        assert!(simple_local_sides_with_hint(&empty_paths, FillRule::EvenOdd, None).is_none());
+        assert!(
+            simple_local_sides_with_hint(&[rectangle.clone()], FillRule::EvenOdd, None).is_some()
+        );
+        assert!(simple_local_sides_with_hint(&[clockwise], FillRule::Positive, None).is_some());
         let concave = vec![
             point(0.0, 0.0),
             point(4.0, 0.0),
@@ -1106,8 +1315,10 @@ mod tests {
             point(0.0, 4.0),
         ];
         assert!(paths_are_simple_and_disjoint(&[concave.clone()]));
-        assert!(simple_local_sides(&[concave.clone()], FillRule::Negative).is_some());
-        assert!(simple_local_sides(&[self_crossing], FillRule::EvenOdd).is_none());
+        assert!(
+            simple_local_sides_with_hint(&[concave.clone()], FillRule::Negative, None).is_some()
+        );
+        assert!(simple_local_sides_with_hint(&[self_crossing], FillRule::EvenOdd, None).is_none());
         assert!(is_convex_simple(&rectangle));
         assert!(!is_convex_simple(&[]));
         assert!(!is_convex_simple(&[point(0.0, 0.0), point(0.0, 0.0), point(1.0, 0.0)]));
