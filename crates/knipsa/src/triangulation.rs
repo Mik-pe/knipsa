@@ -11,15 +11,23 @@ use crate::{Error, FillRule, Path64, PathD, Point64, PointD, normalize_pathd, va
 const EPSILON: f64 = 1e-12;
 
 /// A triangle with integer vertices.
+///
+/// Returned triangles are oriented counter-clockwise and can be consumed as
+/// three-point closed paths.
 pub type Triangle64 = [Point64; 3];
 
 /// A triangle with floating-point vertices.
+///
+/// Returned triangles are oriented counter-clockwise and can be consumed as
+/// three-point closed paths.
 pub type TriangleD = [PointD; 3];
 
 /// Triangulates a collection of integer-coordinate rings using a fill rule.
 ///
 /// Rings may be nested to describe holes and islands. Intersecting rings are
 /// rejected because their filled meaning is ambiguous for triangulation.
+/// The returned triangles are counter-clockwise and preserve the integer
+/// coordinate type.
 ///
 /// # Errors
 ///
@@ -42,6 +50,10 @@ pub fn triangulate64(paths: &[Path64], fill_rule: FillRule) -> Result<Vec<Triang
 }
 
 /// Triangulates a collection of floating-point rings using a fill rule.
+///
+/// Nested rings are interpreted using `fill_rule`; an even-odd hole does not
+/// need to be manually subtracted from its outer ring. Returned triangles are
+/// counter-clockwise.
 ///
 /// # Errors
 ///
@@ -75,6 +87,9 @@ pub fn triangulate_d(paths: &[PathD], fill_rule: FillRule) -> Result<Vec<Triangl
 
 /// Triangulates one simple integer polygon with the non-zero fill rule.
 ///
+/// This is the convenient entry point when there is exactly one outer ring
+/// and no holes.
+///
 /// # Errors
 ///
 /// Propagates errors from [`triangulate64`].
@@ -83,6 +98,9 @@ pub fn triangulate_path64(path: &[Point64]) -> Result<Vec<Triangle64>, Error> {
 }
 
 /// Triangulates one simple floating-point polygon with the non-zero fill rule.
+///
+/// This is the convenient entry point when there is exactly one outer ring
+/// and no holes.
 ///
 /// # Errors
 ///

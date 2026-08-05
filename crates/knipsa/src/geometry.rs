@@ -3,6 +3,9 @@
 use crate::{Error, PathKind};
 
 /// An integer point used by the exact-coordinate API.
+///
+/// Integer operations preserve these coordinates exactly. Paths are ordinary
+/// Rust vectors, so they can be built with `vec![]` and passed by slice.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct Point64 {
@@ -20,7 +23,11 @@ impl Point64 {
     }
 }
 
-/// A double-precision point used by the scaled-coordinate API.
+/// A double-precision point used by the floating-point API.
+///
+/// [`crate::boolean_opd`] accepts finite `f64` coordinates. The arrangement
+/// kernel keeps the input values exact while it computes intersections, then
+/// converts the result back to `f64`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[repr(C)]
 pub struct PointD {
@@ -38,19 +45,27 @@ impl PointD {
     }
 }
 
-/// A closed or open sequence of points.
+/// A sequence of points describing one path.
+///
+/// The path does not need to repeat its first point at the end. Whether the
+/// final point connects to the first is selected with [`PathKind`]. Boolean
+/// and triangulation inputs are closed paths; open paths are used by line
+/// offsets.
 pub type Path64 = Vec<Point64>;
 
-/// A collection of integer paths.
+/// A collection of integer paths, usually polygon rings.
 pub type Paths64 = Vec<Path64>;
 
 /// A floating-point sequence of points.
 pub type PathD = Vec<PointD>;
 
-/// A collection of floating-point paths.
+/// A collection of floating-point paths, usually polygon rings.
 pub type PathsD = Vec<PathD>;
 
 /// The orientation of three points in Cartesian coordinates.
+///
+/// For points `a`, `b`, and `c`, the result describes the turn from `a -> b`
+/// to `b -> c`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Orientation {
     /// The points turn clockwise.
@@ -62,6 +77,8 @@ pub enum Orientation {
 }
 
 /// The result of testing a point against a closed path.
+///
+/// [`point_in_polygon`] uses the even-odd rule for this classification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PointLocation {
     /// The point is outside the filled path.
@@ -72,7 +89,10 @@ pub enum PointLocation {
     Boundary,
 }
 
-/// Validates an integer path's minimum shape contract.
+/// Validates an integer path's shape contract and coordinate type.
+///
+/// Empty paths are valid and represent no geometry. A closed path requires at
+/// least three points; an open path requires at least two.
 ///
 /// # Errors
 ///
@@ -104,6 +124,10 @@ pub fn validate_paths64(paths: &[Path64], kind: PathKind) -> Result<(), Error> {
 
 /// Validates a floating-point path's shape and finiteness.
 ///
+/// Empty paths are valid. Closed paths require three points and open paths
+/// require two. Consecutive duplicate points are accepted here and can be
+/// removed with [`normalize_pathd`].
+///
 /// # Errors
 ///
 /// Returns [`Error::InvalidPath`] for a too-short path or
@@ -126,6 +150,9 @@ pub fn validate_pathd(path: &[PointD], kind: PathKind) -> Result<(), Error> {
 
 /// Removes consecutive duplicates and, for closed paths, a repeated closing
 /// point. The input is never modified.
+///
+/// This is a shape normalization helper, not a validity check: a normalized
+/// path can still be too short or collinear for a particular operation.
 #[must_use]
 pub fn normalize_path64(path: &[Point64], kind: PathKind) -> Path64 {
     let mut normalized = Vec::with_capacity(path.len());
@@ -142,6 +169,9 @@ pub fn normalize_path64(path: &[Point64], kind: PathKind) -> Path64 {
 
 /// Removes consecutive duplicate floating-point points and a repeated closing
 /// point for closed paths.
+///
+/// This is a shape normalization helper, not a validity check: a normalized
+/// path can still be too short or collinear for a particular operation.
 #[must_use]
 pub fn normalize_pathd(path: &[PointD], kind: PathKind) -> PathD {
     let mut normalized = Vec::with_capacity(path.len());
@@ -158,6 +188,10 @@ pub fn normalize_pathd(path: &[PointD], kind: PathKind) -> PathD {
 
 /// Returns twice the signed area of an integer path using checked `i128`
 /// arithmetic.
+///
+/// A positive result means counter-clockwise winding in the usual Cartesian
+/// coordinate system; a negative result means clockwise winding. Paths with
+/// fewer than three points have area zero.
 ///
 /// # Errors
 ///
@@ -197,7 +231,9 @@ pub fn orientation(a: Point64, b: Point64, c: Point64) -> Result<Orientation, Er
     })
 }
 
-/// Classifies an integer point against a closed path.
+/// Classifies an integer point against a closed path using the even-odd rule.
+///
+/// An empty path has no filled region, so every point is [`PointLocation::Outside`].
 ///
 /// # Errors
 ///

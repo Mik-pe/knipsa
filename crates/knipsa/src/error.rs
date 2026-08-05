@@ -4,6 +4,10 @@ use crate::PathKind;
 use core::fmt;
 
 /// An error produced while validating or executing a geometry operation.
+///
+/// The variants are intentionally operation-independent so callers can use a
+/// single error type across booleans, offsets, triangulation, and checked
+/// geometry helpers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// A path does not contain enough vertices for its declared kind.
@@ -23,12 +27,15 @@ pub enum Error {
     /// A checked integer computation could not be represented by `i128`.
     ArithmeticOverflow,
     /// An exact boolean result cannot be represented by the integer API.
+    ///
+    /// Use the floating-point API when an intersection creates fractional
+    /// coordinates.
     NonIntegralResult,
     /// The arrangement could not be closed into valid output rings.
     TopologyFailure,
-    /// An offset option or offset input is not geometrically meaningful.
+    /// An offset option is not geometrically meaningful.
     InvalidOffset,
-    /// A triangulation input is self-intersecting or cannot be triangulated.
+    /// A triangulation input cannot be triangulated.
     TriangulationFailure,
     /// A set of paths that must be disjoint contains an intersection.
     IntersectingPaths,

@@ -1,7 +1,7 @@
-//! C-compatible, language-neutral entry points for the safe `knipsa` API.
-
+#![doc = include_str!("../../../docs/ffi.md")]
 #![deny(unsafe_op_in_unsafe_fn)]
-#![warn(missing_docs)]
+#![deny(missing_docs)]
+#![doc(test(attr(deny(warnings))))]
 
 use std::{
     ffi::c_char,
@@ -51,8 +51,11 @@ impl From<KnipsaPointD> for PointD {
     }
 }
 
-/// A borrowed point slice. A null `points` pointer is valid only when
-/// `point_count` is zero.
+/// A borrowed integer point slice.
+///
+/// A null `points` pointer is valid only when `point_count` is zero. The
+/// pointer must remain readable for the duration of the call that receives
+/// this descriptor; ownership stays with the caller.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct KnipsaPath64 {
@@ -62,8 +65,11 @@ pub struct KnipsaPath64 {
     pub point_count: usize,
 }
 
-/// A borrowed floating-point point slice. A null `points` pointer is valid
-/// only when `point_count` is zero.
+/// A borrowed floating-point point slice.
+///
+/// A null `points` pointer is valid only when `point_count` is zero. The
+/// pointer must remain readable for the duration of the call that receives
+/// this descriptor; ownership stays with the caller.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct KnipsaPathD {
@@ -73,7 +79,11 @@ pub struct KnipsaPathD {
     pub point_count: usize,
 }
 
-/// An owned boolean result. Release it with [`knipsa_free_paths64`].
+/// An owned integer result returned by a Rust operation.
+///
+/// Release both the descriptor array and its point arrays with
+/// [`knipsa_free_paths64`]. A zero-path result has `paths == NULL` and
+/// `path_count == 0`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct KnipsaPaths64 {
@@ -83,8 +93,11 @@ pub struct KnipsaPaths64 {
     pub path_count: usize,
 }
 
-/// An owned floating-point boolean result. Release it with
-/// [`knipsa_free_paths_d`].
+/// An owned floating-point result returned by a Rust operation.
+///
+/// Release both the descriptor array and its point arrays with
+/// [`knipsa_free_paths_d`]. A zero-path result has `paths == NULL` and
+/// `path_count == 0`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[repr(C)]
 pub struct KnipsaPathsD {
@@ -95,6 +108,8 @@ pub struct KnipsaPathsD {
 }
 
 /// The corner style accepted by offset operations.
+///
+/// The numeric values are part of the C ABI and mirror the generated header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub enum KnipsaJoinType {
@@ -109,6 +124,8 @@ pub enum KnipsaJoinType {
 }
 
 /// The endpoint style accepted by offset operations.
+///
+/// `Polygon` is for closed rings; all other values describe open polylines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub enum KnipsaEndType {
@@ -144,6 +161,10 @@ impl From<KnipsaPathKind> for PathKind {
 }
 
 /// Stable status codes returned by exported functions.
+///
+/// Functions return a status instead of allowing a Rust panic or exception to
+/// cross the ABI boundary. The output descriptor is reset before operations
+/// that produce an owned result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub enum KnipsaStatus {
@@ -201,12 +222,16 @@ fn test_panic_if_requested() {
 }
 
 /// Returns the knipsa FFI version as a static NUL-terminated string.
+///
+/// The returned pointer is owned by the library and must not be freed.
 #[unsafe(no_mangle)]
 pub extern "C" fn knipsa_version() -> *const c_char {
     VERSION.as_ptr().cast()
 }
 
 /// Returns a static NUL-terminated description for a status code.
+///
+/// The returned pointer is owned by the library and must not be freed.
 #[unsafe(no_mangle)]
 pub extern "C" fn knipsa_status_message(status: KnipsaStatus) -> *const c_char {
     match status {
@@ -226,6 +251,12 @@ pub extern "C" fn knipsa_status_message(status: KnipsaStatus) -> *const c_char {
 ///
 /// A null `paths` pointer is accepted when `path_count` is zero. Each path's
 /// point pointer follows the same rule. Inputs remain owned by the caller.
+///
+/// # Safety
+///
+/// When either count is non-zero, the corresponding pointer and every
+/// non-empty point pointer must refer to readable memory for the duration of
+/// the call.
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn knipsa_validate_paths64(
@@ -246,6 +277,16 @@ pub extern "C" fn knipsa_validate_paths64(
 /// Executes an integer boolean operation and allocates the result for the
 /// caller. The operation and fill-rule arguments use the values from
 /// `KnipsaClipType` and `KnipsaFillRule`.
+///
+/// On success, release `result` with [`knipsa_free_paths64`]. The input arrays
+/// remain owned by the caller. A null input array is valid when its count is
+/// zero.
+///
+/// # Safety
+///
+/// `result` must point to writable `KnipsaPaths64` storage. Non-empty input
+/// arrays and their point buffers must be readable for the duration of the
+/// call.
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn knipsa_boolean64(
@@ -292,6 +333,16 @@ pub extern "C" fn knipsa_boolean64(
 /// Executes a floating-point boolean operation and allocates the result for
 /// the caller. Coordinates are accepted as IEEE-754 `double` values and are
 /// checked for finiteness by the Rust API.
+///
+/// On success, release `result` with [`knipsa_free_paths_d`]. The input arrays
+/// remain owned by the caller. A null input array is valid when its count is
+/// zero.
+///
+/// # Safety
+///
+/// `result` must point to writable `KnipsaPathsD` storage. Non-empty input
+/// arrays and their point buffers must be readable for the duration of the
+/// call.
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn knipsa_boolean_d(
@@ -337,6 +388,15 @@ pub extern "C" fn knipsa_boolean_d(
 
 /// Offsets integer-coordinate paths and returns rounded results as double
 /// paths so fractional joins are not lost at the ABI boundary.
+///
+/// On success, release `result` with [`knipsa_free_paths_d`]. A non-zero
+/// `preserve_collinear` value is treated as `true`.
+///
+/// # Safety
+///
+/// `result` must point to writable `KnipsaPathsD` storage. Non-empty input
+/// arrays and their point buffers must be readable for the duration of the
+/// call.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments, clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn knipsa_offset64(
@@ -381,6 +441,15 @@ pub extern "C" fn knipsa_offset64(
 }
 
 /// Offsets floating-point paths and returns floating-point polygon outlines.
+///
+/// On success, release `result` with [`knipsa_free_paths_d`]. A non-zero
+/// `preserve_collinear` value is treated as `true`.
+///
+/// # Safety
+///
+/// `result` must point to writable `KnipsaPathsD` storage. Non-empty input
+/// arrays and their point buffers must be readable for the duration of the
+/// call.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments, clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn knipsa_offset_d(
@@ -424,6 +493,14 @@ pub extern "C" fn knipsa_offset_d(
 
 /// Triangulates integer-coordinate rings. Each returned triangle is exposed
 /// as a three-point path in `KnipsaPaths64`.
+///
+/// On success, release `result` with [`knipsa_free_paths64`].
+///
+/// # Safety
+///
+/// `result` must point to writable `KnipsaPaths64` storage. Non-empty input
+/// arrays and their point buffers must be readable for the duration of the
+/// call.
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn knipsa_triangulate64(
@@ -464,6 +541,14 @@ pub extern "C" fn knipsa_triangulate64(
 
 /// Triangulates floating-point rings. Each returned triangle is exposed as a
 /// three-point path in `KnipsaPathsD`.
+///
+/// On success, release `result` with [`knipsa_free_paths_d`].
+///
+/// # Safety
+///
+/// `result` must point to writable `KnipsaPathsD` storage. Non-empty input
+/// arrays and their point buffers must be readable for the duration of the
+/// call.
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn knipsa_triangulate_d(
@@ -502,8 +587,12 @@ pub extern "C" fn knipsa_triangulate_d(
     }
 }
 
-/// Releases a result returned by [`knipsa_boolean64`]. It is safe to pass a
-/// null pointer or to call this function again after it zeroes the result.
+/// Releases a result returned by [`knipsa_boolean64`] or
+/// [`knipsa_triangulate64`]. It is safe to pass a null pointer or to call this
+/// function again after it zeroes the result.
+///
+/// The pointer must be a valid pointer to a result descriptor previously
+/// initialized by this library or a zeroed descriptor.
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn knipsa_free_paths64(result: *mut KnipsaPaths64) {
@@ -537,8 +626,12 @@ pub extern "C" fn knipsa_free_paths64(result: *mut KnipsaPaths64) {
     }
 }
 
-/// Releases a result returned by [`knipsa_boolean_d`]. It is safe to pass a
-/// null pointer or to call this function again after it zeroes the result.
+/// Releases a result returned by [`knipsa_boolean_d`], [`knipsa_offset64`],
+/// [`knipsa_offset_d`], or [`knipsa_triangulate_d`]. It is safe to pass a null
+/// pointer or to call this function again after it zeroes the result.
+///
+/// The pointer must be a valid pointer to a result descriptor previously
+/// initialized by this library or a zeroed descriptor.
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn knipsa_free_paths_d(result: *mut KnipsaPathsD) {
@@ -572,7 +665,13 @@ pub extern "C" fn knipsa_free_paths_d(result: *mut KnipsaPathsD) {
     }
 }
 
-/// Classifies one point against a borrowed closed path.
+/// Classifies one point against a borrowed closed path using the even-odd rule.
+///
+/// # Safety
+///
+/// `location` must point to writable `KnipsaLocation` storage. If
+/// `path.point_count` is non-zero, `path.points` must point to readable
+/// `KnipsaPoint64` values for the duration of the call.
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn knipsa_point_in_polygon64(

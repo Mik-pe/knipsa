@@ -16,6 +16,8 @@ const ARC_TOLERANCE_RATIO: f64 = 0.002;
 const MAX_ARC_STEPS: usize = 4096;
 
 /// The treatment of corners when a path is offset.
+///
+/// The selected join is applied to the outer side of each generated outline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum JoinType {
@@ -30,6 +32,9 @@ pub enum JoinType {
 }
 
 /// The treatment of the ends of an open path.
+///
+/// [`EndType::Polygon`] is the only closed-path mode. The other variants
+/// create a stroked outline around an open polyline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum EndType {
@@ -46,18 +51,24 @@ pub enum EndType {
 }
 
 /// Options controlling an offset operation.
+///
+/// `OffsetOptions::default()` produces round joins for closed polygons. For
+/// an open path, choose one of the non-`Polygon` [`EndType`] variants.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OffsetOptions {
-    /// Corner style.
+    /// Corner style for generated outlines.
     pub join_type: JoinType,
-    /// Endpoint style for open paths.
+    /// Endpoint style; `Polygon` means that input paths are closed regions.
     pub end_type: EndType,
     /// Maximum miter length divided by the absolute offset distance.
+    ///
+    /// Values below `1.0` are rejected. This field only affects
+    /// [`JoinType::Miter`].
     pub miter_limit: f64,
-    /// Maximum deviation of a round join from its ideal circle. Zero selects
-    /// a scale-relative default of `abs(delta) / 500`.
+    /// Maximum deviation of a round join from its ideal circle in input units.
+    /// Zero selects a scale-relative default of `abs(delta) / 500`.
     pub arc_tolerance: f64,
-    /// Keep collinear vertices in the returned rings.
+    /// Keep collinear vertices in the returned rings instead of cleaning them.
     pub preserve_collinear: bool,
 }
 
@@ -78,7 +89,8 @@ impl Default for OffsetOptions {
 ///
 /// Use [`offset_paths_d`] when fractional output is significant. Positive
 /// deltas expand closed paths according to their winding direction. Open
-/// paths use the absolute delta as their half-width.
+/// paths use the absolute delta as their half-width. Integer coordinates are
+/// rounded after the floating-point outline has been cleaned.
 ///
 /// # Errors
 ///
@@ -98,6 +110,9 @@ pub fn offset_paths64(
 ///
 /// [`OffsetOptions::end_type`] determines whether inputs are closed polygons
 /// (`Polygon`) or open polylines (`Joined`, `Butt`, `Square`, and `Round`).
+/// A positive delta expands a closed ring according to its winding; a negative
+/// delta contracts it. Open paths always use the absolute value as their
+/// half-width.
 ///
 /// # Errors
 ///
@@ -158,7 +173,7 @@ pub fn offset_paths_d(
         .collect())
 }
 
-/// Alias with a name that mirrors [`offset_paths64`].
+/// Offsets floating-point paths; an ergonomic alias for [`offset_paths_d`].
 ///
 /// # Errors
 ///

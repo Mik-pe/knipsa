@@ -1,6 +1,7 @@
 #![doc = include_str!("../../../README.md")]
 #![forbid(unsafe_code)]
-#![warn(missing_docs)]
+#![deny(missing_docs)]
+#![doc(test(attr(deny(warnings))))]
 
 mod boolean;
 mod error;
@@ -26,7 +27,12 @@ pub use triangulation::{
     triangulate_paths_d, triangulate_paths64, triangulate64,
 };
 
-/// Whether a path describes a closed region or an open line.
+/// Describes whether a path's final point connects back to its first point.
+///
+/// Polygon operations use [`PathKind::Closed`]. Offset operations use
+/// [`PathKind::Open`] for stroked polylines and [`PathKind::Closed`] for
+/// filled polygons. A repeated closing point is accepted and removed by the
+/// normalization helpers; it is not required by the API.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathKind {
     /// A path whose edges wrap from the final point to the first.
@@ -36,6 +42,10 @@ pub enum PathKind {
 }
 
 /// The current semantic version of the safe Rust API.
+///
+/// This is the crate version compiled into the library. It is useful for
+/// logging or for checking that a dynamically loaded companion library is the
+/// version an application expects.
 pub const API_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]

@@ -3,6 +3,10 @@
 use crate::{Error, Path64, PathD, PathKind, Paths64, PathsD, validate_path64, validate_pathd};
 
 /// A boolean operation over filled paths.
+///
+/// The subject and clip collections may contain multiple rings. Empty
+/// collections are valid and make the operation behave like the corresponding
+/// set operation with an empty side.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ClipType {
@@ -16,7 +20,10 @@ pub enum ClipType {
     Xor = 4,
 }
 
-/// A winding/fill rule used to interpret self-intersecting input paths.
+/// A winding/fill rule used to interpret input paths.
+///
+/// `EvenOdd` depends only on crossing parity. The other rules use the signed
+/// winding accumulated by a path, which makes ring orientation meaningful.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FillRule {
@@ -30,12 +37,15 @@ pub enum FillRule {
     Negative = 3,
 }
 
-/// Borrowed inputs to a boolean operation.
+/// Borrowed integer inputs to a boolean operation.
+///
+/// Every non-empty path is interpreted as a closed ring. The first point does
+/// not need to be repeated at the end.
 #[derive(Clone, Copy, Debug)]
 pub struct BooleanRequest<'a> {
-    /// Subject paths.
+    /// Subject paths, the left-hand side of the operation.
     pub subjects: &'a [Path64],
-    /// Clip paths.
+    /// Clip paths, the right-hand side of the operation.
     pub clips: &'a [Path64],
     /// Boolean operation to perform.
     pub clip_type: ClipType,
@@ -44,11 +54,14 @@ pub struct BooleanRequest<'a> {
 }
 
 /// Borrowed floating-point inputs to a boolean operation.
+///
+/// This has the same topology contract as [`BooleanRequest`], but accepts
+/// finite [`f64`](f64) coordinates.
 #[derive(Clone, Copy, Debug)]
 pub struct BooleanRequestD<'a> {
-    /// Subject paths.
+    /// Subject paths, the left-hand side of the operation.
     pub subjects: &'a [PathD],
-    /// Clip paths.
+    /// Clip paths, the right-hand side of the operation.
     pub clips: &'a [PathD],
     /// Boolean operation to perform.
     pub clip_type: ClipType,
@@ -57,6 +70,9 @@ pub struct BooleanRequestD<'a> {
 }
 
 /// Validates a boolean request without executing it.
+///
+/// Use this when a caller wants to report malformed input before doing any
+/// work. [`boolean_op`] performs the same validation automatically.
 ///
 /// # Errors
 ///
@@ -71,6 +87,9 @@ pub fn validate_request(request: &BooleanRequest<'_>) -> Result<(), Error> {
 
 /// Validates a floating-point boolean request without executing it.
 ///
+/// In addition to path shape, this rejects NaN and infinite coordinates.
+/// [`boolean_opd`] performs the same validation automatically.
+///
 /// # Errors
 ///
 /// Returns [`Error::InvalidPath`] for a too-short path and
@@ -84,21 +103,52 @@ pub fn validate_requestd(request: &BooleanRequestD<'_>) -> Result<(), Error> {
 
 /// Executes an exact integer boolean request.
 ///
+/// # Examples
+///
+/// ```
+/// use knipsa::{boolean_op, BooleanRequest, ClipType, FillRule, Point64};
+///
+/// let subject = vec![
+///     Point64::new(0, 0),
+///     Point64::new(10, 0),
+///     Point64::new(10, 10),
+///     Point64::new(0, 10),
+/// ];
+/// let clip = vec![
+///     Point64::new(5, 5),
+///     Point64::new(15, 5),
+///     Point64::new(15, 15),
+///     Point64::new(5, 15),
+/// ];
+/// let result = boolean_op(BooleanRequest {
+///     subjects: std::slice::from_ref(&subject),
+///     clips: std::slice::from_ref(&clip),
+///     clip_type: ClipType::Intersection,
+///     fill_rule: FillRule::EvenOdd,
+/// })
+/// .expect("valid polygons close");
+///
+/// assert_eq!(result.len(), 1);
+/// assert!(!result[0].is_empty());
+/// ```
+///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPath`] for invalid input, [`Error::NonIntegralResult`]
-/// when an exact intersection cannot be represented by `i64`, or
-/// [`Error::TopologyFailure`] if the arrangement cannot be closed.
+/// Returns [`Error::InvalidPath`] for invalid input, [`Error::ArithmeticOverflow`]
+/// for checked integer overflow, [`Error::NonIntegralResult`] when an exact
+/// result cannot be represented by `i64`, or [`Error::TopologyFailure`] if the
+/// arrangement cannot be closed.
 pub fn boolean_op(request: BooleanRequest<'_>) -> Result<Paths64, Error> {
     validate_request(&request)?;
     crate::boolean::boolean_op64(request)
 }
 
-/// Executes an exact floating-point boolean request.
+/// Executes a floating-point boolean request.
 ///
 /// The input binary floating-point values are treated as exact values during
 /// arrangement construction; only the returned coordinates are converted back
-/// to `f64`.
+/// to `f64`. Ordinary well-conditioned convex input uses the fast path and
+/// difficult or ambiguous input uses the exact arrangement fallback.
 ///
 /// # Errors
 ///

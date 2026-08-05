@@ -31,3 +31,42 @@ The API contains validation, point-location, boolean, offset, and triangulation
 calls. Output is an owned array of
 borrowed-looking path descriptors; the descriptors and their point arrays are
 both released by the single matching free function for that coordinate type.
+
+## Minimal C client
+
+The header is self-contained. A null input pointer is valid when its count is
+zero, so a union of one subject and no clips can be written like this:
+
+```c
+#include "knipsa.h"
+
+#include <stdio.h>
+
+int main(void) {
+    const KnipsaPoint64 points[] = {
+        {0, 0}, {10, 0}, {10, 10}, {0, 10},
+    };
+    const KnipsaPath64 subject = {points, 4};
+    KnipsaPaths64 result = {0};
+
+    const KnipsaStatus status = knipsa_boolean64(
+        &subject, 1, NULL, 0,
+        KNIPSA_CLIP_UNION, KNIPSA_FILL_EVEN_ODD,
+        &result
+    );
+    if (status != KNIPSA_STATUS_OK) {
+        fprintf(stderr, "knipsa failed: %s\n", knipsa_status_message(status));
+        return 1;
+    }
+
+    printf("rings: %zu\n", result.path_count);
+    knipsa_free_paths64(&result);
+    return 0;
+}
+```
+
+Compile the repository smoke client with:
+
+```sh
+./scripts/check-c-api.sh
+```

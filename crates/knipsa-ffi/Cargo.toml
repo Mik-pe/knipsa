@@ -9,6 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 description = "The stable C-compatible FFI for the knipsa polygon clipping engine"
 readme = "../../README.md"
+documentation = "https://docs.rs/knipsa-ffi"
 keywords = ["geometry", "polygon", "clipping", "ffi"]
 categories = ["api-bindings", "graphics", "mathematics"]
 
@@ -20,3 +21,6 @@ knipsa = { path = "../knipsa" }
 
 [lints]
 workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
