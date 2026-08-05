@@ -116,6 +116,8 @@ struct ContainmentEdge {
 struct ContainmentPath {
     bounds: (f64, f64, f64, f64),
     buckets: Vec<Vec<ContainmentEdge>>,
+    convex_points: Option<Vec<Point>>,
+    convex_winding: Option<i32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -127,6 +129,7 @@ struct LocalSides {
 #[derive(Clone, Copy, Debug, Default)]
 struct PathProperties {
     simple: bool,
+    convex: bool,
 }
 
 pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<PathsD, ()>> {
@@ -256,12 +259,12 @@ fn run<P: PathSlice>(
     let subject_paths = if clips.is_empty() && subject_sides.is_some() {
         Vec::new()
     } else {
-        containment_paths(subjects)
+        containment_paths_with_properties(subjects, &path_properties[..subjects.len()])
     };
     let clip_paths = if subjects.is_empty() && clip_sides.is_some() {
         Vec::new()
     } else {
-        containment_paths(clips)
+        containment_paths_with_properties(clips, &path_properties[subjects.len()..])
     };
     let mut directed = Vec::with_capacity(edges.len());
     let mut seen: FastSet<(PointKey, PointKey)> =
@@ -354,7 +357,7 @@ fn classify_path(path: &[Point]) -> PathProperties {
         return PathProperties::default();
     }
     if is_convex_simple(path) {
-        return PathProperties { simple: true };
+        return PathProperties { simple: true, convex: true };
     }
     let edges = path_edges(path);
     for (first, edge) in edges.iter().enumerate() {
@@ -367,7 +370,7 @@ fn classify_path(path: &[Point]) -> PathProperties {
             }
         }
     }
-    PathProperties { simple: true }
+    PathProperties { simple: true, convex: false }
 }
 
 fn short_circuit<P: PathSlice>(
@@ -700,6 +703,11 @@ fn paths_contain_pair(
     let mut left_state = WindingState::default();
     let mut right_state = WindingState::default();
     for path in paths {
+        if let (Some(points), Some(winding)) = (&path.convex_points, path.convex_winding) {
+            update_convex_winding(&mut left_state, left, points, winding);
+            update_convex_winding(&mut right_state, right, points, winding);
+            continue;
+        }
         let (min_x, min_y, max_x, max_y) = path.bounds;
         let left_bucket = containment_bucket_if_inside(left, min_x, min_y, max_x, max_y);
         let right_bucket = containment_bucket_if_inside(right, min_x, min_y, max_x, max_y);
@@ -732,6 +740,43 @@ fn paths_contain_pair(
         }
     }
     (left_state.contains(fill_rule), right_state.contains(fill_rule))
+}
+
+fn update_convex_winding(state: &mut WindingState, point: Point, points: &[Point], winding: i32) {
+    if convex_contains(point, points, winding > 0) {
+        state.parity = !state.parity;
+        state.winding += winding;
+    }
+}
+
+fn convex_contains(point: Point, points: &[Point], positive: bool) -> bool {
+    let origin = points[0];
+    let target = subtract(point, origin);
+    let first = cross(subtract(points[1], origin), target);
+    let last = cross(subtract(points[points.len() - 1], origin), target);
+    if positive {
+        if first < 0.0 || last > 0.0 {
+            return false;
+        }
+    } else if first > 0.0 || last < 0.0 {
+        return false;
+    }
+
+    let mut lower = 1;
+    let mut upper = points.len() - 1;
+    while upper - lower > 1 {
+        let middle = lower.midpoint(upper);
+        let cross_value = cross(subtract(points[middle], origin), target);
+        if (positive && cross_value >= 0.0) || (!positive && cross_value <= 0.0) {
+            lower = middle;
+        } else {
+            upper = middle;
+        }
+    }
+    let edge = subtract(points[(lower + 1) % points.len()], points[lower]);
+    let to_point = subtract(point, points[lower]);
+    let boundary = cross(edge, to_point);
+    if positive { boundary >= 0.0 } else { boundary <= 0.0 }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -776,10 +821,19 @@ fn containment_bucket_if_inside(
         .then(|| containment_bucket(point.y, min_y, max_y))
 }
 
+#[cfg(test)]
 fn containment_paths<P: PathSlice>(paths: &[P]) -> Vec<ContainmentPath> {
+    containment_paths_with_properties(paths, &[])
+}
+
+fn containment_paths_with_properties<P: PathSlice>(
+    paths: &[P],
+    properties: &[PathProperties],
+) -> Vec<ContainmentPath> {
     paths
         .iter()
-        .map(|path| {
+        .enumerate()
+        .map(|(index, path)| {
             let points = path.points();
             let bounds = points.iter().fold(
                 (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
@@ -803,6 +857,14 @@ fn containment_paths<P: PathSlice>(paths: &[P]) -> Vec<ContainmentPath> {
                     }
                 })
                 .collect();
+            if properties.get(index).is_some_and(|properties| properties.convex) {
+                return ContainmentPath {
+                    bounds,
+                    buckets: Vec::new(),
+                    convex_points: Some(points.to_vec()),
+                    convex_winding: Some(if area2(points) > 0.0 { 1 } else { -1 }),
+                };
+            }
             let mut buckets = vec![Vec::new(); CONTAINMENT_BUCKETS];
             for edge in edges {
                 let start_y = edge.start.y;
@@ -813,7 +875,7 @@ fn containment_paths<P: PathSlice>(paths: &[P]) -> Vec<ContainmentPath> {
                     bucket.push(edge);
                 }
             }
-            ContainmentPath { bounds, buckets }
+            ContainmentPath { bounds, buckets, convex_points: None, convex_winding: None }
         })
         .collect()
 }
@@ -1333,6 +1395,10 @@ mod tests {
         assert!(!is_convex_simple(&concave));
 
         let containment = containment_paths(&[rectangle.clone()]);
+        let convex_containment = containment_paths_with_properties(
+            &[rectangle.clone()],
+            &[PathProperties { simple: true, convex: true }],
+        );
         assert_eq!(
             paths_contain_pair(
                 point(-1.0, -1.0),
@@ -1341,6 +1407,32 @@ mod tests {
                 FillRule::EvenOdd
             ),
             (false, false)
+        );
+        for fill_rule in
+            [FillRule::EvenOdd, FillRule::NonZero, FillRule::Positive, FillRule::Negative]
+        {
+            assert_eq!(
+                paths_contain_pair(point(5.0, 5.0), point(-2.0, -2.0), &containment, fill_rule),
+                paths_contain_pair(
+                    point(5.0, 5.0),
+                    point(-2.0, -2.0),
+                    &convex_containment,
+                    fill_rule,
+                )
+            );
+        }
+        let clockwise_containment = containment_paths_with_properties(
+            &[vec![point(0.0, 0.0), point(0.0, 10.0), point(10.0, 10.0), point(10.0, 0.0)]],
+            &[PathProperties { simple: true, convex: true }],
+        );
+        assert_eq!(
+            paths_contain_pair(
+                point(1.0, 1.0),
+                point(-1.0, -1.0),
+                &clockwise_containment,
+                FillRule::Negative,
+            ),
+            (true, false)
         );
         assert_eq!(
             paths_contain_pair(point(5.0, 5.0), point(-2.0, -2.0), &containment, FillRule::EvenOdd),
