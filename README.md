@@ -22,7 +22,7 @@ cargo add --git https://github.com/Mik-pe/knipsa knipsa
 Boolean operations work directly on ordinary Rust vectors:
 
 ```rust
-use knipsa::{boolean_opd, BooleanRequestD, ClipType, FillRule, PointD};
+use knipsa::{PointD, intersection_d};
 
 fn main() -> Result<(), knipsa::Error> {
     let subject = vec![
@@ -38,12 +38,7 @@ fn main() -> Result<(), knipsa::Error> {
         PointD::new(5.0, 15.0),
     ];
 
-    let result = boolean_opd(BooleanRequestD::new(
-        std::slice::from_ref(&subject),
-        std::slice::from_ref(&clip),
-        ClipType::Intersection,
-        FillRule::EvenOdd,
-    ))?;
+    let result = intersection_d(std::slice::from_ref(&subject), std::slice::from_ref(&clip))?;
 
     assert_eq!(result.len(), 1);
     Ok(())
@@ -61,6 +56,7 @@ cargo run -p knipsa --example quickstart
 
 | Need | Use |
 | --- | --- |
+| Common EvenOdd booleans | `intersection`, `union`, `difference`, `xor` and `_d` variants |
 | Exact integer polygon booleans | `boolean_op` with `Point64` |
 | Fractional coordinates | `boolean_opd` with `PointD` |
 | Polygon or polyline offsets | `offset_paths64` or `offset_paths_d` |
@@ -70,7 +66,9 @@ cargo run -p knipsa --example quickstart
 
 Integer operations preserve integer coordinates. The floating-point boolean
 API accepts finite `f64` values and computes intersections exactly before
-returning `f64` coordinates.
+returning `f64` coordinates. The convenience operations use the
+orientation-independent `EvenOdd` rule; use `boolean_op`/`boolean_opd` when a
+different fill rule is required.
 
 ## Geometry conventions
 

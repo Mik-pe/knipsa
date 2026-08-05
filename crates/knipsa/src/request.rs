@@ -185,6 +185,85 @@ pub fn boolean_opd(request: BooleanRequestD<'_>) -> Result<PathsD, Error> {
     crate::boolean::boolean_opd(request)
 }
 
+/// Intersects integer path collections using the orientation-independent
+/// [`FillRule::EvenOdd`] rule.
+///
+/// Use [`boolean_op`] when a different fill rule is required.
+///
+/// # Errors
+///
+/// Propagates validation, arithmetic, representation, and topology errors from
+/// [`boolean_op`].
+pub fn intersection(subjects: &[Path64], clips: &[Path64]) -> Result<Paths64, Error> {
+    boolean_op(BooleanRequest::new(subjects, clips, ClipType::Intersection, FillRule::EvenOdd))
+}
+
+/// Unites two integer path collections using [`FillRule::EvenOdd`].
+///
+/// # Errors
+///
+/// Propagates errors from [`boolean_op`].
+pub fn union(subjects: &[Path64], clips: &[Path64]) -> Result<Paths64, Error> {
+    boolean_op(BooleanRequest::new(subjects, clips, ClipType::Union, FillRule::EvenOdd))
+}
+
+/// Subtracts integer `clips` from `subjects` using [`FillRule::EvenOdd`].
+///
+/// # Errors
+///
+/// Propagates errors from [`boolean_op`].
+pub fn difference(subjects: &[Path64], clips: &[Path64]) -> Result<Paths64, Error> {
+    boolean_op(BooleanRequest::new(subjects, clips, ClipType::Difference, FillRule::EvenOdd))
+}
+
+/// Computes integer symmetric difference using [`FillRule::EvenOdd`].
+///
+/// # Errors
+///
+/// Propagates errors from [`boolean_op`].
+pub fn xor(subjects: &[Path64], clips: &[Path64]) -> Result<Paths64, Error> {
+    boolean_op(BooleanRequest::new(subjects, clips, ClipType::Xor, FillRule::EvenOdd))
+}
+
+/// Intersects floating-point path collections using [`FillRule::EvenOdd`].
+///
+/// Use [`boolean_opd`] when a different fill rule is required.
+///
+/// # Errors
+///
+/// Propagates validation, arithmetic, and topology errors from [`boolean_opd`].
+pub fn intersection_d(subjects: &[PathD], clips: &[PathD]) -> Result<PathsD, Error> {
+    boolean_opd(BooleanRequestD::new(subjects, clips, ClipType::Intersection, FillRule::EvenOdd))
+}
+
+/// Unites two floating-point path collections using [`FillRule::EvenOdd`].
+///
+/// # Errors
+///
+/// Propagates errors from [`boolean_opd`].
+pub fn union_d(subjects: &[PathD], clips: &[PathD]) -> Result<PathsD, Error> {
+    boolean_opd(BooleanRequestD::new(subjects, clips, ClipType::Union, FillRule::EvenOdd))
+}
+
+/// Subtracts floating-point `clips` from `subjects` using
+/// [`FillRule::EvenOdd`].
+///
+/// # Errors
+///
+/// Propagates errors from [`boolean_opd`].
+pub fn difference_d(subjects: &[PathD], clips: &[PathD]) -> Result<PathsD, Error> {
+    boolean_opd(BooleanRequestD::new(subjects, clips, ClipType::Difference, FillRule::EvenOdd))
+}
+
+/// Computes floating-point symmetric difference using [`FillRule::EvenOdd`].
+///
+/// # Errors
+///
+/// Propagates errors from [`boolean_opd`].
+pub fn xor_d(subjects: &[PathD], clips: &[PathD]) -> Result<PathsD, Error> {
+    boolean_opd(BooleanRequestD::new(subjects, clips, ClipType::Xor, FillRule::EvenOdd))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +356,49 @@ mod tests {
             fill_rule: FillRule::EvenOdd,
         };
         assert!(matches!(validate_requestd(&bad), Err(Error::InvalidPath { .. })));
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn convenience_operations_use_even_odd_semantics() {
+        let subject = vec![
+            crate::Point64::new(0, 0),
+            crate::Point64::new(10, 0),
+            crate::Point64::new(10, 10),
+            crate::Point64::new(0, 10),
+        ];
+        let clip = vec![
+            crate::Point64::new(5, 0),
+            crate::Point64::new(15, 0),
+            crate::Point64::new(15, 10),
+            crate::Point64::new(5, 10),
+        ];
+        let subjects = [subject];
+        let clips = [clip];
+        assert_eq!(intersection(&subjects, &clips).expect("intersection").len(), 1);
+        assert_eq!(union(&subjects, &clips).expect("union").len(), 1);
+        assert_eq!(difference(&subjects, &clips).expect("difference").len(), 1);
+        assert_eq!(xor(&subjects, &clips).expect("xor").len(), 2);
+
+        let subjects_d = subjects
+            .iter()
+            .map(|path| {
+                path.iter()
+                    .map(|point| crate::PointD::new(point.x as f64, point.y as f64))
+                    .collect()
+            })
+            .collect::<Vec<PathD>>();
+        let clips_d = clips
+            .iter()
+            .map(|path| {
+                path.iter()
+                    .map(|point| crate::PointD::new(point.x as f64, point.y as f64))
+                    .collect()
+            })
+            .collect::<Vec<PathD>>();
+        assert_eq!(intersection_d(&subjects_d, &clips_d).expect("intersection_d").len(), 1);
+        assert_eq!(union_d(&subjects_d, &clips_d).expect("union_d").len(), 1);
+        assert_eq!(difference_d(&subjects_d, &clips_d).expect("difference_d").len(), 1);
+        assert_eq!(xor_d(&subjects_d, &clips_d).expect("xor_d").len(), 2);
     }
 }

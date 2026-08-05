@@ -215,7 +215,7 @@ proof that local refinement never exceeds the public error bound.
 | P0 | There is no offset conformance/performance matrix. | Add shared closed/open, join/cap, hole, collapse, large-coordinate, and tolerance workloads to Knipsa and Clipper2 adapters. | Canonical region/error comparison and three-process timings. |
 | P1 | Exact Boolean intersection discovery is all-pairs. | Add an exact event-discovery interface; feed its splits into the unchanged classifier/tracer first. | Differential equality against all-pairs oracle. |
 | P1 | `offset_paths64` used absolute `f64` conversion and rejected small shapes beyond 2^53. | Translate to a shared local origin, compute checked differences in `i128`, restore with checked `i128`. | Translation metamorphic tests and overflow edges. |
-| P1 | Fast-path classification and short-circuit helpers can rescan rings. | Build one per-request property cache and pass it through dispatch. | Benchmark without changing selected result. |
+| P1 | Fast-path classification and short-circuit helpers rescanned rings. | Path properties are now built once per general request and shared by dispatch, splitting, and containment. | Benchmark without changing selected result. |
 | P1 | Fixed 32-row containment buckets ignored input size/distribution. | The first implementation now selects a power-of-two count from edge count, capped at 64; y-distribution and inline storage remain future work. | Worst-case memory cap and profile evidence. |
 | P2 | `KEY_SCALE` is both an acceleration key and an implicit topology identity. | Separate approximate lookup keys from exact vertex identity; collisions must fall back or be disambiguated. | Adversarial points below the quantization spacing. |
 | P2 | Offset predicates use one absolute epsilon across scales. | Use scale-aware filters with exact/extended fallback for sign decisions. | Scale and translation metamorphic tests. |
@@ -227,6 +227,17 @@ self-crossing EvenOdd union, `1.31x` for concave crossing, and `1.23x` for the
 many-horizontal case; all 18 signatures still matched Clipper2. Unaffected
 sub-microsecond cases remained noisy, so this is evidence for those targeted
 paths rather than a blanket speed claim.
+
+The property-cache follow-up used another ten interleaved process pairs against
+commit `255c083`. It improved the self-crossing case by a paired median of
+`1.155x`; most other cases remained near `1.0x`, as expected. Three fresh
+reference comparisons still matched all 18 Clipper2 signatures.
+
+Robustness and API work now also use an adaptive `i128` to `BigInt` predicate
+for public integer orientation and point-in-polygon queries, translate integer
+triangulation into a checked local coordinate frame, and expose direct
+`intersection`/`union`/`difference`/`xor` helpers (plus `_d` variants) for the
+common EvenOdd case. Explicit requests remain available for other fill rules.
 
 ## Experiments that can kill the ideas quickly
 
