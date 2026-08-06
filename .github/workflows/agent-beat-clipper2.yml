@@ -1,6 +1,9 @@
 name: Agent beat Clipper2 standard matrix
 
 on:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - agent/beat-clipper2-standard-matrix
@@ -18,6 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.head_ref || github.ref_name }}
           fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
@@ -37,7 +41,10 @@ jobs:
           set -euo pipefail
           git apply --check .github/agent-clipper2.patch
           git apply .github/agent-clipper2.patch
-          rm -f .github/agent-clipper2.patch .github/workflows/agent-beat-clipper2.yml
+          rm -f \
+            .github/agent-clipper2.patch \
+            .github/agent-clipper2-trigger \
+            .github/workflows/agent-beat-clipper2.yml
           cargo +stable fmt --all
           git diff --check
           echo "applied=true" >> "$GITHUB_OUTPUT"
