@@ -1,0 +1,56 @@
+name: Fix compile regression and format
+
+on:
+  push:
+    branches: [agent/certified-face-overlay-offset-forest]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply reviewed fix and format
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/fix.patch <<'PATCH'
+          diff --git a/crates/knipsa/src/boolean.rs b/crates/knipsa/src/boolean.rs
+          --- a/crates/knipsa/src/boolean.rs
+          +++ b/crates/knipsa/src/boolean.rs
+          @@ -1661,8 +1661,16 @@ mod tests {
+                   FillRule::EvenOdd,
+                   &epsilon,
+               );
+          -        let wedge_result = stitch_directed_edges(&wedge_boundary).expect("wedge boundary closes");
+          -        let wedge_oracle = stitch_directed_edges(&wedge_oracle).expect("wedge oracle closes");
+          +        let wedge_result = exact_paths_to_i64(
+          +            &stitch_directed_edges(&wedge_boundary).expect("wedge boundary closes"),
+          +        )
+          +        .expect("integer wedge result");
+          +        let wedge_oracle = exact_paths_to_i64(
+          +            &stitch_directed_edges(&wedge_oracle).expect("wedge oracle closes"),
+          +        )
+          +        .expect("integer wedge oracle");
+                   assert_eq!(canonical_summary(&wedge_result), canonical_summary(&wedge_oracle));
+               }
+          PATCH
+          sed -i 's/^          //' /tmp/fix.patch
+          git apply --check /tmp/fix.patch
+          git apply /tmp/fix.patch
+          cargo fmt --all
+          rm .github/workflows/agent-fix-compile-format.yml
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Fix exact oracle test and format Rust sources'
+          git push
