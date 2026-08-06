@@ -38,6 +38,35 @@ requested arc tolerance. The comparator therefore uses an explicit geometric
 error budget rather than demanding identical sampled vertices. Knipsa retains
 its tighter requested-tolerance tessellation.
 
+## Implemented step: certified faces and contour forests
+
+The 2026-08-06 implementation turns two proposals below into production paths
+without replacing the exact oracle:
+
+- The general exact kernel algebraically merges coincident noded edges, builds
+  a half-edge rotation system, samples one exact face pair per disconnected
+  dual component, and propagates subject and clip winding through the faces.
+  Diagonal self-crossings, shared vertices, reversed edges, and shared supports
+  use the same topology path. Ambiguous embeddings, inconsistent labels, and
+  unsafe arithmetic fall back to the previous exact per-edge side classifier.
+- Vertex fans store each half-edge's sorted rank, so successor construction is
+  linear after angle sorting rather than quadratic in vertex degree. Face seed
+  half-edges are retained during cycle construction, avoiding repeated scans
+  across many disconnected rings.
+- Closed offset cleanup first certifies simple, non-touching contours with a
+  bounded segment sweep and robust filtered orientation tests. A laminar
+  containment forest then accumulates integer winding and emits only boundaries
+  separating zero from non-zero. Parent selection is quadratic in ring count,
+  matching the already-required containment matrix instead of adding a cubic
+  pass. Any contact, overlap, self-crossing, budget overflow, or uncertain sign
+  falls back to the exact non-zero union.
+- `offset_path64` and `offset_path_d` remove slice boilerplate for the common
+  one-path call while retaining a path collection result for split insets and
+  closed polyline outlines.
+
+This section records architecture and correctness behavior only. Performance
+claims belong in a paired benchmark report with matching result signatures.
+
 ## Constraints worth preserving
 
 - The exact rational arrangement is a semantic oracle, not the production hot

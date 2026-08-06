@@ -63,7 +63,8 @@ cargo run -p knipsa --example quickstart
 | Clean self-intersections or internal boundaries | `simplify_paths64` or `simplify_paths_d` |
 | Clip paths to an axis-aligned rectangle | `clip_to_rect64` or `clip_to_rect_d` |
 | Remove redundant collinear vertices | `trim_collinear64` or `trim_collinear_d` |
-| Polygon or polyline offsets | `offset_paths64` or `offset_paths_d` |
+| One polygon or polyline offset | `offset_path64` or `offset_path_d` |
+| Polygon or polyline offset collections | `offset_paths64` or `offset_paths_d` |
 | A single polygon's triangles | `triangulate_path64` or `triangulate_pathd` |
 | Multiple rings, holes, or islands | `triangulate64` or `triangulate_d` |
 | Integer point-in-polygon queries | `point_in_polygon` |
@@ -77,10 +78,10 @@ different fill rule is required.
 Offset options have named constructors for the common modes:
 
 ```rust
-use knipsa::{EndType, JoinType, OffsetOptions, offset_paths_d};
+use knipsa::{EndType, JoinType, OffsetOptions, offset_path_d, offset_paths_d};
 
-# fn example(rings: &[knipsa::PathD], lines: &[knipsa::PathD]) -> Result<(), knipsa::Error> {
-let expanded = offset_paths_d(rings, 4.0, OffsetOptions::polygon(JoinType::Round))?;
+# fn example(ring: &knipsa::PathD, lines: &[knipsa::PathD]) -> Result<(), knipsa::Error> {
+let expanded = offset_path_d(ring, 4.0, OffsetOptions::polygon(JoinType::Round))?;
 let stroke = offset_paths_d(
     lines,
     2.0,
@@ -90,6 +91,12 @@ let stroke = offset_paths_d(
 # Ok(())
 # }
 ```
+
+Closed offsets first try a certified contour forest. Simple generated rings
+with no boundary contact are merged by containment and integer winding.
+Touching, overlapping, self-crossing, oversized, or numerically ambiguous
+contours fall back to the exact `NonZero` Boolean cleanup, so callers do not
+need to choose a fast path or an epsilon policy.
 
 ## Geometry conventions
 

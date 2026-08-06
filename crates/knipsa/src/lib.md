@@ -32,8 +32,9 @@ Use [`crate::intersection`] for exact integer output. The convenience
 operations and single-ring `_path` variants use [`crate::FillRule::EvenOdd`];
 use [`crate::boolean_op`] or [`crate::boolean_opd`] when another fill rule is
 required. Use
-[`crate::offset_paths_d`] for polygon or polyline offsets and
-[`crate::triangulate_d`] for counter-clockwise triangles.
+[`crate::offset_path_d`] for one polygon or polyline offset,
+[`crate::offset_paths_d`] for offset collections, and [`crate::triangulate_d`]
+for counter-clockwise triangles.
 
 The repository contains a longer runnable tour in
 `crates/knipsa/examples/quickstart.rs`.

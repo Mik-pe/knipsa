@@ -1,7 +1,7 @@
 //! A small tour of the safe Rust API.
 
 use knipsa::{
-    OffsetOptions, PathD, Point64, PointD, PointLocation, intersection_path_d, offset_paths_d,
+    OffsetOptions, PathD, Point64, PointD, PointLocation, intersection_path_d, offset_path_d,
     point_in_polygon, triangulate_pathd,
 };
 
@@ -21,7 +21,7 @@ fn main() -> Result<(), knipsa::Error> {
     let intersection = intersection_path_d(&subject, &clip)?;
     println!("intersection rings: {}", intersection.len());
 
-    let outline = offset_paths_d(std::slice::from_ref(&subject), 1.0, OffsetOptions::default())?;
+    let outline = offset_path_d(&subject, 1.0, OffsetOptions::default())?;
     println!("offset rings: {}", outline.len());
 
     let triangles = triangulate_pathd(&subject)?;
