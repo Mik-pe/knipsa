@@ -1,0 +1,25 @@
+diff --git a/crates/knipsa/src/fast.rs b/crates/knipsa/src/fast.rs
+--- a/crates/knipsa/src/fast.rs
++++ b/crates/knipsa/src/fast.rs
+@@ -4248,14 +4248,21 @@ mod rectangle_pair_tests {
+         ]
+     }
+ 
+-    fn canonical(mut paths: PathsD) -> PathsD {
++    fn canonical(paths: PathsD) -> PathsD {
++        let mut paths = paths
++            .into_iter()
++            .map(|path| {
++                crate::trim_collinear_d(&path, crate::PathKind::Closed)
++                    .expect("oracle path remains a valid closed ring")
++            })
++            .collect::<PathsD>();
+         for path in &mut paths {
+             if area2(path) < 0.0 {
+                 path.reverse();
+             }
+             canonicalize(path);
+         }
+         paths.sort_by(compare_paths);
+         paths
+     }

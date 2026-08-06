@@ -1,0 +1,223 @@
+name: Agent standard-case optimization
+
+on:
+  push:
+    branches:
+      - agent/faster-standard-cases
+
+permissions:
+  contents: write
+
+jobs:
+  optimize:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Apply and format candidate
+        id: apply
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f .github/agent-change.patch ]]; then
+            echo "applied=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git apply --check .github/agent-change.patch
+          git apply .github/agent-change.patch
+          git apply --check .github/agent-test-fix.patch
+          git apply .github/agent-test-fix.patch
+          rm .github/agent-change.patch .github/agent-test-fix.patch .github/workflows/agent-standard-case.yml
+          cargo +stable fmt --all
+          git diff --check
+          echo "applied=true" >> "$GITHUB_OUTPUT"
+
+      - name: Test workspace
+        if: steps.apply.outputs.applied == 'true'
+        run: cargo +stable test --workspace --all-features
+
+      - name: Lint workspace
+        if: steps.apply.outputs.applied == 'true'
+        run: cargo +stable clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build documentation
+        if: steps.apply.outputs.applied == 'true'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo +stable doc --workspace --all-features --no-deps
+
+      - name: Check C API
+        if: steps.apply.outputs.applied == 'true'
+        run: ./scripts/check-c-api.sh
+
+      - name: Run coverage gate
+        if: steps.apply.outputs.applied == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ./scripts/coverage.sh; then
+            exit 0
+          fi
+          echo "Missed branch records:"
+          awk '
+            /^SF:/ { file = substr($0, 4); next }
+            /^BRDA:/ {
+              split(substr($0, 6), fields, ",")
+              taken = fields[4]
+              if (taken == "-" || taken == "" || (taken + 0) == 0) {
+                printf "%s:%s branch %s/%s taken=%s\n", file, fields[1], fields[2], fields[3], taken
+              }
+            }
+          ' target/coverage/lcov.info
+          exit 1
+
+      - name: Benchmark current main, candidate, and Clipper2
+        if: steps.apply.outputs.applied == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          results="$RUNNER_TEMP/standard-case-results"
+          baseline="$RUNNER_TEMP/knipsa-baseline"
+          base_commit="$(git merge-base HEAD origin/main)"
+          mkdir -p "$results"
+          git worktree add --detach "$baseline" "$base_commit"
+
+          {
+            printf 'candidate_parent=%s\n' "$base_commit"
+            printf 'date_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            uname -a
+            lscpu
+            cargo +stable --version
+            rustc +stable --version --verbose
+          } > "$results/metadata.txt"
+
+          run_baseline() {
+            local round=$1
+            CARGO_TARGET_DIR="$RUNNER_TEMP/target-baseline" \
+              cargo +stable bench --manifest-path "$baseline/Cargo.toml" \
+                -p knipsa --bench workload --profile release \
+                > "$results/baseline-$round.jsonl"
+          }
+          run_candidate() {
+            local round=$1
+            CARGO_TARGET_DIR="$RUNNER_TEMP/target-candidate" \
+              cargo +stable bench -p knipsa --bench workload --profile release \
+                > "$results/candidate-$round.jsonl"
+          }
+
+          benchmarks/reference/build-clipper2.sh > "$results/clipper2-binary.txt"
+          for round in 1 2 3 4 5; do
+            if (( round % 2 == 1 )); then
+              run_baseline "$round"
+              run_candidate "$round"
+            else
+              run_candidate "$round"
+              run_baseline "$round"
+            fi
+            benchmarks/reference/run-clipper2.sh benchmarks/workloads.json \
+              > "$results/clipper2-$round.jsonl"
+
+            for implementation in baseline candidate; do
+              jq -r 'select(has("id")) | [.id, .status, .signature] | @tsv' \
+                "$results/$implementation-$round.jsonl" \
+                > "$results/$implementation-$round.signature.tsv"
+            done
+            diff -u "$results/baseline-$round.signature.tsv" \
+              "$results/candidate-$round.signature.tsv"
+          done
+
+          jq -r 'select(has("id")) | .id' "$results/candidate-1.jsonl" > "$results/case-ids.txt"
+          printf 'case\tbaseline_ns\tcandidate_ns\tspeedup\tclipper2_ns\tcandidate_vs_clipper2\n' \
+            > "$results/summary.tsv"
+          while IFS= read -r id; do
+            for implementation in baseline candidate clipper2; do
+              : > "$results/$implementation.values"
+              for round in 1 2 3 4 5; do
+                jq -r --arg id "$id" 'select(.id == $id) | .median_ns' \
+                  "$results/$implementation-$round.jsonl" \
+                  >> "$results/$implementation.values"
+              done
+              sort -n "$results/$implementation.values" | sed -n '3p' \
+                > "$results/$implementation.median"
+            done
+            baseline_ns="$(cat "$results/baseline.median")"
+            candidate_ns="$(cat "$results/candidate.median")"
+            clipper_ns="$(cat "$results/clipper2.median")"
+            speedup="$(awk -v b="$baseline_ns" -v c="$candidate_ns" 'BEGIN { printf "%.6f", b / c }')"
+            versus_clipper="$(awk -v c="$candidate_ns" -v r="$clipper_ns" 'BEGIN { printf "%.6f", r / c }')"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "$id" "$baseline_ns" "$candidate_ns" "$speedup" "$clipper_ns" "$versus_clipper" \
+              >> "$results/summary.tsv"
+          done < "$results/case-ids.txt"
+
+          awk -F '\t' 'NR > 1 { baseline += log($2 / $3); clipper += log($5 / $3); count += 1 } END { printf "baseline_geomean_speedup=%.6f\ncandidate_vs_clipper2_geomean=%.6f\n", exp(baseline / count), exp(clipper / count) }' \
+            "$results/summary.tsv" > "$results/geomean.txt"
+          cat "$results/summary.tsv"
+          cat "$results/geomean.txt"
+
+      - name: Upload benchmark evidence
+        if: steps.apply.outputs.applied == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: standard-case-optimization-benchmarks
+          path: ${{ runner.temp }}/standard-case-results
+          retention-days: 7
+
+      - name: Commit validated source
+        if: steps.apply.outputs.applied == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Accelerate common polygon pairs"
+          git push origin HEAD:agent/faster-standard-cases
+
+  macos-smoke:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Apply and format candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check .github/agent-change.patch
+          git apply .github/agent-change.patch
+          git apply --check .github/agent-test-fix.patch
+          git apply .github/agent-test-fix.patch
+          cargo +stable fmt --all
+          git diff --check
+
+      - name: Test workspace
+        run: cargo +stable test --workspace --all-features
+
+      - name: Lint workspace
+        run: cargo +stable clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo +stable doc --workspace --all-features --no-deps
+
+      - name: Check C API
+        run: ./scripts/check-c-api.sh

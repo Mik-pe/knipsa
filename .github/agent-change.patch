@@ -1,0 +1,373 @@
+diff --git a/crates/knipsa/src/fast.rs b/crates/knipsa/src/fast.rs
+index 953c8f2..0000000 100644
+--- a/crates/knipsa/src/fast.rs
++++ b/crates/knipsa/src/fast.rs
+@@ -237,6 +237,12 @@ impl ConvexIndex<'_> {
+ }
+ 
+ pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<PathsD, ()>> {
++    if let Some(result) = try_rectangle_pair(request) {
++        return Some(result.map_err(|_| ()));
++    }
++    if let Some(result) = try_linear_strict_convex_boolean(request) {
++        return Some(result.map_err(|_| ()));
++    }
+     if let Some(result) = try_orthogonal_arrangement(request) {
+         return Some(result.map_err(|_| ()));
+     }
+@@ -253,6 +259,274 @@ struct GridCoordinate {
+     value: f64,
+ }
+ 
++/// Uses the existing certified linear convex walk before the pair-wide
++/// collinearity scan. The walk rejects every endpoint or collinear ambiguity;
++/// only a non-degenerate result can bypass the conservative pair gate.
++fn try_linear_strict_convex_boolean(
++    request: BooleanRequestD<'_>,
++) -> Option<Result<PathsD, Error>> {
++    if request.subjects.len() != 1
++        || request.clips.len() != 1
++        || !eligible(request.subjects, request.clips)
++    {
++        return None;
++    }
++    let subject = request.subjects[0].as_slice();
++    let clip = request.clips[0].as_slice();
++    if subject.len() < 3
++        || clip.len() < 3
++        || !strict_convex(subject)
++        || !strict_convex(clip)
++        || !keyable_path(subject)
++        || !keyable_path(clip)
++        || !fill_rule_accepts_ring(subject, request.fill_rule)
++        || !fill_rule_accepts_ring(clip, request.fill_rule)
++        || area2(subject) <= 0.0
++        || area2(clip) <= 0.0
++    {
++        return None;
++    }
++
++    let walk = convex_boundary_walk(
++        subject,
++        clip,
++        request.clip_type == ClipType::Intersection,
++        request.clip_type != ClipType::Intersection,
++    );
++    if walk.degenerate {
++        return None;
++    }
++    if request.clip_type == ClipType::Intersection {
++        return Some(Ok(walk.output));
++    }
++
++    let ConvexWalk {
++        subject_splits,
++        clip_splits,
++        subject_inside,
++        clip_inside,
++        ..
++    } = walk;
++    let use_inside_hints =
++        subject_splits.iter().chain(&clip_splits).any(|values| values.len() > 2);
++    convex_boolean_from_splits(
++        subject,
++        clip,
++        request.clip_type,
++        subject_splits,
++        clip_splits,
++        if use_inside_hints { &subject_inside } else { &[] },
++        if use_inside_hints { &clip_inside } else { &[] },
++    )
++    .map(Ok)
++}
++
++#[derive(Clone, Copy)]
++struct AxisAlignedRectangle {
++    min_x: GridCoordinate,
++    min_y: GridCoordinate,
++    max_x: GridCoordinate,
++    max_y: GridCoordinate,
++}
++
++impl AxisAlignedRectangle {
++    #[inline]
++    fn contains_cell(
++        self,
++        min_x: GridCoordinate,
++        max_x: GridCoordinate,
++        min_y: GridCoordinate,
++        max_y: GridCoordinate,
++    ) -> bool {
++        min_x.key >= self.min_x.key
++            && max_x.key <= self.max_x.key
++            && min_y.key >= self.min_y.key
++            && max_y.key <= self.max_y.key
++    }
++}
++
++/// Handles the overwhelmingly common one-rectangle-per-side case without
++/// allocating coordinate tables, event streams, or winding buffers. The tiny
++/// grid has at most three rows and columns; boundary stitching remains shared
++/// with the certified orthogonal kernel so touching topology stays identical.
++fn try_rectangle_pair(request: BooleanRequestD<'_>) -> Option<Result<PathsD, Error>> {
++    if request.subjects.len() != 1 || request.clips.len() != 1 {
++        return None;
++    }
++    if request.subjects[0].len() != 4 || request.clips[0].len() != 4 {
++        return None;
++    }
++    let subject = request.subjects[0].as_slice();
++    let clip = request.clips[0].as_slice();
++    let subject_rectangle = axis_aligned_rectangle(subject)?;
++    let clip_rectangle = axis_aligned_rectangle(clip)?;
++    let (xs, x_len) = tiny_coordinates(
++        subject_rectangle.min_x,
++        subject_rectangle.max_x,
++        clip_rectangle.min_x,
++        clip_rectangle.max_x,
++    )?;
++    let (ys, y_len) = tiny_coordinates(
++        subject_rectangle.min_y,
++        subject_rectangle.max_y,
++        clip_rectangle.min_y,
++        clip_rectangle.max_y,
++    )?;
++    let xs = &xs[..x_len];
++    let ys = &ys[..y_len];
++    let rows = y_len - 1;
++    let subject_enabled = fill_rule_accepts_ring(subject, request.fill_rule);
++    let clip_enabled = fill_rule_accepts_ring(clip, request.fill_rule);
++    let mut previous = [false; 3];
++    let mut current = [false; 3];
++    let mut boundary = Vec::with_capacity(24);
++
++    for x in 0..x_len - 1 {
++        for y in 0..rows {
++            let subject_contains = subject_enabled
++                && subject_rectangle.contains_cell(xs[x], xs[x + 1], ys[y], ys[y + 1]);
++            let clip_contains = clip_enabled
++                && clip_rectangle.contains_cell(xs[x], xs[x + 1], ys[y], ys[y + 1]);
++            current[y] = apply_operation(subject_contains, clip_contains, request.clip_type);
++        }
++        add_vertical_transitions(
++            &mut boundary,
++            xs[x],
++            ys,
++            &previous[..rows],
++            &current[..rows],
++        );
++        add_horizontal_transitions(
++            &mut boundary,
++            xs[x],
++            xs[x + 1],
++            ys,
++            &current[..rows],
++        );
++        std::mem::swap(&mut previous, &mut current);
++    }
++    current[..rows].fill(false);
++    add_vertical_transitions(
++        &mut boundary,
++        xs[x_len - 1],
++        ys,
++        &previous[..rows],
++        &current[..rows],
++    );
++    if boundary.is_empty() {
++        return Some(Ok(Vec::new()));
++    }
++    Some(finish_orthogonal_boundary(&boundary))
++}
++
++fn axis_aligned_rectangle(path: &[Point]) -> Option<AxisAlignedRectangle> {
++    if path.len() != 4 {
++        return None;
++    }
++    if path.iter().any(|point| {
++        !point.x.is_finite()
++            || !point.y.is_finite()
++            || point.x.abs() > MAX_COORDINATE
++            || point.y.abs() > MAX_COORDINATE
++    }) {
++        return None;
++    }
++    let keys = [key(path[0])?, key(path[1])?, key(path[2])?, key(path[3])?];
++    let min_x_key = keys.iter().map(|point| point.x).min()?;
++    let max_x_key = keys.iter().map(|point| point.x).max()?;
++    let min_y_key = keys.iter().map(|point| point.y).min()?;
++    let max_y_key = keys.iter().map(|point| point.y).max()?;
++    if min_x_key == max_x_key || min_y_key == max_y_key {
++        return None;
++    }
++
++    let min_x = keyed_coordinate_value(path, &keys, min_x_key, true)?;
++    let max_x = keyed_coordinate_value(path, &keys, max_x_key, true)?;
++    let min_y = keyed_coordinate_value(path, &keys, min_y_key, false)?;
++    let max_y = keyed_coordinate_value(path, &keys, max_y_key, false)?;
++    let mut corners = 0_u8;
++    for index in 0..4 {
++        let point = keys[index];
++        let next = keys[(index + 1) % 4];
++        if (point.x == next.x) == (point.y == next.y) {
++            return None;
++        }
++        let x_index = if point.x == min_x_key {
++            0
++        } else if point.x == max_x_key {
++            1
++        } else {
++            return None;
++        };
++        let y_index = if point.y == min_y_key {
++            0
++        } else if point.y == max_y_key {
++            1
++        } else {
++            return None;
++        };
++        let corner = 1_u8 << (x_index + 2 * y_index);
++        if corners & corner != 0 {
++            return None;
++        }
++        corners |= corner;
++    }
++    if corners != 0b1111 {
++        return None;
++    }
++
++    Some(AxisAlignedRectangle {
++        min_x: GridCoordinate { key: min_x_key, value: min_x },
++        min_y: GridCoordinate { key: min_y_key, value: min_y },
++        max_x: GridCoordinate { key: max_x_key, value: max_x },
++        max_y: GridCoordinate { key: max_y_key, value: max_y },
++    })
++}
++
++fn keyed_coordinate_value(
++    path: &[Point],
++    keys: &[PointKey; 4],
++    target: i64,
++    x_axis: bool,
++) -> Option<f64> {
++    let mut value: Option<f64> = None;
++    for (point, key) in path.iter().zip(keys) {
++        let (key, candidate) =
++            if x_axis { (key.x, point.x + 0.0) } else { (key.y, point.y + 0.0) };
++        if key != target {
++            continue;
++        }
++        if value.is_some_and(|known| known.to_bits() != candidate.to_bits()) {
++            return None;
++        }
++        value = Some(candidate);
++    }
++    value
++}
++
++fn tiny_coordinates(
++    first_min: GridCoordinate,
++    first_max: GridCoordinate,
++    second_min: GridCoordinate,
++    second_max: GridCoordinate,
++) -> Option<([GridCoordinate; 4], usize)> {
++    let mut coordinates = [first_min, first_max, second_min, second_max];
++    coordinates.sort_unstable_by_key(|coordinate| coordinate.key);
++    let mut len = 1;
++    for read in 1..coordinates.len() {
++        let coordinate = coordinates[read];
++        if coordinate.key == coordinates[len - 1].key {
++            if coordinate.value.to_bits() != coordinates[len - 1].value.to_bits() {
++                return None;
++            }
++        } else {
++            coordinates[len] = coordinate;
++            len += 1;
++        }
++    }
++    Some((coordinates, len))
++}
++
+ #[derive(Clone, Copy, Debug, Default)]
+ struct WindingDifference {
+     subject: i32,
+@@ -3960,3 +4234,80 @@ mod orthogonal_column_dispatch_tests {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod rectangle_pair_tests {
++    use super::*;
++
++    fn rectangle(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> PathD {
++        vec![
++            PointD::new(min_x, min_y),
++            PointD::new(max_x, min_y),
++            PointD::new(max_x, max_y),
++            PointD::new(min_x, max_y),
++        ]
++    }
++
++    fn canonical(mut paths: PathsD) -> PathsD {
++        for path in &mut paths {
++            if area2(path) < 0.0 {
++                path.reverse();
++            }
++            canonicalize(path);
++        }
++        paths.sort_by(compare_paths);
++        paths
++    }
++
++    #[test]
++    fn rectangle_pair_matches_exact_oracle_for_topology_and_fill_rules() {
++        let cases = [
++            (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(5.0, 0.0, 15.0, 10.0)),
++            (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(2.0, 2.0, 8.0, 8.0)),
++            (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(10.0, 0.0, 20.0, 10.0)),
++            (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(10.0, 10.0, 20.0,20.0)),
++            (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(20.0, 0.0, 30.0,10.0)),
++        ];
++        let fill_rules =
++            [FillRule::EvenOdd, FillRule::NonZero, FillRule::Positive, FillRule::Negative];
++        let clip_types =
++            [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor];
++
++        for (subject, clip) in cases {
++            for reverse_subject in [false, true] {
++                for reverse_clip in [false, true] {
++                    let mut subject = subject.clone();
++                    let mut clip = clip.clone();
++                    if reverse_subject {
++                        subject.reverse();
++                    }
++                    if reverse_clip {
++                        clip.reverse();
++                    }
++                    for fill_rule in fill_rules {
++                        for clip_type in clip_types {
++                            let subjects = [subject.clone()];
++                            let clips = [clip.clone()];
++                            let request = BooleanRequestD {
++                                subjects: &subjects,
++                                clips: &clips,
++                                clip_type,
++                                fill_rule,
++                            };
++                            let actual = try_rectangle_pair(request)
++                                .expect("axis-aligned rectangle pair uses the tiny kernel")
++                                .expect("tiny rectangle boundary closes");
++                            let expected = crate::boolean::boolean_opd_exact(request)
++                                .expect("exact rectangle oracle closes");
++                            assert_eq!(
++                                canonical(actual),
++                                canonical(expected),
++                                "{fill_rule:?} {clip_type:?} reverse={reverse_subject}/{reverse_clip}",
++                            );
++                        }
++                    }
++                }
++            }
++        }
++    }
++}
