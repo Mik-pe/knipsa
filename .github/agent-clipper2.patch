@@ -1,0 +1,127 @@
+diff --git a/crates/knipsa/src/fast.rs b/crates/knipsa/src/fast.rs
+index 953c8f2..0000000 100644
+--- a/crates/knipsa/src/fast.rs
++++ b/crates/knipsa/src/fast.rs
+@@ -237,6 +237,9 @@ impl ConvexIndex<'_> {
+ }
+ 
+ pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<PathsD, ()>> {
++    if let Some(result) = try_linear_strict_convex_boolean(request) {
++        return Some(result.map_err(|_| ()));
++    }
+     if let Some(result) = try_orthogonal_arrangement(request) {
+         return Some(result.map_err(|_| ()));
+     }
+@@ -249,5 +252,67 @@ pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<Pat
+     Some(run(&subjects, &clips, request.clip_type, request.fill_rule).map_err(|_| ()))
+ }
+ 
++/// Uses the certified linear convex walk before the pair-wide collinearity
++/// scan. The walk rejects endpoint and collinear ambiguity, so only a
++/// non-degenerate result bypasses the conservative exact fallback.
++fn try_linear_strict_convex_boolean(
++    request: BooleanRequestD<'_>,
++) -> Option<Result<PathsD, Error>> {
++    if request.subjects.len() != 1
++        || request.clips.len() != 1
++        || !eligible(request.subjects, request.clips)
++    {
++        return None;
++    }
++    let subject = request.subjects[0].as_slice();
++    let clip = request.clips[0].as_slice();
++    if subject.len() < 16
++        || clip.len() < 16
++        || !strict_convex(subject)
++        || !strict_convex(clip)
++        || !keyable_path(subject)
++        || !keyable_path(clip)
++        || !fill_rule_accepts_ring(subject, request.fill_rule)
++        || !fill_rule_accepts_ring(clip, request.fill_rule)
++        || area2(subject) <= 0.0
++        || area2(clip) <= 0.0
++    {
++        return None;
++    }
++
++    let walk = convex_boundary_walk(
++        subject,
++        clip,
++        request.clip_type == ClipType::Intersection,
++        request.clip_type != ClipType::Intersection,
++    );
++    if walk.degenerate {
++        return None;
++    }
++    if request.clip_type == ClipType::Intersection {
++        return Some(Ok(walk.output));
++    }
++
++    let ConvexWalk {
++        subject_splits,
++        clip_splits,
++        subject_inside,
++        clip_inside,
++        ..
++    } = walk;
++    let use_inside_hints =
++        subject_splits.iter().chain(&clip_splits).any(|values| values.len() > 2);
++    convex_boolean_from_splits(
++        subject,
++        clip,
++        request.clip_type,
++        subject_splits,
++        clip_splits,
++        if use_inside_hints { &subject_inside } else { &[] },
++        if use_inside_hints { &clip_inside } else { &[] },
++    )
++    .map(Ok)
++}
++
+ #[derive(Clone, Copy)]
+ struct GridCoordinate {
+     key: i64,
+@@ -2382,17 +2447,3 @@ mod tests {
+-        let fast = convex_boolean(
+-            subject_points[0].points(),
+-            clip_points[0].points(),
+-            ClipType::Xor,
+-            Some((true, true)),
+-        )
+-        .expect("linear convex xor should close");
+-        let request = BooleanRequestD {
+-            subjects: std::slice::from_ref(&subject),
+-            clips: std::slice::from_ref(&clip),
+-            clip_type: ClipType::Xor,
+-            fill_rule: FillRule::EvenOdd,
+-        };
+-        let exact = crate::boolean::boolean_opd_exact(request).expect("exact oracle should close");
+         let summary = |paths: &PathsD| {
+             let mut values = paths
+                 .iter()
+@@ -2401,5 +2452,19 @@ mod tests {
+             values.sort_unstable();
+             values
+         };
+-        assert_eq!(summary(&fast), summary(&exact));
+-        assert!(try_boolean_opd(request).expect("rounded input is eligible").is_ok());
++        for clip_type in
++            [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor]
++        {
++            let request = BooleanRequestD {
++                subjects: std::slice::from_ref(&subject),
++                clips: std::slice::from_ref(&clip),
++                clip_type,
++                fill_rule: FillRule::EvenOdd,
++            };
++            let fast = try_linear_strict_convex_boolean(request)
++                .expect("high-vertex pair should use the linear dispatcher")
++                .expect("linear convex operation should close");
++            let exact =
++                crate::boolean::boolean_opd_exact(request).expect("exact oracle should close");
++            assert_eq!(summary(&fast), summary(&exact), "{clip_type:?}");
++            assert!(try_boolean_opd(request).expect("rounded input is eligible").is_ok());
++        }
+     }
+ 
+     #[test]
