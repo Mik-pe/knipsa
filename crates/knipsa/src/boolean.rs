@@ -817,9 +817,9 @@ fn split_source_edges(
         for pair in values.windows(2) {
             let start = point_at(&edge.start, &edge.end, &pair[0]);
             let end = point_at(&edge.start, &edge.end, &pair[1]);
-            if start != end {
-                result.push(AtomicEdge { start, end, subject });
-            }
+            // Source edges are non-degenerate and the parameters are sorted and
+            // deduplicated, so consecutive samples cannot collapse.
+            result.push(AtomicEdge { start, end, subject });
         }
     }
     result
@@ -1686,6 +1686,7 @@ mod tests {
             clip_delta: 0,
         }];
         assert!(sample_face_pair(0, &mislabeled_subject, &subjects, &[], &epsilon).is_none());
+        assert_eq!(half_edge_start(&mislabeled_subject, 1), &exact_point(10, 0));
 
         let mislabeled_clip =
             [ArrangementEdge { subject_delta: 1, clip_delta: 1, ..mislabeled_subject[0].clone() }];
@@ -1704,10 +1705,24 @@ mod tests {
         let boundary_subjects = [exact_path(&[(0, 5), (10, 5), (10, 15), (0, 15)])];
         assert!(sample_face_pair(0, &zero_delta, &boundary_subjects, &[], &coarse).is_some());
 
+        let blocker = ArrangementEdge {
+            start: exact_point(0, 2),
+            end: exact_point(10, 2),
+            subject_delta: 0,
+            clip_delta: 0,
+        };
+        let blocked_probe = [zero_delta[0].clone(), blocker];
+        assert!(sample_face_pair(0, &blocked_probe, &[], &[], &coarse).is_some());
+
         assert_eq!(build_face_cycles(&[]), Some((Vec::new(), Vec::new())));
         let mut no_parameters = Vec::new();
         assert!(split_source_edges(&[], &mut no_parameters, &[]).is_empty());
         assert!(noded_atomic_edges(&[], &[]).is_empty());
+        let duplicate_clip = [exact_path(&[(0, 0), (0, 0), (10, 0), (0, 10)])];
+        let clip_atoms = noded_atomic_edges(&[], &duplicate_clip);
+        assert_eq!(clip_atoms.len(), 3);
+        assert!(clip_atoms.iter().all(|edge| !edge.subject));
+        assert!(clip_atoms.iter().all(|edge| edge.start != edge.end));
 
         let boundary = exact_point(0, 5);
         for (clip_type, expected) in [
@@ -1727,6 +1742,13 @@ mod tests {
                 expected
             );
         }
+        assert!(!operation_contains(
+            &exact_point(5, 10),
+            &[],
+            &boundary_subjects,
+            ClipType::Intersection,
+            FillRule::EvenOdd,
+        ));
     }
 
     #[test]

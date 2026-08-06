@@ -1733,6 +1733,26 @@ mod tests {
         assert_eq!(certified_area_sign(&positive), Some(1));
         assert_eq!(certified_area_sign(&negative), Some(-1));
         assert_eq!(certified_area_sign(&[PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)]), None);
+
+        let large = 1.0e154;
+        assert_eq!(
+            certified_area_sign(&[
+                PointD::new(0.0, 0.0),
+                PointD::new(large, 0.0),
+                PointD::new(0.0, large),
+                PointD::new(-large, 0.0),
+            ]),
+            None
+        );
+        assert_eq!(
+            certified_area_sign(&[
+                PointD::new(0.0, 0.0),
+                PointD::new(large, 0.0),
+                PointD::new(0.0, large),
+                PointD::new(large, 0.0),
+            ]),
+            None
+        );
         assert_eq!(
             certified_area_sign(&[
                 PointD::new(0.0, 0.0),
@@ -2119,6 +2139,32 @@ mod tests {
         let simple = rectangle(0.0, 0.0, 2.0, 2.0);
         assert_eq!(certify_non_zero_contours(&[]), Some(Vec::new()));
         assert_eq!(certify_non_zero_contours(std::slice::from_ref(&simple)), Some(vec![true]));
+
+        // Repeated, oppositely directed edges force the sweep ordering all the
+        // way through its deterministic edge-index tie breaker. The geometry is
+        // intentionally uncertifiable because non-adjacent copies overlap.
+        let repeated_edge_bounds = vec![
+            PointD::new(0.0, 0.0),
+            PointD::new(1.0, 0.0),
+            PointD::new(0.0, 0.0),
+            PointD::new(1.0, 0.0),
+        ];
+        assert_eq!(
+            certify_boundaries_do_not_touch_with_limit(
+                std::slice::from_ref(&repeated_edge_bounds),
+                repeated_edge_bounds.len(),
+                usize::MAX,
+            ),
+            None
+        );
+        let lopsided_bow_tie = vec![
+            PointD::new(0.0, 0.0),
+            PointD::new(4.0, 4.0),
+            PointD::new(0.0, 4.0),
+            PointD::new(3.0, 0.0),
+        ];
+        assert_eq!(certified_area_sign(&lopsided_bow_tie), Some(1));
+        assert_eq!(certify_non_zero_contours(std::slice::from_ref(&lopsided_bow_tie)), None);
         assert_eq!(certify_non_zero_contours(&[vec![center, next]]), None);
         assert_eq!(certify_non_zero_contours(&[vec![center, next, PointD::new(2.0, 0.0)]]), None);
         assert_eq!(
