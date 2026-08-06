@@ -1,0 +1,346 @@
+name: Agent optimize orthogonal fill
+
+on:
+  push:
+    branches: [agent/hoist-orthogonal-fill-dispatch]
+
+permissions:
+  contents: write
+
+jobs:
+  optimize:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build targeted orthogonal workload
+        run: |
+          node <<'NODE'
+          const rectangle = (x, y, width = 2, height = 2) => [
+            [x, y],
+            [x + width, y],
+            [x + width, y + height],
+            [x, y + height],
+          ];
+          const count = 192;
+          const subjects = Array.from({ length: count }, (_, index) =>
+            rectangle(index * 4, ((index * 73) % count) * 4),
+          );
+          const clips = Array.from({ length: count }, (_, index) =>
+            rectangle(index * 4 + 1, ((index * 109) % count) * 4 + 1),
+          );
+          const workload = {
+            schema: "knipsa-workload-v1",
+            cases: [{
+              id: "orthogonal_dispatch_grid",
+              clip_type: "xor",
+              fill_rule: "even_odd",
+              subjects,
+              clips,
+            }],
+          };
+          require("fs").writeFileSync("/tmp/orthogonal-workload.json", JSON.stringify(workload));
+          NODE
+
+      - name: Build baseline benchmark
+        run: |
+          cargo build --release -p knipsa --bench workload
+          baseline_bin=$(find target/release/deps -maxdepth 1 -type f -perm -111 -name 'workload-*' | head -n 1)
+          test -n "$baseline_bin"
+          cp "$baseline_bin" /tmp/workload-before
+
+      - name: Hoist fill dispatch and remove redundant endpoint scans
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const path = "crates/knipsa/src/fast.rs";
+          let source = fs.readFileSync(path, "utf8");
+
+          const oldFill = `fn fill_orthogonal_column(
+              difference: &[WindingDifference],
+              filled: &mut [bool],
+              fill_rule: FillRule,
+              clip_type: ClipType,
+          ) {
+              let mut subject_winding = 0;
+              let mut clip_winding = 0;
+              for (y, cell) in filled.iter_mut().enumerate() {
+                  subject_winding += difference[y].subject;
+                  clip_winding += difference[y].clip;
+                  let subject = fill_contains(subject_winding, fill_rule);
+                  let clip = fill_contains(clip_winding, fill_rule);
+                  *cell = apply_operation(subject, clip, clip_type);
+              }
+          }
+          `;
+
+          const newFill = `fn fill_orthogonal_column(
+              difference: &[WindingDifference],
+              filled: &mut [bool],
+              fill_rule: FillRule,
+              clip_type: ClipType,
+          ) {
+              match fill_rule {
+                  FillRule::EvenOdd => fill_orthogonal_column_with(
+                      difference,
+                      filled,
+                      clip_type,
+                      |winding| (winding & 1) != 0,
+                  ),
+                  FillRule::NonZero => fill_orthogonal_column_with(
+                      difference,
+                      filled,
+                      clip_type,
+                      |winding| winding != 0,
+                  ),
+                  FillRule::Positive => fill_orthogonal_column_with(
+                      difference,
+                      filled,
+                      clip_type,
+                      |winding| winding > 0,
+                  ),
+                  FillRule::Negative => fill_orthogonal_column_with(
+                      difference,
+                      filled,
+                      clip_type,
+                      |winding| winding < 0,
+                  ),
+              }
+          }
+
+          #[inline]
+          fn fill_orthogonal_column_with(
+              difference: &[WindingDifference],
+              filled: &mut [bool],
+              clip_type: ClipType,
+              contains: impl Fn(i32) -> bool,
+          ) {
+              match clip_type {
+                  ClipType::Intersection => fill_orthogonal_cells(
+                      difference,
+                      filled,
+                      &contains,
+                      |subject, clip| subject && clip,
+                  ),
+                  ClipType::Union => fill_orthogonal_cells(
+                      difference,
+                      filled,
+                      &contains,
+                      |subject, clip| subject || clip,
+                  ),
+                  ClipType::Difference => fill_orthogonal_cells(
+                      difference,
+                      filled,
+                      &contains,
+                      |subject, clip| subject && !clip,
+                  ),
+                  ClipType::Xor => fill_orthogonal_cells(
+                      difference,
+                      filled,
+                      &contains,
+                      |subject, clip| subject != clip,
+                  ),
+              }
+          }
+
+          #[inline]
+          fn fill_orthogonal_cells(
+              difference: &[WindingDifference],
+              filled: &mut [bool],
+              contains: &impl Fn(i32) -> bool,
+              operation: impl Fn(bool, bool) -> bool,
+          ) {
+              let mut subject_winding = 0;
+              let mut clip_winding = 0;
+              for (delta, cell) in difference.iter().zip(filled.iter_mut()) {
+                  subject_winding += delta.subject;
+                  clip_winding += delta.clip;
+                  *cell = operation(contains(subject_winding), contains(clip_winding));
+              }
+          }
+          `;
+
+          const oldEligible = `fn eligible<P: PathSlice>(subjects: &[P], clips: &[P]) -> bool {
+              for path in subjects.iter().chain(clips) {
+                  let points = path.points();
+                  if points.len() < 3 {
+                      continue;
+                  }
+                  for (start, end) in points.iter().zip(points.iter().cycle().skip(1)).take(points.len()) {
+                      if !start.x.is_finite()
+                          || !start.y.is_finite()
+                          || !end.x.is_finite()
+                          || !end.y.is_finite()
+                          || start.x.abs() > MAX_COORDINATE
+                          || start.y.abs() > MAX_COORDINATE
+                          || end.x.abs() > MAX_COORDINATE
+                          || end.y.abs() > MAX_COORDINATE
+                      {
+                          return false;
+                      }
+                  }
+              }
+              true
+          }
+          `;
+
+          const newEligible = `fn eligible<P: PathSlice>(subjects: &[P], clips: &[P]) -> bool {
+              for path in subjects.iter().chain(clips) {
+                  let points = path.points();
+                  if points.len() < 3 {
+                      continue;
+                  }
+                  for point in points {
+                      if !point.x.is_finite()
+                          || !point.y.is_finite()
+                          || point.x.abs() > MAX_COORDINATE
+                          || point.y.abs() > MAX_COORDINATE
+                      {
+                          return false;
+                      }
+                  }
+              }
+              true
+          }
+          `;
+
+          if (!source.includes(oldFill)) throw new Error("fill block did not match exactly");
+          if (!source.includes(oldEligible)) throw new Error("eligible block did not match exactly");
+          source = source.replace(oldFill, newFill).replace(oldEligible, newEligible);
+          source = source.replace(
+            "FillRule::EvenOdd => winding.unsigned_abs() % 2 == 1,",
+            "FillRule::EvenOdd => (winding & 1) != 0,",
+          );
+          fs.writeFileSync(path, source);
+          NODE
+
+          cat >> crates/knipsa/src/fast.rs <<'RUST'
+
+          #[cfg(test)]
+          mod orthogonal_column_dispatch_tests {
+              use super::*;
+
+              fn reference_contains(winding: i32, fill_rule: FillRule) -> bool {
+                  match fill_rule {
+                      FillRule::EvenOdd => winding.rem_euclid(2) == 1,
+                      FillRule::NonZero => winding != 0,
+                      FillRule::Positive => winding > 0,
+                      FillRule::Negative => winding < 0,
+                  }
+              }
+
+              fn reference_operation(subject: bool, clip: bool, clip_type: ClipType) -> bool {
+                  match clip_type {
+                      ClipType::Intersection => subject && clip,
+                      ClipType::Union => subject || clip,
+                      ClipType::Difference => subject && !clip,
+                      ClipType::Xor => subject != clip,
+                  }
+              }
+
+              #[test]
+              fn hoisted_dispatch_matches_scalar_reference() {
+                  let difference = [
+                      WindingDifference { subject: 1, clip: 0 },
+                      WindingDifference { subject: -3, clip: 1 },
+                      WindingDifference { subject: 4, clip: -2 },
+                      WindingDifference { subject: -1, clip: 3 },
+                      WindingDifference { subject: 2, clip: -1 },
+                      WindingDifference { subject: -3, clip: -1 },
+                  ];
+                  let fill_rules = [
+                      FillRule::EvenOdd,
+                      FillRule::NonZero,
+                      FillRule::Positive,
+                      FillRule::Negative,
+                  ];
+                  let clip_types = [
+                      ClipType::Intersection,
+                      ClipType::Union,
+                      ClipType::Difference,
+                      ClipType::Xor,
+                  ];
+
+                  for fill_rule in fill_rules {
+                      for clip_type in clip_types {
+                          let mut expected = vec![false; difference.len() - 1];
+                          let mut subject_winding = 0;
+                          let mut clip_winding = 0;
+                          for (delta, cell) in difference.iter().zip(expected.iter_mut()) {
+                              subject_winding += delta.subject;
+                              clip_winding += delta.clip;
+                              *cell = reference_operation(
+                                  reference_contains(subject_winding, fill_rule),
+                                  reference_contains(clip_winding, fill_rule),
+                                  clip_type,
+                              );
+                          }
+
+                          let mut actual = vec![false; expected.len()];
+                          fill_orthogonal_column(&difference, &mut actual, fill_rule, clip_type);
+                          assert_eq!(actual, expected, "{fill_rule:?} {clip_type:?}");
+                      }
+                  }
+              }
+          }
+          RUST
+
+          cargo fmt --all
+
+      - name: Build optimized benchmark
+        run: |
+          cargo build --release -p knipsa --bench workload
+          optimized_bin=$(find target/release/deps -maxdepth 1 -type f -perm -111 -name 'workload-*' -newer crates/knipsa/src/fast.rs | head -n 1)
+          if [ -z "$optimized_bin" ]; then
+            optimized_bin=$(find target/release/deps -maxdepth 1 -type f -perm -111 -name 'workload-*' | head -n 1)
+          fi
+          test -n "$optimized_bin"
+          cp "$optimized_bin" /tmp/workload-after
+
+      - name: Compare alternating benchmark runs
+        run: |
+          : > /tmp/before.jsonl
+          : > /tmp/after.jsonl
+          for run in 1 2 3 4 5; do
+            KNIPSA_WORKLOAD=/tmp/orthogonal-workload.json /tmp/workload-before >> /tmp/before.jsonl
+            KNIPSA_WORKLOAD=/tmp/orthogonal-workload.json /tmp/workload-after >> /tmp/after.jsonl
+          done
+
+          grep '"id":"orthogonal_dispatch_grid"' /tmp/before.jsonl | jq -r '.median_ns' | sort -n > /tmp/before-times
+          grep '"id":"orthogonal_dispatch_grid"' /tmp/after.jsonl | jq -r '.median_ns' | sort -n > /tmp/after-times
+          before=$(sed -n '3p' /tmp/before-times)
+          after=$(sed -n '3p' /tmp/after-times)
+          before_signature=$(grep '"id":"orthogonal_dispatch_grid"' /tmp/before.jsonl | head -n 1 | jq -r '.signature')
+          after_signature=$(grep '"id":"orthogonal_dispatch_grid"' /tmp/after.jsonl | head -n 1 | jq -r '.signature')
+          test "$before_signature" = "$after_signature"
+
+          awk -v before="$before" -v after="$after" 'BEGIN {
+            ratio = before / after;
+            printf "baseline_median_ns=%s\noptimized_median_ns=%s\nspeedup=%.4fx\n", before, after, ratio;
+            if (after >= before) exit 1;
+          }' | tee /tmp/benchmark-summary.txt
+
+      - name: Validate workspace
+        run: |
+          cargo fmt --all -- --check
+          cargo test --workspace --all-features
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+          ./scripts/check-c-api.sh
+
+      - name: Commit optimized implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/agent-optimize.yml
+          git add crates/knipsa/src/fast.rs
+          git commit -m "Hoist orthogonal fill dispatch"
+          git push origin HEAD:agent/hoist-orthogonal-fill-dispatch
