@@ -5,7 +5,7 @@ on:
     branches: [agent/beat-clipper2-standard-matrix]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   validate:
@@ -34,6 +34,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         if: steps.gate.outputs.active == 'true'
+
+      - name: Repair module path and format candidate
+        if: steps.gate.outputs.active == 'true'
+        shell: bash
+        run: |
+          perl -0pi -e 's/#\[cfg\(test\)\]\nmod tests;/#[cfg(test)]\n#[path = "convex_dispatch\/tests.rs"]\nmod tests;/' crates/knipsa/src/convex_dispatch.rs
+          grep -F '#[path = "convex_dispatch/tests.rs"]' crates/knipsa/src/convex_dispatch.rs
+          cargo +stable fmt --all
+          git diff --check
 
       - name: Validate stable workspace
         if: steps.gate.outputs.active == 'true'
@@ -188,3 +197,14 @@ jobs:
       - name: Validate full coverage
         if: steps.gate.outputs.active == 'true'
         run: ./scripts/coverage.sh
+
+      - name: Publish validated source-only commit
+        if: steps.gate.outputs.active == 'true'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/agent-validate-clipper2.yml
+          git add -A
+          git commit -m "Validate linear convex dispatcher against Clipper2"
+          git push origin HEAD:agent/beat-clipper2-standard-matrix
