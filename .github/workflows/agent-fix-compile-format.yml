@@ -22,30 +22,32 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat > /tmp/fix.patch <<'PATCH'
-          diff --git a/crates/knipsa/src/boolean.rs b/crates/knipsa/src/boolean.rs
-          --- a/crates/knipsa/src/boolean.rs
-          +++ b/crates/knipsa/src/boolean.rs
-          @@ -1661,8 +1661,16 @@ mod tests {
-                   FillRule::EvenOdd,
-                   &epsilon,
-               );
-          -        let wedge_result = stitch_directed_edges(&wedge_boundary).expect("wedge boundary closes");
-          -        let wedge_oracle = stitch_directed_edges(&wedge_oracle).expect("wedge oracle closes");
-          +        let wedge_result = exact_paths_to_i64(
-          +            &stitch_directed_edges(&wedge_boundary).expect("wedge boundary closes"),
-          +        )
-          +        .expect("integer wedge result");
-          +        let wedge_oracle = exact_paths_to_i64(
-          +            &stitch_directed_edges(&wedge_oracle).expect("wedge oracle closes"),
-          +        )
-          +        .expect("integer wedge oracle");
-                   assert_eq!(canonical_summary(&wedge_result), canonical_summary(&wedge_oracle));
-               }
-          PATCH
-          sed -i 's/^          //' /tmp/fix.patch
-          git apply --check /tmp/fix.patch
-          git apply /tmp/fix.patch
+          cat > /tmp/old.txt <<'EOF'
+                  let wedge_result = stitch_directed_edges(&wedge_boundary).expect("wedge boundary closes");
+                  let wedge_oracle = stitch_directed_edges(&wedge_oracle).expect("wedge oracle closes");
+          EOF
+          cat > /tmp/new.txt <<'EOF'
+                  let wedge_result = exact_paths_to_i64(
+                      &stitch_directed_edges(&wedge_boundary).expect("wedge boundary closes"),
+                  )
+                  .expect("integer wedge result");
+                  let wedge_oracle = exact_paths_to_i64(
+                      &stitch_directed_edges(&wedge_oracle).expect("wedge oracle closes"),
+                  )
+                  .expect("integer wedge oracle");
+          EOF
+          sed -i 's/^          //' /tmp/old.txt /tmp/new.txt
+          perl -0pi -e '
+            BEGIN {
+              local $/;
+              open my $old_fh, "<", "/tmp/old.txt" or die $!;
+              open my $new_fh, "<", "/tmp/new.txt" or die $!;
+              $old = <$old_fh>;
+              $new = <$new_fh>;
+            }
+            $count = s/\Q$old\E/$new/g;
+            die "expected exactly one wedge test replacement, got $count\n" unless $count == 1;
+          ' crates/knipsa/src/boolean.rs
           cargo fmt --all
           rm .github/workflows/agent-fix-compile-format.yml
           git diff --check
