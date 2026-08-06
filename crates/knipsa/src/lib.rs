@@ -20,8 +20,8 @@ pub use geometry::{
     validate_path64, validate_pathd, validate_paths_d, validate_paths64,
 };
 pub use offset::{
-    EndType, JoinType, OffsetOptions, offset_path_d, offset_path64, offset_paths,
-    offset_paths_d, offset_paths64,
+    EndType, JoinType, OffsetOptions, offset_path_d, offset_path64, offset_paths, offset_paths_d,
+    offset_paths64,
 };
 pub use request::{
     BooleanRequest, BooleanRequestD, ClipType, FillRule, boolean_op, boolean_opd, difference,

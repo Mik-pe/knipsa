@@ -478,14 +478,8 @@ fn run_boolean(
 
     let atomic_edges = split_source_edges(&edges, &mut split_parameters, &edge_subjects);
     let epsilon = Rational::new(BigInt::one(), BigInt::one() << sample_bits);
-    let directed = select_atomic_boundary(
-        &atomic_edges,
-        subjects,
-        clips,
-        clip_type,
-        fill_rule,
-        &epsilon,
-    );
+    let directed =
+        select_atomic_boundary(&atomic_edges, subjects, clips, clip_type, fill_rule, &epsilon);
     stitch_directed_edges(&directed)
 }
 
@@ -1530,9 +1524,7 @@ mod tests {
         let mut owners = Vec::new();
         for (paths, subject) in [(subjects, true), (clips, false)] {
             for path in paths {
-                for (start, end) in
-                    path.iter().zip(path.iter().cycle().skip(1)).take(path.len())
-                {
+                for (start, end) in path.iter().zip(path.iter().cycle().skip(1)).take(path.len()) {
                     if start != end {
                         edges.push(Edge::new(start.clone(), end.clone()));
                         owners.push(subject);
@@ -1620,7 +1612,10 @@ mod tests {
         .expect("integer oracle result");
         assert_eq!(canonical_summary(&certified), canonical_summary(&oracle));
         assert_eq!(certified.len(), 2);
-        assert_eq!(certified.iter().map(|path| signed_area2(path).unwrap().abs()).sum::<i128>(), 198);
+        assert_eq!(
+            certified.iter().map(|path| signed_area2(path).unwrap().abs()).sum::<i128>(),
+            198
+        );
 
         // Eight disjoint wedges meet only at the origin. The arrangement keeps
         // sixteen outgoing half-edges there, exercising the high-valence fan
@@ -1661,8 +1656,13 @@ mod tests {
             FillRule::EvenOdd,
             &epsilon,
         );
-        let wedge_result = stitch_directed_edges(&wedge_boundary).expect("wedge boundary closes");
-        let wedge_oracle = stitch_directed_edges(&wedge_oracle).expect("wedge oracle closes");
+        let wedge_result = exact_paths_to_i64(
+            &stitch_directed_edges(&wedge_boundary).expect("wedge boundary closes"),
+        )
+        .expect("integer wedge result");
+        let wedge_oracle =
+            exact_paths_to_i64(&stitch_directed_edges(&wedge_oracle).expect("wedge oracle closes"))
+                .expect("integer wedge oracle");
         assert_eq!(canonical_summary(&wedge_result), canonical_summary(&wedge_oracle));
     }
 
@@ -1670,54 +1670,44 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn certified_face_overlay_fails_closed_to_exact_sampling() {
         let epsilon = Rational::new(BigInt::one(), BigInt::one() << INTEGER_SAMPLE_BITS);
-        assert!(try_face_boundary(
-            &[],
-            &[],
-            &[],
-            ClipType::Union,
-            FillRule::EvenOdd,
-            &epsilon,
-        )
-        .is_some_and(|boundary| boundary.is_empty()));
+        assert!(
+            try_face_boundary(&[], &[], &[], ClipType::Union, FillRule::EvenOdd, &epsilon,)
+                .is_some_and(|boundary| boundary.is_empty())
+        );
 
         // A single bridge has the same face on both sides. It is deliberately
         // not a valid polygon arrangement, but it is a compact proof that the
         // selector rejects ambiguous topology and invokes the exact oracle.
-        let bridge = AtomicEdge {
-            start: exact_point(0, 0),
-            end: exact_point(10, 0),
-            subject: true,
-        };
-        assert!(try_face_boundary(
-            std::slice::from_ref(&bridge),
-            &[],
-            &[],
-            ClipType::Union,
-            FillRule::EvenOdd,
-            &epsilon,
-        )
-        .is_none());
-        assert!(select_atomic_boundary(
-            std::slice::from_ref(&bridge),
-            &[],
-            &[],
-            ClipType::Union,
-            FillRule::EvenOdd,
-            &epsilon,
-        )
-        .is_empty());
+        let bridge =
+            AtomicEdge { start: exact_point(0, 0), end: exact_point(10, 0), subject: true };
+        assert!(
+            try_face_boundary(
+                std::slice::from_ref(&bridge),
+                &[],
+                &[],
+                ClipType::Union,
+                FillRule::EvenOdd,
+                &epsilon,
+            )
+            .is_none()
+        );
+        assert!(
+            select_atomic_boundary(
+                std::slice::from_ref(&bridge),
+                &[],
+                &[],
+                ClipType::Union,
+                FillRule::EvenOdd,
+                &epsilon,
+            )
+            .is_empty()
+        );
 
         let subject = [exact_path(&[(0, 0), (10, 0), (10, 10), (0, 10)])];
-        let bottom = AtomicEdge {
-            start: exact_point(0, 0),
-            end: exact_point(10, 0),
-            subject: true,
-        };
-        let reverse = AtomicEdge {
-            start: bottom.end.clone(),
-            end: bottom.start.clone(),
-            subject: true,
-        };
+        let bottom =
+            AtomicEdge { start: exact_point(0, 0), end: exact_point(10, 0), subject: true };
+        let reverse =
+            AtomicEdge { start: bottom.end.clone(), end: bottom.start.clone(), subject: true };
         let sampled = sample_atomic_boundary(
             &[bottom, reverse],
             &subject,
@@ -1736,20 +1726,12 @@ mod tests {
             subject_delta: 1,
             clip_delta: 0,
         }];
-        assert_eq!(
-            half_edge_delta(&arrangement, 1),
-            Some(WindingPair { subject: -1, clip: 0 })
-        );
-        let subject_overflow = [ArrangementEdge {
-            subject_delta: i128::MIN,
-            ..arrangement[0].clone()
-        }];
+        assert_eq!(half_edge_delta(&arrangement, 1), Some(WindingPair { subject: -1, clip: 0 }));
+        let subject_overflow =
+            [ArrangementEdge { subject_delta: i128::MIN, ..arrangement[0].clone() }];
         assert!(half_edge_delta(&subject_overflow, 1).is_none());
-        let clip_overflow = [ArrangementEdge {
-            subject_delta: 0,
-            clip_delta: i128::MIN,
-            ..arrangement[0].clone()
-        }];
+        let clip_overflow =
+            [ArrangementEdge { subject_delta: 0, clip_delta: i128::MIN, ..arrangement[0].clone() }];
         assert!(half_edge_delta(&clip_overflow, 1).is_none());
         assert!(sample_face_pair(0, &arrangement, &[], &[], &epsilon).is_none());
 
@@ -1762,12 +1744,7 @@ mod tests {
                 clip_delta: 1,
             },
         ];
-        assert!(!probe_is_clear(
-            &exact_point(5, -1),
-            &exact_point(5, 1),
-            1,
-            &crossing,
-        ));
+        assert!(!probe_is_clear(&exact_point(5, -1), &exact_point(5, 1), 1, &crossing,));
 
         let mut labels = vec![None];
         let mut queue = VecDeque::new();
@@ -1775,12 +1752,7 @@ mod tests {
         assert_eq!(assign_face_label(&mut labels, 0, winding, &mut queue), Some(()));
         assert_eq!(assign_face_label(&mut labels, 0, winding, &mut queue), Some(()));
         assert_eq!(
-            assign_face_label(
-                &mut labels,
-                0,
-                WindingPair { subject: 0, clip: 1 },
-                &mut queue,
-            ),
+            assign_face_label(&mut labels, 0, WindingPair { subject: 0, clip: 1 }, &mut queue,),
             None
         );
 

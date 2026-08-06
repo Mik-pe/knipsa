@@ -166,11 +166,7 @@ pub fn offset_paths64(
 ///
 /// Propagates validation, offset, topology, and conversion errors from
 /// [offset_paths64].
-pub fn offset_path64(
-    path: &Path64,
-    delta: f64,
-    options: OffsetOptions,
-) -> Result<Paths64, Error> {
+pub fn offset_path64(path: &Path64, delta: f64, options: OffsetOptions) -> Result<Paths64, Error> {
     offset_paths64(std::slice::from_ref(path), delta, options)
 }
 
@@ -234,10 +230,7 @@ pub fn offset_paths_d(
     merge_generated_contours(generated, options.preserve_collinear)
 }
 
-fn merge_generated_contours(
-    generated: PathsD,
-    preserve_collinear: bool,
-) -> Result<PathsD, Error> {
+fn merge_generated_contours(generated: PathsD, preserve_collinear: bool) -> Result<PathsD, Error> {
     // Concave offsets can contain overlapping lobes and negative slivers. The
     // exact non-zero union is the topology cleanup stage and also merges
     // overlapping offsets from multiple input paths. The boolean kernel only
@@ -249,10 +242,7 @@ fn merge_generated_contours(
         clip_type: ClipType::Union,
         fill_rule: FillRule::NonZero,
     })?;
-    Ok(result
-        .into_iter()
-        .map(|path| clean_ring(path, preserve_collinear))
-        .collect())
+    Ok(result.into_iter().map(|path| clean_ring(path, preserve_collinear)).collect())
 }
 
 /// Offsets one floating-point path.
@@ -263,11 +253,7 @@ fn merge_generated_contours(
 /// # Errors
 ///
 /// Propagates validation and topology errors from [offset_paths_d].
-pub fn offset_path_d(
-    path: &PathD,
-    delta: f64,
-    options: OffsetOptions,
-) -> Result<PathsD, Error> {
+pub fn offset_path_d(path: &PathD, delta: f64, options: OffsetOptions) -> Result<PathsD, Error> {
     offset_paths_d(std::slice::from_ref(path), delta, options)
 }
 
@@ -1416,11 +1402,7 @@ mod tests {
 
         let floating = rectangle(0.0, 0.0, 10.0, 10.0);
         let floating_options = OffsetOptions::polygon(JoinType::Round);
-        let collection = offset_paths_d(
-            std::slice::from_ref(&floating),
-            2.0,
-            floating_options,
-        );
+        let collection = offset_paths_d(std::slice::from_ref(&floating), 2.0, floating_options);
         assert_eq!(offset_path_d(&floating, 2.0, floating_options), collection);
     }
 
