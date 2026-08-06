@@ -1,51 +1,28 @@
-diff --git a/crates/knipsa/src/convex_dispatch.rs b/crates/knipsa/src/convex_dispatch.rs
---- a/crates/knipsa/src/convex_dispatch.rs
-+++ b/crates/knipsa/src/convex_dispatch.rs
-@@ -676,4 +676,5 @@ fn key(point: PointD) -> Option<PointKey> {
- }
- 
- #[cfg(test)]
-+#[path = "convex_dispatch/tests.rs"]
- mod tests;
-diff --git a/crates/knipsa/src/lib.rs b/crates/knipsa/src/lib.rs
---- a/crates/knipsa/src/lib.rs
-+++ b/crates/knipsa/src/lib.rs
-@@ -5,11 +5,8 @@
- 
- mod boolean;
- mod convex_dispatch;
- mod error;
- #[path = "standard_dispatch.rs"]
--mod standard_dispatch;
--#[path = "performance_dispatch.rs"]
- mod fast;
- mod fast_dispatch;
- mod geometry;
- mod offset;
 diff --git a/crates/knipsa/src/performance_dispatch.rs b/crates/knipsa/src/performance_dispatch.rs
-deleted file mode 100644
+index a51a69e..f1a2715 100644
 --- a/crates/knipsa/src/performance_dispatch.rs
-+++ /dev/null
-@@ -1,10 +0,0 @@
--//! Ordered standard-case dispatch for floating-point boolean operations.
--
--use crate::{BooleanRequestD, PathsD};
--
--pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<PathsD, ()>> {
++++ b/crates/knipsa/src/performance_dispatch.rs
+@@ -3,8 +3,14 @@
+ use crate::{BooleanRequestD, PathsD};
+ 
+ pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<PathsD, ()>> {
 -    if let Some(result) = crate::convex_dispatch::try_boolean_opd(request) {
 -        return Some(Ok(result));
--    }
--    crate::standard_dispatch::try_boolean_opd(request)
--}
-diff --git a/crates/knipsa/src/standard_dispatch.rs b/crates/knipsa/src/standard_dispatch.rs
---- a/crates/knipsa/src/standard_dispatch.rs
-+++ b/crates/knipsa/src/standard_dispatch.rs
-@@ -80,6 +80,9 @@ pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<Pat
-     if let Some(result) = try_rectangle_pair(request) {
-         return Some(Ok(result));
++    let large_convex_candidate = request.subjects.len() == 1
++        && request.clips.len() == 1
++        && request.subjects[0].len() >= 16
++        && request.clips[0].len() >= 16;
++    if large_convex_candidate {
++        if let Some(result) = crate::convex_dispatch::try_boolean_opd(request) {
++            return Some(Ok(result));
++        }
      }
-+    if let Some(result) = crate::convex_dispatch::try_boolean_opd(request) {
-+        return Some(Ok(result));
-+    }
-     crate::fast_dispatch::try_boolean_opd(request)
+     crate::standard_dispatch::try_boolean_opd(request)
  }
+diff --git a/crates/knipsa/src/tests.rs b/crates/knipsa/src/tests.rs
+new file mode 100644
+index 0000000..3c820a5
+--- /dev/null
++++ b/crates/knipsa/src/tests.rs
+@@ -0,0 +1 @@
++include!("convex_dispatch/tests.rs");
