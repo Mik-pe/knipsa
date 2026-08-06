@@ -256,6 +256,21 @@ struct GridCoordinate {
     value: f64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct WindingDifference {
+    subject: i32,
+    clip: i32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GridEvent {
+    x: usize,
+    y0: usize,
+    y1: usize,
+    subject_delta: i32,
+    clip_delta: i32,
+}
+
 /// Resolves rectilinear input with coordinate compression and integer winding
 /// range updates. Diagonal, over-large, or quantization-ambiguous input is
 /// rejected so the exact arrangement remains the conservative fallback.
@@ -274,44 +289,56 @@ fn try_orthogonal_arrangement(request: BooleanRequestD<'_>) -> Option<Result<Pat
 
     let height = ys.len();
     let grid_size = orthogonal_grid_size(xs.len(), height)?;
-    let mut subject_difference = vec![0_i32; grid_size];
-    let mut clip_difference = vec![0_i32; grid_size];
+    let edge_count = subjects.iter().chain(&clips).map(|path| path.points().len()).sum::<usize>();
+    let mut events = Vec::with_capacity(edge_count / 2);
+    let mut difference = vec![WindingDifference::default(); height];
     for path in &subjects {
-        add_orthogonal_path(&mut subject_difference, height, &xs, &ys, path.points())?;
+        add_orthogonal_path(&mut events, &mut difference, &xs, &ys, path.points(), true)?;
     }
     for path in &clips {
-        add_orthogonal_path(&mut clip_difference, height, &xs, &ys, path.points())?;
+        add_orthogonal_path(&mut events, &mut difference, &xs, &ys, path.points(), false)?;
     }
-    prefix_sum(&mut subject_difference, xs.len(), height);
-    prefix_sum(&mut clip_difference, xs.len(), height);
+    events.sort_unstable_by_key(|event| event.x);
 
-    let edge_count = subjects.iter().chain(&clips).map(|path| path.points().len()).sum::<usize>();
-    let mut boundary: FastMap<(PointKey, PointKey), DirectedEdge> =
-        FastMap::with_capacity_and_hasher(
-            edge_count.saturating_mul(4),
-            BuildHasherDefault::default(),
-        );
+    let rows = height - 1;
+    let mut previous = vec![false; rows];
+    let mut current = vec![false; rows];
+    let mut event_index = 0;
+    let mut boundary = Vec::with_capacity(edge_count.saturating_mul(2).min(grid_size));
     for x in 0..xs.len() - 1 {
-        for y in 0..ys.len() - 1 {
-            let index = x * height + y;
-            let subject = fill_contains(subject_difference[index], request.fill_rule);
-            let clip = fill_contains(clip_difference[index], request.fill_rule);
-            if apply_operation(subject, clip, request.clip_type) {
-                add_cell_boundary(&mut boundary, xs[x], ys[y], xs[x + 1], ys[y + 1]);
-            }
+        while event_index < events.len() && events[event_index].x == x {
+            let event = events[event_index];
+            add_winding_range(
+                &mut difference,
+                event.y0,
+                event.y1,
+                -event.subject_delta,
+                -event.clip_delta,
+            );
+            event_index += 1;
         }
+        fill_orthogonal_column(&difference, &mut current, request.fill_rule, request.clip_type);
+        add_vertical_transitions(&mut boundary, xs[x], &ys, &previous, &current);
+        add_horizontal_transitions(&mut boundary, xs[x], xs[x + 1], &ys, &current);
+        std::mem::swap(&mut previous, &mut current);
     }
-    Some(finish_orthogonal_boundary(boundary))
+    current.fill(false);
+    add_vertical_transitions(
+        &mut boundary,
+        *xs.last().expect("orthogonal grid has at least two columns"),
+        &ys,
+        &previous,
+        &current,
+    );
+    Some(finish_orthogonal_boundary(&boundary))
 }
 
 fn orthogonal_grid_size(width: usize, height: usize) -> Option<usize> {
     width.checked_mul(height).filter(|grid_size| *grid_size <= MAX_ORTHOGONAL_GRID_POINTS)
 }
 
-fn finish_orthogonal_boundary(
-    boundary: FastMap<(PointKey, PointKey), DirectedEdge>,
-) -> Result<PathsD, Error> {
-    stitch(&boundary.into_values().collect::<Vec<_>>())?
+fn finish_orthogonal_boundary(boundary: &[DirectedEdge]) -> Result<PathsD, Error> {
+    stitch(boundary)?
         .into_iter()
         .map(|path| crate::trim_collinear_d(&path, crate::PathKind::Closed))
         .collect()
@@ -359,11 +386,12 @@ fn orthogonal_path(path: &[Point]) -> bool {
 }
 
 fn add_orthogonal_path(
-    difference: &mut [i32],
-    height: usize,
+    events: &mut Vec<GridEvent>,
+    difference: &mut [WindingDifference],
     xs: &[GridCoordinate],
     ys: &[GridCoordinate],
     path: &[Point],
+    subject: bool,
 ) -> Option<()> {
     for (start, end) in path.iter().zip(path.iter().cycle().skip(1)).take(path.len()) {
         let start_key = key(*start)?;
@@ -376,44 +404,41 @@ fn add_orthogonal_path(
         let end_y = ys.binary_search_by_key(&end_key.y, |coordinate| coordinate.key).ok()?;
         let (y0, y1, winding) =
             if start_y < end_y { (start_y, end_y, 1) } else { (end_y, start_y, -1) };
-        add_range_difference(difference, height, x, y0, y1, winding);
+        let (subject_delta, clip_delta) = if subject { (winding, 0) } else { (0, winding) };
+        add_winding_range(difference, y0, y1, subject_delta, clip_delta);
+        events.push(GridEvent { x, y0, y1, subject_delta, clip_delta });
     }
     Some(())
 }
 
-fn add_range_difference(
-    values: &mut [i32],
-    height: usize,
-    x1: usize,
+fn add_winding_range(
+    values: &mut [WindingDifference],
     y0: usize,
     y1: usize,
-    winding: i32,
+    subject_delta: i32,
+    clip_delta: i32,
 ) {
-    add_difference(values, height, 0, y0, winding);
-    add_difference(values, height, x1, y0, -winding);
-    add_difference(values, height, 0, y1, -winding);
-    add_difference(values, height, x1, y1, winding);
+    values[y0].subject += subject_delta;
+    values[y0].clip += clip_delta;
+    values[y1].subject -= subject_delta;
+    values[y1].clip -= clip_delta;
 }
 
-fn prefix_sum(difference: &mut [i32], width: usize, height: usize) {
-    for x in 0..width {
-        for y in 0..height {
-            let index = x * height + y;
-            if x > 0 {
-                difference[index] += difference[(x - 1) * height + y];
-            }
-            if y > 0 {
-                difference[index] += difference[x * height + y - 1];
-            }
-            if x > 0 && y > 0 {
-                difference[index] -= difference[(x - 1) * height + y - 1];
-            }
-        }
+fn fill_orthogonal_column(
+    difference: &[WindingDifference],
+    filled: &mut [bool],
+    fill_rule: FillRule,
+    clip_type: ClipType,
+) {
+    let mut subject_winding = 0;
+    let mut clip_winding = 0;
+    for (y, cell) in filled.iter_mut().enumerate() {
+        subject_winding += difference[y].subject;
+        clip_winding += difference[y].clip;
+        let subject = fill_contains(subject_winding, fill_rule);
+        let clip = fill_contains(clip_winding, fill_rule);
+        *cell = apply_operation(subject, clip, clip_type);
     }
-}
-
-fn add_difference(values: &mut [i32], height: usize, x: usize, y: usize, delta: i32) {
-    values[x * height + y] += delta;
 }
 
 fn fill_contains(winding: i32, fill_rule: FillRule) -> bool {
@@ -425,31 +450,65 @@ fn fill_contains(winding: i32, fill_rule: FillRule) -> bool {
     }
 }
 
-fn add_cell_boundary(
-    boundary: &mut FastMap<(PointKey, PointKey), DirectedEdge>,
-    min_x: GridCoordinate,
-    min_y: GridCoordinate,
-    max_x: GridCoordinate,
-    max_y: GridCoordinate,
+fn add_vertical_transitions(
+    boundary: &mut Vec<DirectedEdge>,
+    x: GridCoordinate,
+    ys: &[GridCoordinate],
+    left: &[bool],
+    right: &[bool],
 ) {
-    let bottom_left =
-        (Point { x: min_x.value, y: min_y.value }, PointKey { x: min_x.key, y: min_y.key });
-    let bottom_right =
-        (Point { x: max_x.value, y: min_y.value }, PointKey { x: max_x.key, y: min_y.key });
-    let top_right =
-        (Point { x: max_x.value, y: max_y.value }, PointKey { x: max_x.key, y: max_y.key });
-    let top_left =
-        (Point { x: min_x.value, y: max_y.value }, PointKey { x: min_x.key, y: max_y.key });
-    for ((start, start_key), (end, end_key)) in [
-        (bottom_left, bottom_right),
-        (bottom_right, top_right),
-        (top_right, top_left),
-        (top_left, bottom_left),
-    ] {
-        if boundary.remove(&(end_key, start_key)).is_none() {
-            boundary.insert((start_key, end_key), DirectedEdge { start, end, start_key, end_key });
+    for y in 0..left.len() {
+        if left[y] == right[y] {
+            continue;
+        }
+        if right[y] {
+            push_grid_edge(boundary, x, ys[y + 1], x, ys[y]);
+        } else {
+            push_grid_edge(boundary, x, ys[y], x, ys[y + 1]);
         }
     }
+}
+
+fn add_horizontal_transitions(
+    boundary: &mut Vec<DirectedEdge>,
+    min_x: GridCoordinate,
+    max_x: GridCoordinate,
+    ys: &[GridCoordinate],
+    filled: &[bool],
+) {
+    if filled[0] {
+        push_grid_edge(boundary, min_x, ys[0], max_x, ys[0]);
+    }
+    for y in 1..filled.len() {
+        if filled[y - 1] == filled[y] {
+            continue;
+        }
+        if filled[y] {
+            push_grid_edge(boundary, min_x, ys[y], max_x, ys[y]);
+        } else {
+            push_grid_edge(boundary, max_x, ys[y], min_x, ys[y]);
+        }
+    }
+    if *filled.last().expect("orthogonal grid has at least one row") {
+        let top = ys[filled.len()];
+        push_grid_edge(boundary, max_x, top, min_x, top);
+    }
+}
+
+#[inline]
+fn push_grid_edge(
+    boundary: &mut Vec<DirectedEdge>,
+    start_x: GridCoordinate,
+    start_y: GridCoordinate,
+    end_x: GridCoordinate,
+    end_y: GridCoordinate,
+) {
+    boundary.push(DirectedEdge {
+        start: Point { x: start_x.value, y: start_y.value },
+        end: Point { x: end_x.value, y: end_y.value },
+        start_key: PointKey { x: start_x.key, y: start_y.key },
+        end_key: PointKey { x: end_x.key, y: end_y.key },
+    });
 }
 
 /// The remaining non-orthogonal pair path is intentionally narrower than the
@@ -2375,6 +2434,106 @@ mod tests {
             .expect("exact result is finite");
         assert_eq!(summary(&fast), summary(&exact));
 
+        let touching_subjects = [
+            vec![point(0.0, 0.0), point(4.0, 0.0), point(4.0, 4.0), point(0.0, 4.0)],
+            vec![point(4.0, 4.0), point(8.0, 4.0), point(8.0, 8.0), point(4.0, 8.0)],
+        ];
+        let touching_request = BooleanRequestD {
+            subjects: &touching_subjects,
+            clips: &[],
+            clip_type: ClipType::Union,
+            fill_rule: FillRule::EvenOdd,
+        };
+        let touching_fast = try_orthogonal_arrangement(touching_request)
+            .expect("vertex-touch input should be recognized")
+            .expect("vertex-touch boundary should close");
+        let touching_exact =
+            crate::boolean::boolean_opd_exact(touching_request).expect("exact vertex-touch oracle");
+        assert_eq!(touching_fast.len(), 2);
+        assert_eq!(summary(&touching_fast), summary(&touching_exact));
+
+        let split_horizontal_subjects = [vec![
+            point(0.0, 0.0),
+            point(2.0, 0.0),
+            point(4.0, 0.0),
+            point(4.0, 4.0),
+            point(0.0, 4.0),
+        ]];
+        let split_horizontal_request = BooleanRequestD {
+            subjects: &split_horizontal_subjects,
+            clips: &[],
+            clip_type: ClipType::Union,
+            fill_rule: FillRule::EvenOdd,
+        };
+        let split_horizontal_fast = try_orthogonal_arrangement(split_horizontal_request)
+            .expect("split horizontal edge should be recognized")
+            .expect("split horizontal boundary should close");
+        let split_horizontal_expected =
+            vec![vec![point(0.0, 0.0), point(4.0, 0.0), point(4.0, 4.0), point(0.0, 4.0)]];
+        assert_eq!(summary(&split_horizontal_fast), summary(&split_horizontal_expected));
+
+        let horizontal_spike_subjects = [vec![
+            point(0.0, 0.0),
+            point(4.0, 0.0),
+            point(5.0, 0.0),
+            point(4.0, 0.0),
+            point(4.0, 4.0),
+            point(0.0, 4.0),
+        ]];
+        let horizontal_spike_request = BooleanRequestD {
+            subjects: &horizontal_spike_subjects,
+            clips: &[],
+            clip_type: ClipType::Union,
+            fill_rule: FillRule::EvenOdd,
+        };
+        let horizontal_spike_fast = try_orthogonal_arrangement(horizontal_spike_request)
+            .expect("horizontal spike should be recognized")
+            .expect("horizontal spike boundary should close");
+        assert_eq!(summary(&horizontal_spike_fast), summary(&split_horizontal_expected));
+
+        let mut negative_subject =
+            vec![point(2.0, 2.0), point(14.0, 2.0), point(14.0, 10.0), point(2.0, 10.0)];
+        negative_subject.reverse();
+        let matrix_subjects = [
+            vec![point(0.0, 0.0), point(10.0, 0.0), point(10.0, 12.0), point(0.0, 12.0)],
+            negative_subject,
+        ];
+        let mut negative_clip =
+            vec![point(-2.0, 4.0), point(16.0, 4.0), point(16.0, 8.0), point(-2.0, 8.0)];
+        negative_clip.reverse();
+        let matrix_clips = [
+            vec![point(5.0, -2.0), point(9.0, -2.0), point(9.0, 14.0), point(5.0, 14.0)],
+            negative_clip,
+        ];
+        for clip_type in
+            [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor]
+        {
+            for fill_rule in
+                [FillRule::EvenOdd, FillRule::NonZero, FillRule::Positive, FillRule::Negative]
+            {
+                let request = BooleanRequestD {
+                    subjects: &matrix_subjects,
+                    clips: &matrix_clips,
+                    clip_type,
+                    fill_rule,
+                };
+                let fast = try_orthogonal_arrangement(request)
+                    .expect("orthogonal operation matrix should be recognized")
+                    .expect("orthogonal operation matrix should close");
+                let exact = crate::boolean::boolean_opd_exact(request)
+                    .expect("exact matrix oracle")
+                    .iter()
+                    .map(|path| crate::trim_collinear_d(path, crate::PathKind::Closed))
+                    .collect::<Result<PathsD, Error>>()
+                    .expect("exact matrix result is finite");
+                assert_eq!(
+                    summary(&fast),
+                    summary(&exact),
+                    "operation: {clip_type:?}, fill rule: {fill_rule:?}"
+                );
+            }
+        }
+
         assert!(orthogonal_path(&subjects[0]));
         assert!(!orthogonal_path(&[point(0.0, 0.0); 4]));
         assert!(!orthogonal_path(&[
@@ -2440,10 +2599,8 @@ mod tests {
             fill_rule: FillRule::EvenOdd,
         }));
 
-        let mut malformed = FastMap::with_capacity_and_hasher(1, BuildHasherDefault::default());
         let open = directed(point(0.0, 0.0), point(1.0, 0.0));
-        malformed.insert((open.start_key, open.end_key), open);
-        assert!(finish_orthogonal_boundary(malformed).is_err());
+        assert!(finish_orthogonal_boundary(&[open]).is_err());
 
         let positive = vec![point(0.0, 0.0), point(3.0, 0.0), point(1.0, 3.0)];
         let mut negative = positive.clone();
