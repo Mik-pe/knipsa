@@ -36,7 +36,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Require exact function, line, and branch coverage
-        run: ./scripts/coverage.sh
+        shell: bash
+        run: |
+          set +e
+          ./scripts/coverage.sh
+          status=$?
+          if [[ -f target/coverage/lcov.info ]]; then
+            echo '::group::Uncovered lines'
+            awk -F, '
+              /^SF:/ { file = substr($0, 4) }
+              /^DA:/ && ($2 + 0) == 0 { split($1, fields, ":"); print file ":" fields[2] }
+            ' target/coverage/lcov.info
+            echo '::endgroup::'
+            echo '::group::Uncovered branches'
+            awk -F, '
+              /^SF:/ { file = substr($0, 4) }
+              /^BRDA:/ && ($4 == "-" || ($4 + 0) == 0) { split($1, fields, ":"); print file ":" fields[2] " " $0 }
+            ' target/coverage/lcov.info
+            echo '::endgroup::'
+          fi
+          exit "$status"
       - name: Remove branch-only machinery and publish the validated product commit
         shell: bash
         run: |
