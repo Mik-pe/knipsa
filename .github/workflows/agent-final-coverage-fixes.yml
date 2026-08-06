@@ -45,6 +45,37 @@ jobs:
           }
 
           {
+            const path = 'crates/knipsa/src/offset.rs';
+            const source = fs.readFileSync(path, 'utf8');
+            const before =
+              '        assert_eq!(certify_non_zero_contours(std::slice::from_ref(&simple)), Some(vec![true]));';
+            const after = `${before}
+          
+                  // Repeated, oppositely directed edges force the sweep ordering all the
+                  // way through its deterministic edge-index tie breaker. The geometry is
+                  // intentionally uncertifiable because non-adjacent copies overlap.
+                  let repeated_edge_bounds = vec![
+                      PointD::new(0.0, 0.0),
+                      PointD::new(1.0, 0.0),
+                      PointD::new(0.0, 0.0),
+                      PointD::new(1.0, 0.0),
+                  ];
+                  assert_eq!(
+                      certify_boundaries_do_not_touch_with_limit(
+                          std::slice::from_ref(&repeated_edge_bounds),
+                          repeated_edge_bounds.len(),
+                          usize::MAX,
+                      ),
+                      None
+                  );`;
+            const matches = source.split(before).length - 1;
+            if (matches !== 1) {
+              throw new Error(`expected one contour certification anchor, found ${matches}`);
+            }
+            fs.writeFileSync(path, source.replace(before, after));
+          }
+
+          {
             const path = 'scripts/coverage.sh';
             const source = fs.readFileSync(path, 'utf8');
             const commandBefore = `mkdir -p target/coverage
