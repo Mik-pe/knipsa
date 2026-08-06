@@ -5,6 +5,7 @@
 
 mod boolean;
 mod error;
+// Keep the standard-case dispatcher separate from the certified general kernels.
 #[path = "standard_dispatch.rs"]
 mod fast;
 mod fast_dispatch;
