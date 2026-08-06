@@ -57,62 +57,58 @@ jobs:
           test -n "$baseline_bin"
           cp "$baseline_bin" /tmp/workload-before
 
-      - name: Hoist fill dispatch and remove redundant endpoint scans
+      - name: Optimize orthogonal column evaluation
         run: |
           node <<'NODE'
           const fs = require("fs");
           const path = "crates/knipsa/src/fast.rs";
           let source = fs.readFileSync(path, "utf8");
 
-          const oldFill = `fn fill_orthogonal_column(
-              difference: &[WindingDifference],
-              filled: &mut [bool],
-              fill_rule: FillRule,
-              clip_type: ClipType,
-          ) {
-              let mut subject_winding = 0;
-              let mut clip_winding = 0;
-              for (y, cell) in filled.iter_mut().enumerate() {
-                  subject_winding += difference[y].subject;
-                  clip_winding += difference[y].clip;
-                  let subject = fill_contains(subject_winding, fill_rule);
-                  let clip = fill_contains(clip_winding, fill_rule);
-                  *cell = apply_operation(subject, clip, clip_type);
-              }
+          const columnStart = source.indexOf("fn fill_orthogonal_column(");
+          const columnEnd = source.indexOf("fn add_vertical_transitions(", columnStart);
+          if (columnStart < 0 || columnEnd < 0) {
+            throw new Error("orthogonal fill block was not found");
           }
-          `;
 
-          const newFill = `fn fill_orthogonal_column(
+          const newColumn = `fn fill_orthogonal_column(
               difference: &[WindingDifference],
               filled: &mut [bool],
               fill_rule: FillRule,
               clip_type: ClipType,
           ) {
               match fill_rule {
-                  FillRule::EvenOdd => fill_orthogonal_column_with(
-                      difference,
-                      filled,
-                      clip_type,
-                      |winding| (winding & 1) != 0,
-                  ),
-                  FillRule::NonZero => fill_orthogonal_column_with(
-                      difference,
-                      filled,
-                      clip_type,
-                      |winding| winding != 0,
-                  ),
-                  FillRule::Positive => fill_orthogonal_column_with(
-                      difference,
-                      filled,
-                      clip_type,
-                      |winding| winding > 0,
-                  ),
-                  FillRule::Negative => fill_orthogonal_column_with(
-                      difference,
-                      filled,
-                      clip_type,
-                      |winding| winding < 0,
-                  ),
+                  FillRule::EvenOdd => {
+                      fill_orthogonal_column_with(
+                          difference,
+                          filled,
+                          clip_type,
+                          |winding| (winding & 1) != 0,
+                      );
+                  }
+                  FillRule::NonZero => {
+                      fill_orthogonal_column_with(
+                          difference,
+                          filled,
+                          clip_type,
+                          |winding| winding != 0,
+                      );
+                  }
+                  FillRule::Positive => {
+                      fill_orthogonal_column_with(
+                          difference,
+                          filled,
+                          clip_type,
+                          |winding| winding > 0,
+                      );
+                  }
+                  FillRule::Negative => {
+                      fill_orthogonal_column_with(
+                          difference,
+                          filled,
+                          clip_type,
+                          |winding| winding < 0,
+                      );
+                  }
               }
           }
 
@@ -124,30 +120,38 @@ jobs:
               contains: impl Fn(i32) -> bool,
           ) {
               match clip_type {
-                  ClipType::Intersection => fill_orthogonal_cells(
-                      difference,
-                      filled,
-                      &contains,
-                      |subject, clip| subject && clip,
-                  ),
-                  ClipType::Union => fill_orthogonal_cells(
-                      difference,
-                      filled,
-                      &contains,
-                      |subject, clip| subject || clip,
-                  ),
-                  ClipType::Difference => fill_orthogonal_cells(
-                      difference,
-                      filled,
-                      &contains,
-                      |subject, clip| subject && !clip,
-                  ),
-                  ClipType::Xor => fill_orthogonal_cells(
-                      difference,
-                      filled,
-                      &contains,
-                      |subject, clip| subject != clip,
-                  ),
+                  ClipType::Intersection => {
+                      fill_orthogonal_cells(
+                          difference,
+                          filled,
+                          &contains,
+                          |subject, clip| subject && clip,
+                      );
+                  }
+                  ClipType::Union => {
+                      fill_orthogonal_cells(
+                          difference,
+                          filled,
+                          &contains,
+                          |subject, clip| subject || clip,
+                      );
+                  }
+                  ClipType::Difference => {
+                      fill_orthogonal_cells(
+                          difference,
+                          filled,
+                          &contains,
+                          |subject, clip| subject && !clip,
+                      );
+                  }
+                  ClipType::Xor => {
+                      fill_orthogonal_cells(
+                          difference,
+                          filled,
+                          &contains,
+                          |subject, clip| subject != clip,
+                      );
+                  }
               }
           }
 
@@ -166,31 +170,15 @@ jobs:
                   *cell = operation(contains(subject_winding), contains(clip_winding));
               }
           }
-          `;
 
-          const oldEligible = `fn eligible<P: PathSlice>(subjects: &[P], clips: &[P]) -> bool {
-              for path in subjects.iter().chain(clips) {
-                  let points = path.points();
-                  if points.len() < 3 {
-                      continue;
-                  }
-                  for (start, end) in points.iter().zip(points.iter().cycle().skip(1)).take(points.len()) {
-                      if !start.x.is_finite()
-                          || !start.y.is_finite()
-                          || !end.x.is_finite()
-                          || !end.y.is_finite()
-                          || start.x.abs() > MAX_COORDINATE
-                          || start.y.abs() > MAX_COORDINATE
-                          || end.x.abs() > MAX_COORDINATE
-                          || end.y.abs() > MAX_COORDINATE
-                      {
-                          return false;
-                      }
-                  }
-              }
-              true
-          }
           `;
+          source = source.slice(0, columnStart) + newColumn + source.slice(columnEnd);
+
+          const eligibleStart = source.indexOf("fn eligible<P: PathSlice>(");
+          const eligibleEnd = source.indexOf("fn boxes_disjoint(", eligibleStart);
+          if (eligibleStart < 0 || eligibleEnd < 0) {
+            throw new Error("eligibility block was not found");
+          }
 
           const newEligible = `fn eligible<P: PathSlice>(subjects: &[P], clips: &[P]) -> bool {
               for path in subjects.iter().chain(clips) {
@@ -210,15 +198,9 @@ jobs:
               }
               true
           }
-          `;
 
-          if (!source.includes(oldFill)) throw new Error("fill block did not match exactly");
-          if (!source.includes(oldEligible)) throw new Error("eligible block did not match exactly");
-          source = source.replace(oldFill, newFill).replace(oldEligible, newEligible);
-          source = source.replace(
-            "FillRule::EvenOdd => winding.unsigned_abs() % 2 == 1,",
-            "FillRule::EvenOdd => (winding & 1) != 0,",
-          );
+          `;
+          source = source.slice(0, eligibleStart) + newEligible + source.slice(eligibleEnd);
           fs.writeFileSync(path, source);
           NODE
 
@@ -318,8 +300,8 @@ jobs:
           grep '"id":"orthogonal_dispatch_grid"' /tmp/after.jsonl | jq -r '.median_ns' | sort -n > /tmp/after-times
           before=$(sed -n '3p' /tmp/before-times)
           after=$(sed -n '3p' /tmp/after-times)
-          before_signature=$(grep '"id":"orthogonal_dispatch_grid"' /tmp/before.jsonl | head -n 1 | jq -r '.signature')
-          after_signature=$(grep '"id":"orthogonal_dispatch_grid"' /tmp/after.jsonl | head -n 1 | jq -r '.signature')
+          before_signature=$(grep '"id":"orthogonal_dispatch_grid"' /tmp/before.jsonl | sed -n '1p' | jq -r '.signature')
+          after_signature=$(grep '"id":"orthogonal_dispatch_grid"' /tmp/after.jsonl | sed -n '1p' | jq -r '.signature')
           test "$before_signature" = "$after_signature"
 
           awk -v before="$before" -v after="$after" 'BEGIN {
