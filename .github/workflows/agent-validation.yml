@@ -39,4 +39,48 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - run: ./scripts/coverage.sh
+      - name: Run coverage and print uncovered records
+        shell: bash
+        run: |
+          set +e
+          ./scripts/coverage.sh
+          status=$?
+          if [[ -f target/coverage/lcov.info ]]; then
+            echo '::group::Uncovered functions'
+            awk '
+              /^SF:/ { file = substr($0, 4) }
+              /^FN:/ {
+                record = substr($0, 4)
+                comma = index(record, ",")
+                line = substr(record, 1, comma - 1)
+                name = substr(record, comma + 1)
+                function_line[name] = line
+                function_file[name] = file
+              }
+              /^FNDA:0,/ {
+                name = substr($0, 8)
+                printf "%s:%s %s\n", function_file[name], function_line[name], name
+              }
+            ' target/coverage/lcov.info
+            echo '::endgroup::'
+            echo '::group::Uncovered lines'
+            awk -F, '
+              /^SF:/ { file = substr($0, 4) }
+              /^DA:/ && ($2 + 0) == 0 { split($1, fields, ":"); print file ":" fields[2] }
+            ' target/coverage/lcov.info
+            echo '::endgroup::'
+            echo '::group::Uncovered branches'
+            awk -F, '
+              /^SF:/ { file = substr($0, 4) }
+              /^BRDA:/ && ($4 == "-" || ($4 + 0) == 0) { split($1, fields, ":"); print file ":" fields[2] " " $0 }
+            ' target/coverage/lcov.info
+            echo '::endgroup::'
+          fi
+          exit "$status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-coverage-lcov
+          path: target/coverage/lcov.info
+          if-no-files-found: warn
+          retention-days: 1
