@@ -1,4 +1,4 @@
-# Branch-local validation pass 2. Remove before opening the PR.
+# Full nightly coverage validation for product commit 2376607. Remove before PR.
 name: Agent validation
 
 on:
