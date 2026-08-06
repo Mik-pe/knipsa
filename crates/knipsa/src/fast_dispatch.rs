@@ -3,47 +3,28 @@
 #[path = "fast.rs"]
 mod base;
 
-use std::cmp::Ordering;
 use std::collections::{HashMap, hash_map::Entry};
-use std::hash::{BuildHasherDefault, Hasher};
 
-use crate::{BooleanRequestD, ClipType, Error, FillRule, PathD, PathsD, PointD};
+use crate::{BooleanRequestD, ClipType, FillRule, PathD, PathsD, PointD};
 
 const KEY_SCALE: f64 = 1_000_000_000.0;
 const MAX_COORDINATE: f64 = 1_000_000.0;
 const MAX_ORTHOGONAL_GRID_POINTS: usize = 1_000_000;
+const MIN_RECTANGLE_COUNT: usize = 8;
 const MIN_FUSED_SPAN_DENOMINATOR: u128 = 8;
-
-#[derive(Default)]
-struct FastHasher(u64);
-
-impl Hasher for FastHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.write_u64(u64::from(*byte));
-        }
-    }
-
-    fn write_i64(&mut self, value: i64) {
-        self.write_u64(u64::from_ne_bytes(value.to_ne_bytes()));
-    }
-
-    fn write_u64(&mut self, value: u64) {
-        self.0 ^= value.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        self.0 = self.0.rotate_left(27).wrapping_mul(0x3c79_ac49_2ba7_b653);
-    }
-}
-
-type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct PointKey {
     x: i64,
     y: i64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RectangleKey {
+    min_x: i64,
+    min_y: i64,
+    max_x: i64,
+    max_y: i64,
 }
 
 #[derive(Clone, Copy)]
@@ -52,19 +33,11 @@ struct GridCoordinate {
     value: f64,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct WindingDifference {
-    subject: i32,
-    clip: i32,
-}
-
 #[derive(Clone, Copy, Debug)]
 struct GridEvent {
     x: usize,
     y0: usize,
     y1: usize,
-    subject_delta: i32,
-    clip_delta: i32,
 }
 
 #[derive(Clone, Copy)]
@@ -73,11 +46,6 @@ struct DirectedEdge {
     end: PointD,
     start_key: PointKey,
     end_key: PointKey,
-}
-
-enum Outgoing {
-    Single(usize),
-    Multiple(Vec<usize>),
 }
 
 #[derive(Clone, Copy)]
@@ -95,14 +63,11 @@ struct HorizontalSpanStats {
 }
 
 impl HorizontalSpanStats {
-    fn record_point(&mut self, point: PointKey) {
-        self.min_x = Some(self.min_x.map_or(point.x, |value| value.min(point.x)));
-        self.max_x = Some(self.max_x.map_or(point.x, |value| value.max(point.x)));
-    }
-
-    fn record_horizontal(&mut self, start: PointKey, end: PointKey) {
-        self.edge_count += 1;
-        self.total_key_span += u128::from(start.x.abs_diff(end.x));
+    fn record_rectangle(&mut self, rectangle: RectangleKey) {
+        self.edge_count += 2;
+        self.total_key_span += u128::from(rectangle.min_x.abs_diff(rectangle.max_x)) * 2;
+        self.min_x = Some(self.min_x.map_or(rectangle.min_x, |value| value.min(rectangle.min_x)));
+        self.max_x = Some(self.max_x.map_or(rectangle.max_x, |value| value.max(rectangle.max_x)));
     }
 
     fn should_fuse(self) -> bool {
@@ -120,76 +85,110 @@ impl HorizontalSpanStats {
 }
 
 pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<PathsD, ()>> {
-    if request.subjects.len() + request.clips.len() >= 8
-        && let Some(result) = try_adaptive_orthogonal(request)
-    {
-        return Some(result.map_err(|_| ()));
+    if let Some(result) = try_long_rectangle_xor(request) {
+        return Some(Ok(result));
     }
     base::try_boolean_opd(request)
 }
 
-fn try_adaptive_orthogonal(request: BooleanRequestD<'_>) -> Option<Result<PathsD, Error>> {
-    if request.subjects.is_empty() && request.clips.is_empty() {
+fn try_long_rectangle_xor(request: BooleanRequestD<'_>) -> Option<PathsD> {
+    if request.clip_type != ClipType::Xor || request.fill_rule != FillRule::EvenOdd {
         return None;
     }
 
+    let mut rectangles = Vec::with_capacity(request.subjects.len() + request.clips.len());
     let mut stats = HorizontalSpanStats::default();
-    let mut point_count = 0_usize;
+    let mut xs = Vec::with_capacity(rectangles.capacity() * 2);
+    let mut ys = Vec::with_capacity(rectangles.capacity() * 2);
     for path in request.subjects.iter().chain(request.clips) {
         if path.is_empty() {
             continue;
         }
-        if path.len() < 3 {
-            return None;
-        }
-        point_count = point_count.checked_add(path.len())?;
-        for (start, end) in path.iter().zip(path.iter().cycle().skip(1)).take(path.len()) {
-            let start_key = key(*start)?;
-            let end_key = key(*end)?;
-            stats.record_point(start_key);
-            if start_key == end_key || (start_key.x == end_key.x) == (start_key.y == end_key.y) {
-                return None;
-            }
-            if start_key.y == end_key.y {
-                stats.record_horizontal(start_key, end_key);
-            }
-        }
+        let rectangle = rectangle_key(path)?;
+        stats.record_rectangle(rectangle);
+        rectangles.push(rectangle);
+        xs.push(coordinate(rectangle.min_x, path, true)?);
+        xs.push(coordinate(rectangle.max_x, path, true)?);
+        ys.push(coordinate(rectangle.min_y, path, false)?);
+        ys.push(coordinate(rectangle.max_y, path, false)?);
     }
-    if !stats.should_fuse() {
+
+    if rectangles.len() < MIN_RECTANGLE_COUNT || !stats.should_fuse() {
         return None;
     }
 
-    let mut xs = Vec::with_capacity(point_count);
-    let mut ys = Vec::with_capacity(point_count);
-    for point in request.subjects.iter().chain(request.clips).flatten() {
-        let point_key = key(*point)?;
-        xs.push(GridCoordinate { key: point_key.x, value: point.x + 0.0 });
-        ys.push(GridCoordinate { key: point_key.y, value: point.y + 0.0 });
-    }
     let xs = dedup_coordinates(xs)?;
     let ys = dedup_coordinates(ys)?;
-    let grid_size = orthogonal_grid_size(xs.len(), ys.len())?;
+    orthogonal_grid_size(xs.len(), ys.len())?;
 
-    let mut events = Vec::with_capacity(point_count / 2);
-    let mut difference = vec![WindingDifference::default(); ys.len()];
-    for path in &request.subjects {
-        add_orthogonal_path(&mut events, &mut difference, &xs, &ys, path, true)?;
-    }
-    for path in &request.clips {
-        add_orthogonal_path(&mut events, &mut difference, &xs, &ys, path, false)?;
+    let mut events = Vec::with_capacity(rectangles.len() * 2);
+    for rectangle in rectangles {
+        let min_x = coordinate_index(&xs, rectangle.min_x)?;
+        let max_x = coordinate_index(&xs, rectangle.max_x)?;
+        let min_y = coordinate_index(&ys, rectangle.min_y)?;
+        let max_y = coordinate_index(&ys, rectangle.max_y)?;
+        events.push(GridEvent { x: min_x, y0: min_y, y1: max_y });
+        events.push(GridEvent { x: max_x, y0: min_y, y1: max_y });
     }
     events.sort_unstable_by_key(|event| event.x);
+    fused_rectangle_xor(&events, &xs, &ys)
+}
 
-    Some(fused_orthogonal_sweep(
-        &events,
-        difference,
-        &xs,
-        &ys,
-        request.fill_rule,
-        request.clip_type,
-        point_count,
-        grid_size,
-    ))
+fn rectangle_key(path: &[PointD]) -> Option<RectangleKey> {
+    let [first, second, third, fourth] = path else { return None };
+    let points = [key(*first)?, key(*second)?, key(*third)?, key(*fourth)?];
+    for (start, end) in points.iter().zip(points.iter().cycle().skip(1)).take(points.len()) {
+        if start == end || (start.x == end.x) == (start.y == end.y) {
+            return None;
+        }
+    }
+
+    let min_x = points.iter().map(|point| point.x).min()?;
+    let max_x = points.iter().map(|point| point.x).max()?;
+    let min_y = points.iter().map(|point| point.y).min()?;
+    let max_y = points.iter().map(|point| point.y).max()?;
+    if min_x == max_x || min_y == max_y {
+        return None;
+    }
+
+    let mut corners = 0_u8;
+    for point in points {
+        let x_bit = if point.x == min_x {
+            0
+        } else if point.x == max_x {
+            1
+        } else {
+            return None;
+        };
+        let y_bit = if point.y == min_y {
+            0
+        } else if point.y == max_y {
+            1
+        } else {
+            return None;
+        };
+        let bit = 1_u8 << (x_bit + 2 * y_bit);
+        if corners & bit != 0 {
+            return None;
+        }
+        corners |= bit;
+    }
+    (corners == 0b1111).then_some(RectangleKey { min_x, min_y, max_x, max_y })
+}
+
+fn coordinate(key: i64, path: &[PointD], x_axis: bool) -> Option<GridCoordinate> {
+    path.iter().find_map(|point| {
+        let point_key = self::key(*point)?;
+        let candidate = if x_axis { point_key.x } else { point_key.y };
+        (candidate == key).then_some(GridCoordinate {
+            key,
+            value: if x_axis { point.x + 0.0 } else { point.y + 0.0 },
+        })
+    })
+}
+
+fn coordinate_index(coordinates: &[GridCoordinate], key: i64) -> Option<usize> {
+    coordinates.binary_search_by_key(&key, |coordinate| coordinate.key).ok()
 }
 
 fn orthogonal_grid_size(width: usize, height: usize) -> Option<usize> {
@@ -213,77 +212,27 @@ fn dedup_coordinates(mut coordinates: Vec<GridCoordinate>) -> Option<Vec<GridCoo
     (result.len() >= 2).then_some(result)
 }
 
-fn add_orthogonal_path(
-    events: &mut Vec<GridEvent>,
-    difference: &mut [WindingDifference],
-    xs: &[GridCoordinate],
-    ys: &[GridCoordinate],
-    path: &[PointD],
-    subject: bool,
-) -> Option<()> {
-    for (start, end) in path.iter().zip(path.iter().cycle().skip(1)).take(path.len()) {
-        let start_key = key(*start)?;
-        let end_key = key(*end)?;
-        if start_key.x != end_key.x {
-            continue;
-        }
-        let x = xs.binary_search_by_key(&start_key.x, |coordinate| coordinate.key).ok()?;
-        let start_y = ys.binary_search_by_key(&start_key.y, |coordinate| coordinate.key).ok()?;
-        let end_y = ys.binary_search_by_key(&end_key.y, |coordinate| coordinate.key).ok()?;
-        let (y0, y1, winding) =
-            if start_y < end_y { (start_y, end_y, 1) } else { (end_y, start_y, -1) };
-        let (subject_delta, clip_delta) = if subject { (winding, 0) } else { (0, winding) };
-        add_winding_range(difference, y0, y1, subject_delta, clip_delta);
-        events.push(GridEvent { x, y0, y1, subject_delta, clip_delta });
-    }
-    Some(())
-}
-
-fn add_winding_range(
-    values: &mut [WindingDifference],
-    y0: usize,
-    y1: usize,
-    subject_delta: i32,
-    clip_delta: i32,
-) {
-    values[y0].subject += subject_delta;
-    values[y0].clip += clip_delta;
-    values[y1].subject -= subject_delta;
-    values[y1].clip -= clip_delta;
-}
-
-#[allow(clippy::too_many_arguments)]
-fn fused_orthogonal_sweep(
+fn fused_rectangle_xor(
     events: &[GridEvent],
-    mut difference: Vec<WindingDifference>,
     xs: &[GridCoordinate],
     ys: &[GridCoordinate],
-    fill_rule: FillRule,
-    clip_type: ClipType,
-    edge_count: usize,
-    grid_size: usize,
-) -> Result<PathsD, Error> {
+) -> Option<PathsD> {
+    let mut difference = vec![false; ys.len()];
     let mut filled = vec![false; ys.len() - 1];
     let mut horizontal_runs = vec![None; ys.len()];
+    let mut boundary = Vec::with_capacity(events.len() * 2);
     let mut event_index = 0;
-    let mut boundary = Vec::with_capacity(edge_count.saturating_mul(2).min(grid_size));
+
     for (x, coordinate) in xs.iter().copied().enumerate().take(xs.len() - 1) {
         while event_index < events.len() && events[event_index].x == x {
             let event = events[event_index];
-            add_winding_range(
-                &mut difference,
-                event.y0,
-                event.y1,
-                -event.subject_delta,
-                -event.clip_delta,
-            );
+            difference[event.y0] ^= true;
+            difference[event.y1] ^= true;
             event_index += 1;
         }
-        sweep_orthogonal_column(
+        sweep_column(
             &difference,
             &mut filled,
-            fill_rule,
-            clip_type,
             coordinate,
             ys,
             &mut horizontal_runs,
@@ -291,154 +240,36 @@ fn fused_orthogonal_sweep(
         );
     }
 
-    let right = *xs.last().expect("orthogonal grid has at least two columns");
-    for (y, is_filled) in filled.iter().copied().enumerate() {
+    let right = *xs.last()?;
+    for (row, is_filled) in filled.iter().copied().enumerate() {
         if is_filled {
-            push_grid_edge(&mut boundary, right, ys[y], right, ys[y + 1]);
+            push_grid_edge(&mut boundary, right, ys[row], right, ys[row + 1]);
         }
     }
     flush_horizontal_runs(&mut boundary, &mut horizontal_runs, right, ys);
-    finish_orthogonal_boundary(&boundary)
+    stitch_unique(&boundary)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn sweep_orthogonal_column(
-    difference: &[WindingDifference],
-    filled: &mut [bool],
-    fill_rule: FillRule,
-    clip_type: ClipType,
-    x: GridCoordinate,
-    ys: &[GridCoordinate],
-    horizontal_runs: &mut [Option<HorizontalRun>],
-    boundary: &mut Vec<DirectedEdge>,
-) {
-    match fill_rule {
-        FillRule::EvenOdd => sweep_orthogonal_column_with(
-            difference,
-            filled,
-            clip_type,
-            x,
-            ys,
-            horizontal_runs,
-            boundary,
-            |winding| (winding & 1) != 0,
-        ),
-        FillRule::NonZero => sweep_orthogonal_column_with(
-            difference,
-            filled,
-            clip_type,
-            x,
-            ys,
-            horizontal_runs,
-            boundary,
-            |winding| winding != 0,
-        ),
-        FillRule::Positive => sweep_orthogonal_column_with(
-            difference,
-            filled,
-            clip_type,
-            x,
-            ys,
-            horizontal_runs,
-            boundary,
-            |winding| winding > 0,
-        ),
-        FillRule::Negative => sweep_orthogonal_column_with(
-            difference,
-            filled,
-            clip_type,
-            x,
-            ys,
-            horizontal_runs,
-            boundary,
-            |winding| winding < 0,
-        ),
-    }
-}
-
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn sweep_orthogonal_column_with(
-    difference: &[WindingDifference],
-    filled: &mut [bool],
-    clip_type: ClipType,
-    x: GridCoordinate,
-    ys: &[GridCoordinate],
-    horizontal_runs: &mut [Option<HorizontalRun>],
-    boundary: &mut Vec<DirectedEdge>,
-    contains: impl Fn(i32) -> bool,
-) {
-    match clip_type {
-        ClipType::Intersection => sweep_orthogonal_cells(
-            difference,
-            filled,
-            x,
-            ys,
-            horizontal_runs,
-            boundary,
-            &contains,
-            |subject, clip| subject && clip,
-        ),
-        ClipType::Union => sweep_orthogonal_cells(
-            difference,
-            filled,
-            x,
-            ys,
-            horizontal_runs,
-            boundary,
-            &contains,
-            |subject, clip| subject || clip,
-        ),
-        ClipType::Difference => sweep_orthogonal_cells(
-            difference,
-            filled,
-            x,
-            ys,
-            horizontal_runs,
-            boundary,
-            &contains,
-            |subject, clip| subject && !clip,
-        ),
-        ClipType::Xor => sweep_orthogonal_cells(
-            difference,
-            filled,
-            x,
-            ys,
-            horizontal_runs,
-            boundary,
-            &contains,
-            |subject, clip| subject != clip,
-        ),
-    }
-}
-
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn sweep_orthogonal_cells(
-    difference: &[WindingDifference],
+fn sweep_column(
+    difference: &[bool],
     filled: &mut [bool],
     x: GridCoordinate,
     ys: &[GridCoordinate],
     horizontal_runs: &mut [Option<HorizontalRun>],
     boundary: &mut Vec<DirectedEdge>,
-    contains: &impl Fn(i32) -> bool,
-    operation: impl Fn(bool, bool) -> bool,
 ) {
-    let mut subject_winding = 0;
-    let mut clip_winding = 0;
+    let mut current = false;
     let mut below = false;
-    for (y, (delta, cell)) in difference.iter().zip(filled.iter_mut()).enumerate() {
-        subject_winding += delta.subject;
-        clip_winding += delta.clip;
-        let current = operation(contains(subject_winding), contains(clip_winding));
-        if *cell != current {
+    for (row, (toggle, previous)) in difference.iter().zip(filled.iter_mut()).enumerate() {
+        current ^= *toggle;
+        if *previous != current {
             if current {
-                push_grid_edge(boundary, x, ys[y + 1], x, ys[y]);
+                push_grid_edge(boundary, x, ys[row + 1], x, ys[row]);
             } else {
-                push_grid_edge(boundary, x, ys[y], x, ys[y + 1]);
+                push_grid_edge(boundary, x, ys[row], x, ys[row + 1]);
             }
         }
-        let direction = if y == 0 {
+        let direction = if row == 0 {
             i8::from(current)
         } else if below == current {
             0
@@ -447,8 +278,8 @@ fn sweep_orthogonal_cells(
         } else {
             -1
         };
-        update_horizontal_run(boundary, &mut horizontal_runs[y], direction, x, ys[y]);
-        *cell = current;
+        update_horizontal_run(boundary, &mut horizontal_runs[row], direction, x, ys[row]);
+        *previous = current;
         below = current;
     }
     let top = filled.len();
@@ -461,7 +292,6 @@ fn sweep_orthogonal_cells(
     );
 }
 
-#[inline]
 fn update_horizontal_run(
     boundary: &mut Vec<DirectedEdge>,
     run: &mut Option<HorizontalRun>,
@@ -497,7 +327,6 @@ fn flush_horizontal_runs(
     }
 }
 
-#[inline]
 fn push_grid_edge(
     boundary: &mut Vec<DirectedEdge>,
     start_x: GridCoordinate,
@@ -513,78 +342,46 @@ fn push_grid_edge(
     });
 }
 
-fn finish_orthogonal_boundary(boundary: &[DirectedEdge]) -> Result<PathsD, Error> {
-    stitch(boundary)?
-        .into_iter()
-        .map(|path| crate::trim_collinear_d(&path, crate::PathKind::Closed))
-        .collect()
-}
-
-fn stitch(edges: &[DirectedEdge]) -> Result<PathsD, Error> {
+fn stitch_unique(edges: &[DirectedEdge]) -> Option<PathsD> {
     if edges.is_empty() {
-        return Ok(Vec::new());
+        return Some(Vec::new());
     }
-    let mut outgoing: FastMap<PointKey, Outgoing> =
-        FastMap::with_capacity_and_hasher(edges.len(), BuildHasherDefault::default());
-    for (index, edge) in edges.iter().enumerate() {
-        match outgoing.entry(edge.start_key) {
-            Entry::Vacant(entry) => {
-                entry.insert(Outgoing::Single(index));
-            }
-            Entry::Occupied(mut entry) => match entry.get_mut() {
-                Outgoing::Single(previous) => {
-                    *entry.get_mut() = Outgoing::Multiple(vec![*previous, index]);
-                }
-                Outgoing::Multiple(indices) => indices.push(index),
-            },
-        }
-    }
-    let mut next = vec![0; edges.len()];
-    for candidates in outgoing.values_mut() {
-        if let Outgoing::Multiple(indices) = candidates {
-            let origin = edges[indices[0]].start;
-            indices.sort_by(|left, right| {
-                compare_angle(subtract(edges[*left].end, origin), subtract(edges[*right].end, origin))
-            });
-        }
-    }
-    for (index, edge) in edges.iter().enumerate() {
-        let Some(candidates) = outgoing.get(&edge.end_key) else {
-            return Err(Error::TopologyFailure);
-        };
-        match candidates {
-            Outgoing::Single(next_index) => next[index] = *next_index,
-            Outgoing::Multiple(candidates) => {
-                let reverse = subtract(edge.start, edge.end);
-                let insertion = candidates
-                    .iter()
-                    .position(|candidate| {
-                        compare_angle(
-                            subtract(edges[*candidate].end, edges[*candidate].start),
-                            reverse,
-                        ) != Ordering::Less
-                    })
-                    .unwrap_or(candidates.len());
-                next[index] = candidates[(insertion + candidates.len() - 1) % candidates.len()];
-            }
-        }
-    }
-    stitch_next(edges, &next)
-}
 
-fn stitch_next(edges: &[DirectedEdge], next: &[usize]) -> Result<PathsD, Error> {
+    let mut outgoing = HashMap::with_capacity(edges.len());
+    let mut incoming = HashMap::with_capacity(edges.len());
+    for (index, edge) in edges.iter().enumerate() {
+        if let Entry::Occupied(_) = outgoing.entry(edge.start_key) {
+            return None;
+        }
+        outgoing.insert(edge.start_key, index);
+        if let Entry::Occupied(_) = incoming.entry(edge.end_key) {
+            return None;
+        }
+        incoming.insert(edge.end_key, index);
+    }
+    if outgoing.len() != incoming.len()
+        || outgoing.keys().any(|point| !incoming.contains_key(point))
+    {
+        return None;
+    }
+
+    let mut next = Vec::with_capacity(edges.len());
+    for edge in edges {
+        next.push(*outgoing.get(&edge.end_key)?);
+    }
+
     let mut visited = vec![false; edges.len()];
     let mut paths = Vec::new();
     for start in 0..edges.len() {
         if visited[start] {
             continue;
         }
-        let mut path = Vec::with_capacity(edges.len());
+        let mut path = Vec::new();
         let mut current = start;
         loop {
             if visited[current] {
                 if current != start {
-                    return Err(Error::TopologyFailure);
+                    return None;
                 }
                 break;
             }
@@ -592,31 +389,17 @@ fn stitch_next(edges: &[DirectedEdge], next: &[usize]) -> Result<PathsD, Error> 
             path.push(edges[current].start);
             current = next[current];
         }
-        if path.len() >= 3 && area2(&path).abs() > f64::EPSILON {
+        if path.len() >= 3 && signed_area2(&path).abs() > f64::EPSILON {
+            path = crate::trim_collinear_d(&path, crate::PathKind::Closed).ok()?;
             canonicalize(&mut path);
             paths.push(path);
         }
     }
     paths.sort_by(compare_paths);
-    Ok(paths)
+    Some(paths)
 }
 
-fn compare_angle(first: PointD, second: PointD) -> Ordering {
-    let first_upper = first.y > 0.0 || (first.y.abs() <= f64::EPSILON && first.x >= 0.0);
-    let second_upper = second.y > 0.0 || (second.y.abs() <= f64::EPSILON && second.x >= 0.0);
-    if first_upper != second_upper {
-        return second_upper.cmp(&first_upper);
-    }
-    let cross = cross(first, second);
-    if cross.abs() > f64::EPSILON {
-        return if cross > 0.0 { Ordering::Less } else { Ordering::Greater };
-    }
-    let first_length = first.x.mul_add(first.x, first.y * first.y);
-    let second_length = second.x.mul_add(second.x, second.y * second.y);
-    first_length.total_cmp(&second_length)
-}
-
-fn area2(path: &[PointD]) -> f64 {
+fn signed_area2(path: &[PointD]) -> f64 {
     path.iter()
         .zip(path.iter().cycle().skip(1))
         .take(path.len())
@@ -634,20 +417,12 @@ fn canonicalize(path: &mut [PointD]) {
     }
 }
 
-fn compare_paths(left: &PathD, right: &PathD) -> Ordering {
+fn compare_paths(left: &PathD, right: &PathD) -> std::cmp::Ordering {
     left.iter()
         .zip(right)
         .map(|(left, right)| left.x.total_cmp(&right.x).then(left.y.total_cmp(&right.y)))
-        .find(|ordering| *ordering != Ordering::Equal)
+        .find(|ordering| *ordering != std::cmp::Ordering::Equal)
         .unwrap_or_else(|| left.len().cmp(&right.len()))
-}
-
-fn subtract(left: PointD, right: PointD) -> PointD {
-    PointD::new(left.x - right.x, left.y - right.y)
-}
-
-fn cross(left: PointD, right: PointD) -> f64 {
-    left.x * right.y - left.y * right.x
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
@@ -659,9 +434,10 @@ fn key(point: PointD) -> Option<PointKey> {
     {
         return None;
     }
-    let x = (point.x * KEY_SCALE).round();
-    let y = (point.y * KEY_SCALE).round();
-    Some(PointKey { x: x as i64, y: y as i64 })
+    Some(PointKey {
+        x: (point.x * KEY_SCALE).round() as i64,
+        y: (point.y * KEY_SCALE).round() as i64,
+    })
 }
 
 #[cfg(test)]
@@ -677,82 +453,205 @@ mod tests {
         ]
     }
 
+    fn coordinate(key: i64) -> GridCoordinate {
+        GridCoordinate { key, value: key as f64 }
+    }
+
+    fn directed(start: PointD, end: PointD) -> DirectedEdge {
+        DirectedEdge {
+            start,
+            end,
+            start_key: key(start).expect("test point is keyable"),
+            end_key: key(end).expect("test point is keyable"),
+        }
+    }
+
     fn summary(paths: &PathsD) -> Vec<(usize, u64)> {
         let mut result = paths
             .iter()
-            .map(|path| (path.len(), (area2(path).abs() * 1_000_000.0).round().to_bits()))
+            .map(|path| (path.len(), (signed_area2(path).abs() * 1_000_000.0).round().to_bits()))
             .collect::<Vec<_>>();
         result.sort_unstable();
         result
     }
 
     #[test]
-    fn span_gate_selects_long_edges_only() {
-        let mut short = HorizontalSpanStats::default();
-        short.record_point(PointKey { x: 0, y: 0 });
-        short.record_point(PointKey { x: 100, y: 0 });
-        short.record_horizontal(PointKey { x: 0, y: 0 }, PointKey { x: 10, y: 0 });
-        assert!(!short.should_fuse());
-
-        let mut long = HorizontalSpanStats::default();
-        long.record_point(PointKey { x: 0, y: 0 });
-        long.record_point(PointKey { x: 100, y: 0 });
-        long.record_horizontal(PointKey { x: 0, y: 0 }, PointKey { x: 80, y: 0 });
-        assert!(long.should_fuse());
-        assert!(!HorizontalSpanStats::default().should_fuse());
-    }
-
-    #[test]
-    fn adaptive_kernel_matches_exact_for_all_operations_and_fill_rules() {
-        let subjects = (0..12)
+    fn long_rectangle_xor_matches_exact_oracle() {
+        let subjects = (0..16)
             .map(|inset| {
                 let inset = f64::from(inset);
-                rectangle(inset, inset, 80.0 - inset, 80.0 - inset)
+                rectangle(inset, inset, 120.0 - inset, 120.0 - inset)
             })
             .collect::<Vec<_>>();
-        let clips = (0..12)
+        let mut clips = (0..16)
             .map(|inset| {
                 let inset = f64::from(inset) + 0.5;
-                rectangle(inset, inset, 80.5 - inset, 80.5 - inset)
+                rectangle(inset, inset, 120.5 - inset, 120.5 - inset)
             })
             .collect::<Vec<_>>();
-
-        for clip_type in
-            [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor]
-        {
-            for fill_rule in
-                [FillRule::EvenOdd, FillRule::NonZero, FillRule::Positive, FillRule::Negative]
-            {
-                let request = BooleanRequestD {
-                    subjects: &subjects,
-                    clips: &clips,
-                    clip_type,
-                    fill_rule,
-                };
-                let adaptive = try_adaptive_orthogonal(request)
-                    .expect("long orthogonal spans should select the adaptive kernel")
-                    .expect("adaptive boundary should close");
-                let exact = crate::boolean::boolean_opd_exact(request).expect("exact oracle");
-                assert_eq!(summary(&adaptive), summary(&exact), "{clip_type:?} {fill_rule:?}");
-            }
-        }
+        clips.iter_mut().step_by(2).for_each(|path| path.reverse());
+        let request = BooleanRequestD {
+            subjects: &subjects,
+            clips: &clips,
+            clip_type: ClipType::Xor,
+            fill_rule: FillRule::EvenOdd,
+        };
+        let specialized = try_long_rectangle_xor(request).expect("long rectangles select fusion");
+        let exact = crate::boolean::boolean_opd_exact(request).expect("exact oracle closes");
+        assert_eq!(summary(&specialized), summary(&exact));
+        assert_eq!(summary(&try_boolean_opd(request).unwrap().unwrap()), summary(&exact));
     }
 
     #[test]
-    fn short_spans_fall_through_to_the_existing_kernel() {
-        let subjects = (0..8)
+    #[allow(clippy::too_many_lines)]
+    fn rejects_non_specialized_inputs_and_invalid_rectangles() {
+        let rectangles = (0..8)
             .map(|index| {
                 let x = f64::from(index) * 20.0;
                 rectangle(x, 0.0, x + 2.0, 2.0)
             })
             .collect::<Vec<_>>();
         let request = BooleanRequestD {
-            subjects: &subjects,
+            subjects: &rectangles,
             clips: &[],
-            clip_type: ClipType::Union,
+            clip_type: ClipType::Xor,
             fill_rule: FillRule::EvenOdd,
         };
-        assert!(try_adaptive_orthogonal(request).is_none());
-        assert!(try_boolean_opd(request).expect("existing fast path handles the request").is_ok());
+        assert!(try_long_rectangle_xor(request).is_none());
+        assert!(try_boolean_opd(request).unwrap().is_ok());
+        assert!(try_long_rectangle_xor(BooleanRequestD {
+            clip_type: ClipType::Union,
+            ..request
+        })
+        .is_none());
+        assert!(try_long_rectangle_xor(BooleanRequestD {
+            fill_rule: FillRule::NonZero,
+            ..request
+        })
+        .is_none());
+        assert!(try_long_rectangle_xor(BooleanRequestD {
+            subjects: &rectangles[..7],
+            ..request
+        })
+        .is_none());
+
+        for invalid in [
+            Vec::new(),
+            vec![PointD::new(0.0, 0.0); 3],
+            vec![
+                PointD::new(0.0, 0.0),
+                PointD::new(2.0, 1.0),
+                PointD::new(2.0, 2.0),
+                PointD::new(0.0, 2.0),
+            ],
+            vec![
+                PointD::new(0.0, 0.0),
+                PointD::new(2.0, 0.0),
+                PointD::new(2.0, 0.0),
+                PointD::new(0.0, 2.0),
+            ],
+            vec![
+                PointD::new(f64::NAN, 0.0),
+                PointD::new(2.0, 0.0),
+                PointD::new(2.0, 2.0),
+                PointD::new(0.0, 2.0),
+            ],
+            vec![
+                PointD::new(MAX_COORDINATE + 1.0, 0.0),
+                PointD::new(MAX_COORDINATE + 2.0, 0.0),
+                PointD::new(MAX_COORDINATE + 2.0, 2.0),
+                PointD::new(MAX_COORDINATE + 1.0, 2.0),
+            ],
+        ] {
+            if invalid.is_empty() {
+                assert!(rectangle_key(&invalid).is_none());
+            } else {
+                assert!(rectangle_key(&invalid).is_none());
+            }
+        }
+        assert!(rectangle_key(&rectangle(0.0, 0.0, 2.0, 2.0)).is_some());
+    }
+
+    #[test]
+    fn covers_coordinate_grid_and_span_guards() {
+        assert!(coordinate(0, &[], true).is_none());
+        let path = rectangle(0.0, 0.0, 2.0, 2.0);
+        assert_eq!(coordinate(0, &path, true).unwrap().value, 0.0);
+        assert_eq!(coordinate(2_000_000_000, &path, false).unwrap().value, 2.0);
+        assert_eq!(coordinate_index(&[coordinate(0), coordinate(2)], 2), Some(1));
+        assert!(coordinate_index(&[coordinate(0), coordinate(2)], 1).is_none());
+        assert_eq!(orthogonal_grid_size(10, 20), Some(200));
+        assert!(orthogonal_grid_size(usize::MAX, 2).is_none());
+        assert!(orthogonal_grid_size(1_001, 1_000).is_none());
+
+        let same = vec![coordinate(0), coordinate(0), coordinate(2)];
+        assert_eq!(dedup_coordinates(same).unwrap().len(), 2);
+        assert!(dedup_coordinates(vec![
+            GridCoordinate { key: 0, value: 0.0 },
+            GridCoordinate { key: 0, value: 0.25 },
+        ])
+        .is_none());
+        assert!(dedup_coordinates(vec![coordinate(0)]).is_none());
+
+        let mut empty = HorizontalSpanStats::default();
+        assert!(!empty.should_fuse());
+        empty.record_rectangle(RectangleKey { min_x: 0, min_y: 0, max_x: 0, max_y: 1 });
+        assert!(!empty.should_fuse());
+        let mut short = HorizontalSpanStats::default();
+        short.record_rectangle(RectangleKey { min_x: 0, min_y: 0, max_x: 10, max_y: 1 });
+        short.record_rectangle(RectangleKey { min_x: 90, min_y: 0, max_x: 100, max_y: 1 });
+        assert!(!short.should_fuse());
+        let mut long = HorizontalSpanStats::default();
+        long.record_rectangle(RectangleKey { min_x: 0, min_y: 0, max_x: 90, max_y: 1 });
+        long.record_rectangle(RectangleKey { min_x: 10, min_y: 0, max_x: 100, max_y: 1 });
+        assert!(long.should_fuse());
+    }
+
+    #[test]
+    fn coalesces_runs_and_rejects_ambiguous_stitching() {
+        let y = coordinate(7);
+        let mut run = None;
+        let mut boundary = Vec::new();
+        update_horizontal_run(&mut boundary, &mut run, 1, coordinate(0), y);
+        update_horizontal_run(&mut boundary, &mut run, 1, coordinate(1), y);
+        update_horizontal_run(&mut boundary, &mut run, -1, coordinate(2), y);
+        update_horizontal_run(&mut boundary, &mut run, 0, coordinate(3), y);
+        update_horizontal_run(&mut boundary, &mut run, 0, coordinate(4), y);
+        assert_eq!(boundary.len(), 2);
+        assert!(run.is_none());
+
+        assert_eq!(stitch_unique(&[]), Some(Vec::new()));
+        let square = [
+            directed(PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)),
+            directed(PointD::new(1.0, 0.0), PointD::new(1.0, 1.0)),
+            directed(PointD::new(1.0, 1.0), PointD::new(0.0, 1.0)),
+            directed(PointD::new(0.0, 1.0), PointD::new(0.0, 0.0)),
+        ];
+        assert_eq!(stitch_unique(&square).unwrap().len(), 1);
+        assert!(stitch_unique(&[square[0]]).is_none());
+        assert!(stitch_unique(&[square[0], square[0]]).is_none());
+        let duplicate_incoming = [square[0], directed(PointD::new(2.0, 0.0), PointD::new(1.0, 0.0))];
+        assert!(stitch_unique(&duplicate_incoming).is_none());
+    }
+
+    #[test]
+    fn sweeps_empty_and_filled_columns() {
+        let xs = [coordinate(0), coordinate(1), coordinate(2)];
+        let ys = [coordinate(0), coordinate(1), coordinate(2)];
+        let events = [
+            GridEvent { x: 0, y0: 0, y1: 2 },
+            GridEvent { x: 2, y0: 0, y1: 2 },
+        ];
+        assert_eq!(fused_rectangle_xor(&events, &xs, &ys).unwrap().len(), 1);
+        assert_eq!(fused_rectangle_xor(&[], &xs, &ys), Some(Vec::new()));
+    }
+
+    #[test]
+    fn key_rejects_invalid_coordinates() {
+        assert!(key(PointD::new(f64::NAN, 0.0)).is_none());
+        assert!(key(PointD::new(0.0, f64::INFINITY)).is_none());
+        assert!(key(PointD::new(MAX_COORDINATE + 1.0, 0.0)).is_none());
+        assert!(key(PointD::new(0.0, MAX_COORDINATE + 1.0)).is_none());
+        assert_eq!(key(PointD::new(1.0, 2.0)), Some(PointKey { x: 1_000_000_000, y: 2_000_000_000 }));
     }
 }
