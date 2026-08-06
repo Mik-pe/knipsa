@@ -14,7 +14,11 @@ use crate::{
 const EPSILON: f64 = 1e-12;
 const ARC_TOLERANCE_RATIO: f64 = 0.002;
 const MAX_ARC_STEPS: usize = 4096;
-const SIMPLE_OUTLINE_FAST_PATH_LIMIT: usize = 256;
+const SMALL_CONTOUR_CERTIFICATION_LIMIT: usize = 256;
+const MAX_CERTIFIED_CONTOURS: usize = 1024;
+const MAX_CERTIFIED_CONTOUR_SEGMENTS: usize = 65_536;
+const MAX_CERTIFIED_SEGMENT_CANDIDATES: usize = 1_048_576;
+const ORIENTATION_ERROR_BOUND: f64 = (3.0 + 16.0 * f64::EPSILON) * f64::EPSILON;
 
 /// The treatment of corners when a path is offset.
 ///
@@ -202,8 +206,12 @@ pub fn offset_paths_d(
     if generated.is_empty() {
         return Ok(Vec::new());
     }
-    if can_skip_cleanup(&generated) {
-        return Ok(generated);
+    if let Some(selection) = certify_non_zero_contours(&generated) {
+        return Ok(generated
+            .into_iter()
+            .zip(selection)
+            .filter_map(|(path, keep)| keep.then_some(path))
+            .collect());
     }
 
     // Concave offsets can contain overlapping lobes and negative slivers. The
@@ -221,13 +229,6 @@ pub fn offset_paths_d(
         .map(|path| clean_ring(path, options.preserve_collinear))
         .filter(|path| path.len() >= 3)
         .collect())
-}
-
-fn can_skip_cleanup(generated: &[PathD]) -> bool {
-    generated.len() == 1
-        && generated[0].len() <= SIMPLE_OUTLINE_FAST_PATH_LIMIT
-        && signed_area2(&generated[0]).abs() > EPSILON
-        && !ring_self_intersects(&generated[0])
 }
 
 /// Offsets floating-point paths; an ergonomic alias for [`offset_paths_d`].
@@ -821,6 +822,334 @@ fn add_generated_outline(generated: &mut Vec<PathD>, outline: PathD, preserve_co
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct BoundsD {
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+}
+
+impl BoundsD {
+    fn from_path(path: &[PointD]) -> Option<Self> {
+        let first = *path.first()?;
+        Some(path.iter().copied().skip(1).fold(
+            Self { min_x: first.x, min_y: first.y, max_x: first.x, max_y: first.y },
+            |bounds, point| Self {
+                min_x: bounds.min_x.min(point.x),
+                min_y: bounds.min_y.min(point.y),
+                max_x: bounds.max_x.max(point.x),
+                max_y: bounds.max_y.max(point.y),
+            },
+        ))
+    }
+
+    const fn from_segment(start: PointD, end: PointD) -> Self {
+        Self {
+            min_x: if start.x <= end.x { start.x } else { end.x },
+            min_y: if start.y <= end.y { start.y } else { end.y },
+            max_x: if start.x >= end.x { start.x } else { end.x },
+            max_y: if start.y >= end.y { start.y } else { end.y },
+        }
+    }
+
+    fn contains(self, other: Self) -> bool {
+        self.min_x <= other.min_x
+            && self.min_y <= other.min_y
+            && self.max_x >= other.max_x
+            && self.max_y >= other.max_y
+    }
+
+    fn overlaps(self, other: Self) -> bool {
+        self.max_x >= other.min_x
+            && other.max_x >= self.min_x
+            && self.max_y >= other.min_y
+            && other.max_y >= self.min_y
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SweepSegment {
+    ring: usize,
+    edge: usize,
+    ring_len: usize,
+    start: PointD,
+    end: PointD,
+    bounds: BoundsD,
+}
+
+/// Certifies when the non-zero union of generated contours can be recovered
+/// without running the full arrangement kernel. Individually simple contours
+/// with no boundary contact form a laminar containment forest. Accumulating
+/// their winding signs through that forest identifies exactly which rings
+/// separate zero winding from non-zero winding; redundant nested boundaries
+/// disappear without constructing intersections or sampling with an epsilon.
+fn certify_non_zero_contours(paths: &[PathD]) -> Option<Vec<bool>> {
+    if paths.is_empty() {
+        return Some(Vec::new());
+    }
+    if paths.len() > MAX_CERTIFIED_CONTOURS {
+        return None;
+    }
+    let containment_cells = paths.len() * paths.len();
+
+    let mut bounds = Vec::with_capacity(paths.len());
+    let mut winding_signs = Vec::with_capacity(paths.len());
+    let mut segment_count = 0_usize;
+    for path in paths {
+        if path.len() < 3 {
+            return None;
+        }
+        if path.len() > MAX_CERTIFIED_CONTOUR_SEGMENTS - segment_count {
+            return None;
+        }
+        segment_count += path.len();
+        bounds.push(BoundsD::from_path(path)?);
+        winding_signs.push(certified_area_sign(path)?);
+    }
+
+    if paths.len() == 1 && paths[0].len() <= SMALL_CONTOUR_CERTIFICATION_LIMIT {
+        return if ring_self_intersects(&paths[0]) { None } else { Some(vec![true]) };
+    }
+    certify_boundaries_do_not_touch(paths, segment_count)?;
+
+    let mut contains = vec![false; containment_cells];
+    for outer in 0..paths.len() {
+        for inner in 0..paths.len() {
+            if outer == inner || !bounds[outer].contains(bounds[inner]) {
+                continue;
+            }
+            contains[outer * paths.len() + inner] =
+                certified_point_in_ring(paths[inner][0], &paths[outer])?;
+        }
+    }
+
+    let parents = contour_parents(&contains, paths.len())?;
+    let depths = contour_depths(&parents)?;
+    let mut order = (0..paths.len()).collect::<Vec<_>>();
+    order.sort_unstable_by_key(|index| depths[*index]);
+
+    let mut inside_winding = vec![0_i32; paths.len()];
+    let mut keep = vec![false; paths.len()];
+    for index in order {
+        let outside = parents[index].map_or(0, |parent| inside_winding[parent]);
+        let inside = outside + winding_signs[index];
+        inside_winding[index] = inside;
+        keep[index] = (outside == 0) != (inside == 0);
+    }
+    Some(keep)
+}
+
+fn contour_parents(contains: &[bool], count: usize) -> Option<Vec<Option<usize>>> {
+    let mut parents = vec![None; count];
+    for inner in 0..count {
+        for candidate in 0..count {
+            if !contains[candidate * count + inner] {
+                continue;
+            }
+            let has_intermediate = (0..count).any(|middle| {
+                middle != inner
+                    && middle != candidate
+                    && contains[candidate * count + middle]
+                    && contains[middle * count + inner]
+            });
+            if !has_intermediate && parents[inner].replace(candidate).is_some() {
+                return None;
+            }
+        }
+    }
+    Some(parents)
+}
+
+fn contour_depths(parents: &[Option<usize>]) -> Option<Vec<usize>> {
+    let mut depths = vec![0_usize; parents.len()];
+    for (index, depth) in depths.iter_mut().enumerate() {
+        let mut current = index;
+        while let Some(parent) = parents[current] {
+            *depth += 1;
+            if *depth > parents.len() {
+                return None;
+            }
+            current = parent;
+        }
+    }
+    Some(depths)
+}
+
+fn certify_boundaries_do_not_touch(paths: &[PathD], segment_count: usize) -> Option<()> {
+    certify_boundaries_do_not_touch_with_limit(
+        paths,
+        segment_count,
+        MAX_CERTIFIED_SEGMENT_CANDIDATES,
+    )
+}
+
+fn certify_boundaries_do_not_touch_with_limit(
+    paths: &[PathD],
+    segment_count: usize,
+    candidate_limit: usize,
+) -> Option<()> {
+    let mut segments = Vec::with_capacity(segment_count);
+    for (ring, path) in paths.iter().enumerate() {
+        for edge in 0..path.len() {
+            let start = path[edge];
+            let end = path[(edge + 1) % path.len()];
+            if start == end {
+                return None;
+            }
+            segments.push(SweepSegment {
+                ring,
+                edge,
+                ring_len: path.len(),
+                start,
+                end,
+                bounds: BoundsD::from_segment(start, end),
+            });
+        }
+    }
+    segments.sort_unstable_by(|first, second| {
+        first
+            .bounds
+            .min_x
+            .total_cmp(&second.bounds.min_x)
+            .then_with(|| first.bounds.min_y.total_cmp(&second.bounds.min_y))
+            .then_with(|| first.bounds.max_x.total_cmp(&second.bounds.max_x))
+            .then_with(|| first.bounds.max_y.total_cmp(&second.bounds.max_y))
+            .then_with(|| first.ring.cmp(&second.ring))
+            .then_with(|| first.edge.cmp(&second.edge))
+    });
+
+    let mut active: Vec<usize> = Vec::new();
+    let mut candidates = 0_usize;
+    for current_index in 0..segments.len() {
+        let current = segments[current_index];
+        active.retain(|index| segments[*index].bounds.max_x >= current.bounds.min_x);
+        for other_index in active.iter().copied() {
+            let other = segments[other_index];
+            if !current.bounds.overlaps(other.bounds) || sweep_segments_are_adjacent(current, other)
+            {
+                continue;
+            }
+            candidates += 1;
+            if candidates > candidate_limit
+                || !segments_are_certifiably_disjoint(
+                    current.start,
+                    current.end,
+                    other.start,
+                    other.end,
+                )
+            {
+                return None;
+            }
+        }
+        active.push(current_index);
+    }
+    Some(())
+}
+
+fn sweep_segments_are_adjacent(first: SweepSegment, second: SweepSegment) -> bool {
+    first.ring == second.ring
+        && ((first.edge + 1) % first.ring_len == second.edge
+            || (second.edge + 1) % second.ring_len == first.edge)
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn certified_area_sign(path: &[PointD]) -> Option<i32> {
+    let origin = path[0];
+    let mut sum = 0.0;
+    let mut compensation = 0.0;
+    let mut magnitude = 0.0;
+    for index in 1..path.len() - 1 {
+        let first = Vector::from(path[index]).sub(Vector::from(origin));
+        let second = Vector::from(path[index + 1]).sub(Vector::from(origin));
+        let left = first.x * second.y;
+        let right = first.y * second.x;
+        let term = left - right;
+        if !left.is_finite() || !right.is_finite() || !term.is_finite() {
+            return None;
+        }
+        magnitude += left.abs() + right.abs();
+        let next = sum + term;
+        compensation +=
+            if sum.abs() >= term.abs() { (sum - next) + term } else { (term - next) + sum };
+        sum = next;
+    }
+    let area = sum + compensation;
+    let summation_error = (path.len() as f64 + 2.0) * f64::EPSILON * magnitude;
+    let error = ORIENTATION_ERROR_BOUND * magnitude + summation_error;
+    if !area.is_finite() || !magnitude.is_finite() || area.abs() <= error {
+        None
+    } else {
+        Some(if area.is_sign_positive() { 1 } else { -1 })
+    }
+}
+
+fn certified_point_in_ring(point: PointD, path: &[PointD]) -> Option<bool> {
+    let mut winding = 0_i32;
+    for (start, end) in
+        path.iter().copied().zip(path.iter().copied().cycle().skip(1)).take(path.len())
+    {
+        if start.y <= point.y {
+            if end.y > point.y && certified_orientation(start, end, point)? > 0 {
+                winding += 1;
+            }
+        } else if end.y <= point.y && certified_orientation(start, end, point)? < 0 {
+            winding -= 1;
+        }
+    }
+    Some(winding != 0)
+}
+
+fn certified_orientation(first: PointD, second: PointD, third: PointD) -> Option<i8> {
+    let first_x = first.x - third.x;
+    let first_y = first.y - third.y;
+    let second_x = second.x - third.x;
+    let second_y = second.y - third.y;
+    let left = first_x * second_y;
+    let right = first_y * second_x;
+    let determinant = left - right;
+    let magnitude = left.abs() + right.abs();
+    if !determinant.is_finite() || !magnitude.is_finite() {
+        return None;
+    }
+    let error = ORIENTATION_ERROR_BOUND * magnitude;
+    if determinant > error {
+        Some(1)
+    } else if determinant < -error {
+        Some(-1)
+    } else {
+        None
+    }
+}
+
+fn segments_are_certifiably_disjoint(
+    first: PointD,
+    first_end: PointD,
+    second: PointD,
+    second_end: PointD,
+) -> bool {
+    if !BoundsD::from_segment(first, first_end).overlaps(BoundsD::from_segment(second, second_end))
+    {
+        return true;
+    }
+    let Some(ab_c) = certified_orientation(first, first_end, second) else {
+        return false;
+    };
+    let Some(ab_d) = certified_orientation(first, first_end, second_end) else {
+        return false;
+    };
+    if ab_c == ab_d {
+        return true;
+    }
+    let Some(cd_a) = certified_orientation(second, second_end, first) else {
+        return false;
+    };
+    let Some(cd_b) = certified_orientation(second, second_end, first_end) else {
+        return false;
+    };
+    cd_a == cd_b
+}
+
 fn signed_area2(path: &[PointD]) -> f64 {
     path.iter()
         .zip(path.iter().cycle().skip(1))
@@ -851,41 +1180,10 @@ fn segments_intersect(
     second: PointD,
     second_end: PointD,
 ) -> bool {
-    let first_box = (
-        first.x.min(first_end.x),
-        first.y.min(first_end.y),
-        first.x.max(first_end.x),
-        first.y.max(first_end.y),
-    );
-    let second_box = (
-        second.x.min(second_end.x),
-        second.y.min(second_end.y),
-        second.x.max(second_end.x),
-        second.y.max(second_end.y),
-    );
-    if first_box.2 + EPSILON < second_box.0
-        || second_box.2 + EPSILON < first_box.0
-        || first_box.3 + EPSILON < second_box.1
-        || second_box.3 + EPSILON < first_box.1
-    {
-        return false;
-    }
-    let first_direction = Vector::from(first_end).sub(Vector::from(first));
-    let second_direction = Vector::from(second_end).sub(Vector::from(second));
-    let ab_c = first_direction.cross(Vector::from(second).sub(Vector::from(first)));
-    let ab_d = first_direction.cross(Vector::from(second_end).sub(Vector::from(first)));
-    let cd_a = second_direction.cross(Vector::from(first).sub(Vector::from(second)));
-    let cd_b = second_direction.cross(Vector::from(first_end).sub(Vector::from(second)));
-    let touches = (ab_c.abs() <= EPSILON && point_on_segment(second, first, first_end))
-        | (ab_d.abs() <= EPSILON && point_on_segment(second_end, first, first_end))
-        | (cd_a.abs() <= EPSILON && point_on_segment(first, second, second_end))
-        | (cd_b.abs() <= EPSILON && point_on_segment(first_end, second, second_end));
-    if touches {
-        return true;
-    }
-    (ab_c > 0.0) != (ab_d > 0.0) && (cd_a > 0.0) != (cd_b > 0.0)
+    !segments_are_certifiably_disjoint(first, first_end, second, second_end)
 }
 
+#[cfg(test)]
 fn point_on_segment(point: PointD, start: PointD, end: PointD) -> bool {
     point.x >= start.x.min(end.x) - EPSILON
         && point.x <= start.x.max(end.x) + EPSILON
@@ -933,6 +1231,16 @@ mod tests {
             PointD::new(right, top),
             PointD::new(left, top),
         ]
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn regular_polygon(vertices: usize, radius: f64) -> PathD {
+        (0..vertices)
+            .map(|index| {
+                let angle = std::f64::consts::TAU * index as f64 / vertices as f64;
+                PointD::new(radius * angle.cos(), radius * angle.sin())
+            })
+            .collect()
     }
 
     fn bounds(paths: &[PathD]) -> (f64, f64, f64, f64) {
@@ -1260,6 +1568,232 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
+    fn certified_contour_forest_handles_holes_redundancy_and_large_rounds() {
+        let outer = rectangle(0.0, 0.0, 100.0, 100.0);
+        let inner = rectangle(20.0, 20.0, 80.0, 80.0);
+        assert_eq!(
+            certify_non_zero_contours(&[outer.clone(), inner.clone()]),
+            Some(vec![true, false])
+        );
+
+        let mut hole = inner.clone();
+        hole.reverse();
+        assert_eq!(
+            certify_non_zero_contours(&[outer.clone(), hole.clone()]),
+            Some(vec![true, true])
+        );
+        let island = rectangle(35.0, 35.0, 65.0, 65.0);
+        assert_eq!(
+            certify_non_zero_contours(&[outer.clone(), hole.clone(), island.clone()]),
+            Some(vec![true, true, true])
+        );
+
+        let middle = rectangle(15.0, 15.0, 85.0, 85.0);
+        let mut cancelling_inner = rectangle(30.0, 30.0, 70.0, 70.0);
+        cancelling_inner.reverse();
+        assert_eq!(
+            certify_non_zero_contours(&[outer.clone(), middle, cancelling_inner]),
+            Some(vec![true, false, false])
+        );
+
+        let disjoint = rectangle(120.0, 0.0, 150.0, 30.0);
+        assert_eq!(certify_non_zero_contours(&[outer.clone(), disjoint]), Some(vec![true, true]));
+        assert_eq!(
+            certify_non_zero_contours(&[
+                rectangle(0.0, 0.0, 10.0, 10.0),
+                rectangle(5.0, 5.0, 15.0, 15.0),
+            ]),
+            None
+        );
+        assert_eq!(
+            certify_non_zero_contours(&[
+                rectangle(0.0, 0.0, 10.0, 10.0),
+                rectangle(10.0, 0.0, 20.0, 10.0),
+            ]),
+            None
+        );
+
+        let large = regular_polygon(SMALL_CONTOUR_CERTIFICATION_LIMIT + 44, 20.0);
+        assert_eq!(certify_non_zero_contours(std::slice::from_ref(&large)), Some(vec![true]));
+
+        let options = OffsetOptions::polygon(JoinType::Round).with_arc_tolerance(0.000_01);
+        let raw = clean_ring(closed_outline(&outer, 10.0, options).unwrap(), false);
+        assert!(raw.len() > SMALL_CONTOUR_CERTIFICATION_LIMIT);
+        assert_eq!(certify_non_zero_contours(std::slice::from_ref(&raw)), Some(vec![true]));
+        let rounded = offset_paths_d(&[outer], 10.0, options).unwrap();
+        assert_eq!(rounded.len(), 1);
+        assert!(rounded[0].len() > SMALL_CONTOUR_CERTIFICATION_LIMIT);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn covers_certified_contour_predicates_and_budgets() {
+        let empty_bounds = BoundsD::from_path(&[]);
+        assert!(empty_bounds.is_none());
+        let bounds = BoundsD::from_path(&rectangle(0.0, 0.0, 10.0, 10.0)).unwrap();
+        assert!(
+            bounds.contains(BoundsD::from_segment(PointD::new(2.0, 2.0), PointD::new(8.0, 8.0)))
+        );
+        assert!(
+            !bounds.contains(BoundsD::from_segment(PointD::new(-1.0, 2.0), PointD::new(8.0, 8.0)))
+        );
+        assert!(
+            bounds.overlaps(BoundsD::from_segment(PointD::new(10.0, 2.0), PointD::new(12.0, 8.0)))
+        );
+        assert!(
+            !bounds.overlaps(BoundsD::from_segment(PointD::new(11.0, 2.0), PointD::new(12.0, 8.0)))
+        );
+
+        let positive = rectangle(0.0, 0.0, 10.0, 10.0);
+        let mut negative = positive.clone();
+        negative.reverse();
+        assert_eq!(certified_area_sign(&positive), Some(1));
+        assert_eq!(certified_area_sign(&negative), Some(-1));
+        assert_eq!(
+            certified_area_sign(&[
+                PointD::new(0.0, 0.0),
+                PointD::new(1.0, 0.0),
+                PointD::new(2.0, 0.0),
+            ]),
+            None
+        );
+        assert_eq!(
+            certified_area_sign(&[
+                PointD::new(f64::MAX, f64::MAX),
+                PointD::new(-f64::MAX, f64::MAX),
+                PointD::new(f64::MAX, -f64::MAX),
+            ]),
+            None
+        );
+
+        assert_eq!(certified_point_in_ring(PointD::new(5.0, 5.0), &positive), Some(true));
+        assert_eq!(certified_point_in_ring(PointD::new(15.0, 5.0), &positive), Some(false));
+        assert_eq!(certified_point_in_ring(PointD::new(0.0, 5.0), &positive), None);
+        assert_eq!(
+            certified_orientation(
+                PointD::new(0.0, 0.0),
+                PointD::new(1.0, 0.0),
+                PointD::new(0.0, 1.0)
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            certified_orientation(
+                PointD::new(0.0, 0.0),
+                PointD::new(0.0, 1.0),
+                PointD::new(1.0, 0.0)
+            ),
+            Some(-1)
+        );
+        assert_eq!(
+            certified_orientation(
+                PointD::new(0.0, 0.0),
+                PointD::new(1.0, 0.0),
+                PointD::new(2.0, 0.0)
+            ),
+            None
+        );
+        assert_eq!(
+            certified_orientation(
+                PointD::new(f64::MAX, 0.0),
+                PointD::new(-f64::MAX, 0.0),
+                PointD::new(0.0, f64::MAX)
+            ),
+            None
+        );
+
+        assert!(segments_are_certifiably_disjoint(
+            PointD::new(0.0, 0.0),
+            PointD::new(1.0, 0.0),
+            PointD::new(2.0, 0.0),
+            PointD::new(3.0, 0.0)
+        ));
+        assert!(segments_are_certifiably_disjoint(
+            PointD::new(0.0, 0.0),
+            PointD::new(2.0, 2.0),
+            PointD::new(0.0, 1.0),
+            PointD::new(1.0, 2.0)
+        ));
+        assert!(!segments_are_certifiably_disjoint(
+            PointD::new(0.0, 0.0),
+            PointD::new(2.0, 2.0),
+            PointD::new(0.0, 2.0),
+            PointD::new(2.0, 0.0)
+        ));
+        assert!(!segments_are_certifiably_disjoint(
+            PointD::new(0.0, 0.0),
+            PointD::new(2.0, 0.0),
+            PointD::new(1.0, 0.0),
+            PointD::new(3.0, 0.0)
+        ));
+
+        let mut contains = vec![false; 9];
+        contains[1] = true;
+        contains[2] = true;
+        contains[5] = true;
+        assert_eq!(contour_parents(&contains, 3), Some(vec![None, Some(0), Some(1)]));
+        assert_eq!(contour_depths(&[None, Some(0), Some(1)]), Some(vec![0, 1, 2]));
+        let mut invalid_contains = vec![false; 9];
+        invalid_contains[2] = true;
+        invalid_contains[5] = true;
+        assert_eq!(contour_parents(&invalid_contains, 3), None);
+        assert_eq!(contour_depths(&[Some(1), Some(0)]), None);
+
+        let outer_diamond = vec![
+            PointD::new(0.0, 10.0),
+            PointD::new(10.0, 0.0),
+            PointD::new(0.0, -10.0),
+            PointD::new(-10.0, 0.0),
+        ];
+        let inner_diamond = vec![
+            PointD::new(0.0, 5.0),
+            PointD::new(5.0, 0.0),
+            PointD::new(0.0, -5.0),
+            PointD::new(-5.0, 0.0),
+        ];
+        assert_eq!(
+            certify_boundaries_do_not_touch_with_limit(
+                &[outer_diamond.clone(), inner_diamond.clone()],
+                8,
+                0
+            ),
+            None
+        );
+        assert_eq!(certify_boundaries_do_not_touch(&[outer_diamond, inner_diamond], 8), Some(()));
+        assert_eq!(
+            certify_boundaries_do_not_touch(
+                &[vec![PointD::new(0.0, 0.0), PointD::new(0.0, 0.0), PointD::new(1.0, 1.0),]],
+                3
+            ),
+            None
+        );
+
+        let first_segment = SweepSegment {
+            ring: 0,
+            edge: 0,
+            ring_len: 4,
+            start: PointD::new(0.0, 0.0),
+            end: PointD::new(1.0, 0.0),
+            bounds: BoundsD::from_segment(PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)),
+        };
+        let adjacent = SweepSegment { edge: 1, ..first_segment };
+        let separate = SweepSegment { ring: 1, ..first_segment };
+        assert!(sweep_segments_are_adjacent(first_segment, adjacent));
+        assert!(!sweep_segments_are_adjacent(first_segment, separate));
+
+        let too_many_contours = vec![positive.clone(); MAX_CERTIFIED_CONTOURS + 1];
+        assert_eq!(certify_non_zero_contours(&too_many_contours), None);
+        assert_eq!(
+            certify_non_zero_contours(&[vec![
+                PointD::new(0.0, 0.0);
+                MAX_CERTIFIED_CONTOUR_SEGMENTS + 1
+            ]]),
+            None
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
     fn covers_offset_helper_branches() {
         let center = PointD::new(0.0, 0.0);
         let horizontal = Vector { x: 1.0, y: 0.0 };
@@ -1432,16 +1966,19 @@ mod tests {
         assert!(!point_on_segment(PointD::new(1.0, 1.0), center, PointD::new(2.0, 0.0)));
 
         let simple = rectangle(0.0, 0.0, 2.0, 2.0);
-        assert!(!can_skip_cleanup(&[]));
-        assert!(can_skip_cleanup(std::slice::from_ref(&simple)));
-        assert!(!can_skip_cleanup(&[vec![center; SIMPLE_OUTLINE_FAST_PATH_LIMIT + 1]]));
-        assert!(!can_skip_cleanup(&[vec![center, next, PointD::new(2.0, 0.0)]]));
-        assert!(!can_skip_cleanup(&[vec![
-            PointD::new(0.0, 0.0),
-            PointD::new(2.0, 2.0),
-            PointD::new(0.0, 2.0),
-            PointD::new(2.0, 0.0),
-        ]]));
+        assert_eq!(certify_non_zero_contours(&[]), Some(Vec::new()));
+        assert_eq!(certify_non_zero_contours(std::slice::from_ref(&simple)), Some(vec![true]));
+        assert_eq!(certify_non_zero_contours(&[vec![center, next]]), None);
+        assert_eq!(certify_non_zero_contours(&[vec![center, next, PointD::new(2.0, 0.0)]]), None);
+        assert_eq!(
+            certify_non_zero_contours(&[vec![
+                PointD::new(0.0, 0.0),
+                PointD::new(2.0, 2.0),
+                PointD::new(0.0, 2.0),
+                PointD::new(2.0, 0.0),
+            ]]),
+            None
+        );
 
         let mut points = vec![center];
         push_point(&mut points, center);
