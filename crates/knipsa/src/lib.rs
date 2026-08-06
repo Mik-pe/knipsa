@@ -5,6 +5,7 @@
 
 mod boolean;
 mod error;
+#[path = "fast_dispatch.rs"]
 mod fast;
 mod geometry;
 mod offset;
@@ -51,8 +52,8 @@ pub enum PathKind {
 /// The current semantic version of the safe Rust API.
 ///
 /// This is the crate version compiled into the library. It is useful for
-/// logging or for checking that a dynamically loaded companion library is the
-/// version an application expects.
+/// logging or for checking that a dynamically loaded companion library is
+/// the version an application expects.
 pub const API_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]
