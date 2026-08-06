@@ -1,0 +1,307 @@
+use super::*;
+
+fn rectangle(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> PathD {
+    vec![
+        PointD::new(min_x, min_y),
+        PointD::new(max_x, min_y),
+        PointD::new(max_x, max_y),
+        PointD::new(min_x, max_y),
+    ]
+}
+
+fn canonical_geometry(mut paths: PathsD) -> PathsD {
+    for path in &mut paths {
+        if signed_area2(path) < 0.0 {
+            path.reverse();
+        }
+        canonicalize(path);
+    }
+    paths.sort_by(compare_paths);
+    paths
+}
+
+fn base_result(request: BooleanRequestD<'_>) -> PathsD {
+    crate::fast_dispatch::try_boolean_opd(request)
+        .expect("base fast path accepts rectangle oracle")
+        .expect("base fast path closes")
+}
+
+fn edge(
+    start: (f64, f64),
+    end: (f64, f64),
+    start_key: (i64, i64),
+    end_key: (i64, i64),
+) -> DirectedEdge {
+    DirectedEdge {
+        start: PointD::new(start.0, start.1),
+        end: PointD::new(end.0, end.1),
+        start_key: PointKey { x: start_key.0, y: start_key.1 },
+        end_key: PointKey { x: end_key.0, y: end_key.1 },
+    }
+}
+
+#[test]
+fn rectangle_pair_matches_base_for_operations_fill_rules_and_winding() {
+    let cases = [
+        (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(0.0, 0.0, 10.0, 10.0)),
+        (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(5.0, 0.0, 15.0, 10.0)),
+        (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(5.0, 5.0, 15.0, 15.0)),
+        (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(2.0, 2.0, 8.0, 8.0)),
+        (rectangle(2.0, 2.0, 8.0, 8.0), rectangle(0.0, 0.0, 10.0, 10.0)),
+        (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(10.0, 0.0, 20.0, 10.0)),
+        (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(20.0, 0.0, 30.0, 10.0)),
+        (
+            rectangle(0.0, 0.0, 10.0, 10.0),
+            rectangle(10.0 + 2.0e-9, 0.0, 20.0, 10.0),
+        ),
+    ];
+    let fill_rules = [FillRule::EvenOdd, FillRule::NonZero, FillRule::Positive, FillRule::Negative];
+    let clip_types = [
+        ClipType::Intersection,
+        ClipType::Union,
+        ClipType::Difference,
+        ClipType::Xor,
+    ];
+
+    for (subject, clip) in cases {
+        for reverse_subject in [false, true] {
+            for reverse_clip in [false, true] {
+                let mut subject = subject.clone();
+                let mut clip = clip.clone();
+                if reverse_subject {
+                    subject.reverse();
+                }
+                if reverse_clip {
+                    clip.reverse();
+                }
+                for fill_rule in fill_rules {
+                    for clip_type in clip_types {
+                        let subjects = [subject.clone()];
+                        let clips = [clip.clone()];
+                        let request = BooleanRequestD {
+                            subjects: &subjects,
+                            clips: &clips,
+                            clip_type,
+                            fill_rule,
+                        };
+                        let actual = try_rectangle_pair(request)
+                            .expect("unambiguous rectangle pair uses tiny kernel");
+                        assert_eq!(
+                            canonical_geometry(actual),
+                            canonical_geometry(base_result(request)),
+                            "{fill_rule:?} {clip_type:?} reverse={reverse_subject}/{reverse_clip}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn wrapper_falls_back_for_non_rectangle_and_vertex_touch_topology() {
+    let triangle = vec![
+        PointD::new(0.0, 0.0),
+        PointD::new(10.0, 0.0),
+        PointD::new(0.0, 10.0),
+    ];
+    let square = rectangle(0.0, 0.0, 10.0, 10.0);
+    let subjects = [triangle];
+    let clips = [square];
+    let request = BooleanRequestD {
+        subjects: &subjects,
+        clips: &clips,
+        clip_type: ClipType::Intersection,
+        fill_rule: FillRule::EvenOdd,
+    };
+    assert!(try_rectangle_pair(request).is_none());
+    assert_eq!(
+        canonical_geometry(try_boolean_opd(request).unwrap().unwrap()),
+        canonical_geometry(base_result(request)),
+    );
+
+    let subjects = [rectangle(0.0, 0.0, 10.0, 10.0)];
+    let clips = [rectangle(10.0, 10.0, 20.0, 20.0)];
+    let request = BooleanRequestD {
+        subjects: &subjects,
+        clips: &clips,
+        clip_type: ClipType::Xor,
+        fill_rule: FillRule::EvenOdd,
+    };
+    assert!(try_rectangle_pair(request).is_none());
+    assert_eq!(
+        canonical_geometry(try_boolean_opd(request).unwrap().unwrap()),
+        canonical_geometry(base_result(request)),
+    );
+}
+
+#[test]
+fn rectangle_validation_rejects_malformed_or_ambiguous_paths() {
+    assert!(axis_aligned_rectangle(&[]).is_none());
+    assert!(axis_aligned_rectangle(&rectangle(0.0, 0.0, 0.0, 10.0)).is_none());
+    assert!(axis_aligned_rectangle(&rectangle(0.0, 0.0, 10.0, 0.0)).is_none());
+    assert!(axis_aligned_rectangle(&[
+        PointD::new(0.0, 0.0),
+        PointD::new(10.0, 10.0),
+        PointD::new(10.0, 0.0),
+        PointD::new(0.0, 10.0),
+    ]).is_none());
+    assert!(axis_aligned_rectangle(&[
+        PointD::new(0.0, 0.0),
+        PointD::new(10.0, 0.0),
+        PointD::new(0.0, 0.0),
+        PointD::new(0.0, 10.0),
+    ]).is_none());
+    assert!(axis_aligned_rectangle(&[
+        PointD::new(0.0, 0.0),
+        PointD::new(10.0, 0.0),
+        PointD::new(10.0, 10.0),
+        PointD::new(0.25e-9, 10.0),
+    ]).is_none());
+
+    for index in 0..4 {
+        let mut invalid = rectangle(0.0, 0.0, 10.0, 10.0);
+        invalid[index].x = f64::NAN;
+        assert!(axis_aligned_rectangle(&invalid).is_none());
+    }
+    for invalid in [
+        PointD::new(f64::NAN, 0.0),
+        PointD::new(0.0, f64::INFINITY),
+        PointD::new(MAX_COORDINATE + 1.0, 0.0),
+        PointD::new(0.0, -MAX_COORDINATE - 1.0),
+    ] {
+        assert!(key(invalid).is_none());
+    }
+    assert_eq!(
+        key(PointD::new(1.25, -2.5)),
+        Some(PointKey { x: 1_250_000_000, y: -2_500_000_000 }),
+    );
+}
+
+#[test]
+fn coordinate_helpers_reject_quantized_aliases() {
+    let path = rectangle(0.0, 0.0, 10.0, 10.0);
+    let keys = [key(path[0]).unwrap(), key(path[1]).unwrap(), key(path[2]).unwrap(), key(path[3]).unwrap()];
+    assert_eq!(keyed_coordinate_value(&path, &keys, 123, true), None);
+    assert_eq!(keyed_coordinate_value(&path, &keys, 0, true), Some(0.0));
+    assert_eq!(keyed_coordinate_value(&path, &keys, 0, false), Some(0.0));
+
+    let aliased_path = [
+        PointD::new(0.0, 0.0),
+        PointD::new(0.25e-9, 1.0),
+        PointD::new(1.0, 1.0),
+        PointD::new(1.0, 0.0),
+    ];
+    let aliased_keys = [
+        PointKey { x: 0, y: 0 },
+        PointKey { x: 0, y: 1 },
+        PointKey { x: 1, y: 1 },
+        PointKey { x: 1, y: 0 },
+    ];
+    assert_eq!(keyed_coordinate_value(&aliased_path, &aliased_keys, 0, true), None);
+
+    let zero = GridCoordinate { key: 0, value: 0.0 };
+    let alias = GridCoordinate { key: 0, value: 0.25e-9 };
+    let ten = GridCoordinate { key: 10, value: 10.0 };
+    let (coordinates, len) = tiny_coordinates(zero, ten, zero, ten).unwrap();
+    assert_eq!(len, 2);
+    assert_eq!(coordinates[0].key, 0);
+    assert_eq!(coordinates[1].key, 10);
+    assert!(tiny_coordinates(zero, ten, alias, ten).is_none());
+}
+
+#[test]
+fn fixed_boundary_and_stitch_reject_invalid_graphs() {
+    let mut boundary = SmallBoundary::new();
+    let empty_edge = DirectedEdge::default();
+    for _ in 0..MAX_BOUNDARY_EDGES {
+        assert_eq!(boundary.push(empty_edge), Some(()));
+    }
+    assert_eq!(boundary.as_slice().len(), MAX_BOUNDARY_EDGES);
+    assert_eq!(boundary.push(empty_edge), None);
+    assert_eq!(stitch_small(&[]), Some(Vec::new()));
+
+    let open = [edge((0.0, 0.0), (1.0, 0.0), (0, 0), (1, 0))];
+    assert!(stitch_small(&open).is_none());
+    assert!(stitch_small(&vec![open[0]; MAX_BOUNDARY_EDGES + 1]).is_none());
+
+    let multiple = [
+        edge((0.0, 0.0), (1.0, 0.0), (0, 0), (1, 0)),
+        edge((1.0, 0.0), (1.0, 1.0), (1, 0), (1, 1)),
+        edge((1.0, 0.0), (2.0, 0.0), (1, 0), (2, 0)),
+    ];
+    assert!(stitch_small(&multiple).is_none());
+
+    let lollipop = [
+        edge((0.0, 0.0), (1.0, 0.0), (0, 0), (1, 0)),
+        edge((1.0, 0.0), (2.0, 0.0), (1, 0), (2, 0)),
+        edge((2.0, 0.0), (1.0, 0.0), (2, 0), (1, 0)),
+    ];
+    assert!(stitch_small(&lollipop).is_none());
+
+    let two_edge_cycle = [
+        edge((0.0, 0.0), (1.0, 0.0), (0, 0), (1, 0)),
+        edge((1.0, 0.0), (0.0, 0.0), (1, 0), (0, 0)),
+    ];
+    assert!(stitch_small(&two_edge_cycle).is_none());
+
+    let collinear_cycle = [
+        edge((0.0, 0.0), (1.0, 0.0), (0, 0), (1, 0)),
+        edge((1.0, 0.0), (2.0, 0.0), (1, 0), (2, 0)),
+        edge((2.0, 0.0), (0.0, 0.0), (2, 0), (0, 0)),
+    ];
+    assert!(stitch_small(&collinear_cycle).is_none());
+}
+
+#[test]
+fn stitch_handles_multiple_loops_and_trim_failure() {
+    let loops = [
+        edge((0.0, 0.0), (1.0, 0.0), (0, 0), (1, 0)),
+        edge((1.0, 0.0), (1.0, 1.0), (1, 0), (1, 1)),
+        edge((1.0, 1.0), (0.0, 0.0), (1, 1), (0, 0)),
+        edge((2.0, 0.0), (3.0, 0.0), (2, 0), (3, 0)),
+        edge((3.0, 0.0), (3.0, 1.0), (3, 0), (3, 1)),
+        edge((3.0, 1.0), (2.0, 0.0), (3, 1), (2, 0)),
+    ];
+    assert_eq!(stitch_small(&loops).unwrap().len(), 2);
+
+    let invalid = [
+        edge((f64::NAN, 0.0), (1.0, 0.0), (0, 0), (1, 0)),
+        edge((1.0, 0.0), (1.0, 1.0), (1, 0), (1, 1)),
+        edge((1.0, 1.0), (f64::NAN, 0.0), (1, 1), (0, 0)),
+    ];
+    assert!(stitch_small(&invalid).is_none());
+}
+
+#[test]
+fn ordering_helpers_and_request_cardinality_branches_are_covered() {
+    let mut empty: PathD = Vec::new();
+    canonicalize(&mut empty);
+    let short = vec![PointD::new(0.0, 0.0)];
+    let long = vec![PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)];
+    let shifted = vec![PointD::new(1.0, 0.0)];
+    assert_eq!(compare_paths(&short, &short), Ordering::Equal);
+    assert_eq!(compare_paths(&short, &long), Ordering::Less);
+    assert_eq!(compare_paths(&shifted, &short), Ordering::Greater);
+
+    let rectangle = rectangle(0.0, 0.0, 10.0, 10.0);
+    let subjects = [rectangle.clone(), rectangle.clone()];
+    let clips = [rectangle.clone()];
+    let request = BooleanRequestD {
+        subjects: &subjects,
+        clips: &clips,
+        clip_type: ClipType::Union,
+        fill_rule: FillRule::EvenOdd,
+    };
+    assert!(try_rectangle_pair(request).is_none());
+
+    let subjects = [rectangle];
+    let clips: [PathD; 0] = [];
+    let request = BooleanRequestD {
+        subjects: &subjects,
+        clips: &clips,
+        clip_type: ClipType::Union,
+        fill_rule: FillRule::EvenOdd,
+    };
+    assert!(try_rectangle_pair(request).is_none());
+}
