@@ -66,10 +66,8 @@ impl HorizontalSpanStats {
     fn record_rectangle(&mut self, rectangle: RectangleKey) {
         self.edge_count += 2;
         self.total_key_span += u128::from(rectangle.min_x.abs_diff(rectangle.max_x)) * 2;
-        self.min_x =
-            Some(self.min_x.map_or(rectangle.min_x, |value| value.min(rectangle.min_x)));
-        self.max_x =
-            Some(self.max_x.map_or(rectangle.max_x, |value| value.max(rectangle.max_x)));
+        self.min_x = Some(self.min_x.map_or(rectangle.min_x, |value| value.min(rectangle.min_x)));
+        self.max_x = Some(self.max_x.map_or(rectangle.max_x, |value| value.max(rectangle.max_x)));
     }
 
     fn should_fuse(self) -> bool {
@@ -221,14 +219,7 @@ fn fused_rectangle_xor(
             difference[event.y1] ^= true;
             event_index += 1;
         }
-        sweep_column(
-            &difference,
-            &mut filled,
-            coordinate,
-            ys,
-            &mut horizontal_runs,
-            &mut boundary,
-        );
+        sweep_column(&difference, &mut filled, coordinate, ys, &mut horizontal_runs, &mut boundary);
     }
 
     let right = *xs.last()?;
@@ -514,21 +505,18 @@ mod tests {
         };
         assert!(try_long_rectangle_xor(request).is_none());
         assert!(try_boolean_opd(request).unwrap().is_ok());
-        assert!(try_long_rectangle_xor(BooleanRequestD {
-            clip_type: ClipType::Union,
-            ..request
-        })
-        .is_none());
-        assert!(try_long_rectangle_xor(BooleanRequestD {
-            fill_rule: FillRule::NonZero,
-            ..request
-        })
-        .is_none());
-        assert!(try_long_rectangle_xor(BooleanRequestD {
-            subjects: &rectangles[..7],
-            ..request
-        })
-        .is_none());
+        assert!(
+            try_long_rectangle_xor(BooleanRequestD { clip_type: ClipType::Union, ..request })
+                .is_none()
+        );
+        assert!(
+            try_long_rectangle_xor(BooleanRequestD { fill_rule: FillRule::NonZero, ..request })
+                .is_none()
+        );
+        assert!(
+            try_long_rectangle_xor(BooleanRequestD { subjects: &rectangles[..7], ..request })
+                .is_none()
+        );
 
         for invalid in [
             Vec::new(),
@@ -583,11 +571,13 @@ mod tests {
 
         let same = vec![grid_coordinate(0), grid_coordinate(0), grid_coordinate(2)];
         assert_eq!(dedup_coordinates(same).unwrap().len(), 2);
-        assert!(dedup_coordinates(vec![
-            GridCoordinate { key: 0, value: 0.0 },
-            GridCoordinate { key: 0, value: 0.25 },
-        ])
-        .is_none());
+        assert!(
+            dedup_coordinates(vec![
+                GridCoordinate { key: 0, value: 0.0 },
+                GridCoordinate { key: 0, value: 0.25 },
+            ])
+            .is_none()
+        );
         assert!(dedup_coordinates(vec![grid_coordinate(0)]).is_none());
 
         let mut empty = HorizontalSpanStats::default();
@@ -636,10 +626,7 @@ mod tests {
     fn sweeps_empty_and_filled_columns() {
         let xs = [grid_coordinate(0), grid_coordinate(1), grid_coordinate(2)];
         let ys = [grid_coordinate(0), grid_coordinate(1), grid_coordinate(2)];
-        let events = [
-            GridEvent { x: 0, y0: 0, y1: 2 },
-            GridEvent { x: 2, y0: 0, y1: 2 },
-        ];
+        let events = [GridEvent { x: 0, y0: 0, y1: 2 }, GridEvent { x: 2, y0: 0, y1: 2 }];
         assert_eq!(fused_rectangle_xor(&events, &xs, &ys).unwrap().len(), 1);
         assert_eq!(fused_rectangle_xor(&[], &xs, &ys), Some(Vec::new()));
     }
