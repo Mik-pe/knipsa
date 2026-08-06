@@ -1543,40 +1543,37 @@ mod tests {
     }
 
     #[test]
-    fn certified_face_overlay_handles_diagonal_crossings_and_vertex_touch() {
+    fn certified_face_overlay_handles_diagonal_self_crossings() {
         let epsilon = Rational::new(BigInt::one(), BigInt::one() << INTEGER_SAMPLE_BITS);
         let bow_tie = exact_path(&[(0, 0), (20, 20), (0, 20), (20, 0)]);
-        let bow_tie_subjects = [bow_tie];
-        let bow_tie_atoms = noded_atomic_edges(&bow_tie_subjects, &[]);
-        let bow_tie_boundary = try_face_boundary(
-            &bow_tie_atoms,
-            &bow_tie_subjects,
-            &[],
-            ClipType::Union,
-            FillRule::EvenOdd,
-            &epsilon,
-        )
-        .expect("a noded diagonal bow-tie has a certified face overlay");
-        let bow_tie_oracle = sample_atomic_boundary(
-            &bow_tie_atoms,
-            &bow_tie_subjects,
+        let subjects = [bow_tie];
+        let atoms = noded_atomic_edges(&subjects, &[]);
+        let boundary =
+            try_face_boundary(&atoms, &subjects, &[], ClipType::Union, FillRule::EvenOdd, &epsilon)
+                .expect("a noded diagonal bow-tie has a certified face overlay");
+        let oracle = sample_atomic_boundary(
+            &atoms,
+            &subjects,
             &[],
             ClipType::Union,
             FillRule::EvenOdd,
             &epsilon,
         );
-        let bow_tie_result = exact_paths_to_i64(
-            &stitch_directed_edges(&bow_tie_boundary).expect("certified boundary closes"),
+        let result = exact_paths_to_i64(
+            &stitch_directed_edges(&boundary).expect("certified boundary closes"),
         )
         .expect("integer bow-tie result");
-        let bow_tie_oracle = exact_paths_to_i64(
-            &stitch_directed_edges(&bow_tie_oracle).expect("oracle boundary closes"),
-        )
-        .expect("integer oracle result");
-        assert_eq!(canonical_summary(&bow_tie_result), canonical_summary(&bow_tie_oracle));
-        assert_eq!(bow_tie_result.len(), 2);
-        assert_eq!(area_sum(&bow_tie_result), 400);
+        let oracle =
+            exact_paths_to_i64(&stitch_directed_edges(&oracle).expect("oracle boundary closes"))
+                .expect("integer oracle result");
+        assert_eq!(canonical_summary(&result), canonical_summary(&oracle));
+        assert_eq!(result.len(), 2);
+        assert_eq!(area_sum(&result), 400);
+    }
 
+    #[test]
+    fn certified_face_overlay_handles_shared_vertices() {
+        let epsilon = Rational::new(BigInt::one(), BigInt::one() << INTEGER_SAMPLE_BITS);
         // These two triangles share exactly one non-axis-aligned support
         // vertex while their axis-aligned bounds overlap in both dimensions.
         // This prevents the bbox short-circuit from hiding the vertex fan.
@@ -1616,7 +1613,11 @@ mod tests {
             certified.iter().map(|path| signed_area2(path).unwrap().abs()).sum::<i128>(),
             198
         );
+    }
 
+    #[test]
+    fn certified_face_overlay_handles_high_valence_vertex_fans() {
+        let epsilon = Rational::new(BigInt::one(), BigInt::one() << INTEGER_SAMPLE_BITS);
         // Eight disjoint wedges meet only at the origin. The arrangement keeps
         // sixteen outgoing half-edges there, exercising the high-valence fan
         // path without shared radial edges cancelling before topology build.
@@ -1630,40 +1631,102 @@ mod tests {
             exact_path(&[(0, 0), (-1, -10), (1, -10)]),
             exact_path(&[(0, 0), (7, -9), (9, -7)]),
         ];
-        let wedge_atoms = noded_atomic_edges(&wedges, &[]);
-        let wedge_arrangement = merge_atomic_edges(&wedge_atoms).expect("wedge arrangement");
+        let atoms = noded_atomic_edges(&wedges, &[]);
+        let arrangement = merge_atomic_edges(&atoms).expect("wedge arrangement");
         assert_eq!(
-            wedge_arrangement
+            arrangement
                 .iter()
                 .filter(|edge| edge.start == exact_point(0, 0) || edge.end == exact_point(0, 0))
                 .count(),
             16
         );
-        let wedge_boundary = try_face_boundary(
-            &wedge_atoms,
-            &wedges,
-            &[],
-            ClipType::Union,
-            FillRule::EvenOdd,
-            &epsilon,
-        )
-        .expect("the high-valence vertex fan is certifiable");
-        let wedge_oracle = sample_atomic_boundary(
-            &wedge_atoms,
+        let boundary =
+            try_face_boundary(&atoms, &wedges, &[], ClipType::Union, FillRule::EvenOdd, &epsilon)
+                .expect("the high-valence vertex fan is certifiable");
+        let oracle = sample_atomic_boundary(
+            &atoms,
             &wedges,
             &[],
             ClipType::Union,
             FillRule::EvenOdd,
             &epsilon,
         );
-        let wedge_result = exact_paths_to_i64(
-            &stitch_directed_edges(&wedge_boundary).expect("wedge boundary closes"),
-        )
-        .expect("integer wedge result");
-        let wedge_oracle =
-            exact_paths_to_i64(&stitch_directed_edges(&wedge_oracle).expect("wedge oracle closes"))
+        let result =
+            exact_paths_to_i64(&stitch_directed_edges(&boundary).expect("wedge boundary closes"))
+                .expect("integer wedge result");
+        let oracle =
+            exact_paths_to_i64(&stitch_directed_edges(&oracle).expect("wedge oracle closes"))
                 .expect("integer wedge oracle");
-        assert_eq!(canonical_summary(&wedge_result), canonical_summary(&wedge_oracle));
+        assert_eq!(canonical_summary(&result), canonical_summary(&oracle));
+    }
+
+    #[test]
+    fn exact_overlay_ignores_duplicate_clip_vertices() {
+        let subjects = [exact_path(&[(0, 0), (10, 0), (10, 10), (0, 10)])];
+        let clips = [exact_path(&[(5, -5), (5, -5), (15, -5), (15, 5), (5, 5)])];
+        let result = run_boolean(
+            &subjects,
+            &clips,
+            ClipType::Intersection,
+            FillRule::EvenOdd,
+            INTEGER_SAMPLE_BITS,
+        )
+        .expect("a duplicate vertex must not create a zero-length arrangement edge");
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn certified_face_overlay_rejects_inconsistent_face_samples() {
+        let epsilon = Rational::new(BigInt::one(), BigInt::one() << INTEGER_SAMPLE_BITS);
+        let subjects = [exact_path(&[(0, 0), (10, 0), (10, 10), (0, 10)])];
+        let mislabeled_subject = [ArrangementEdge {
+            start: exact_point(0, 0),
+            end: exact_point(10, 0),
+            subject_delta: 2,
+            clip_delta: 0,
+        }];
+        assert!(sample_face_pair(0, &mislabeled_subject, &subjects, &[], &epsilon).is_none());
+
+        let mislabeled_clip =
+            [ArrangementEdge { subject_delta: 1, clip_delta: 1, ..mislabeled_subject[0].clone() }];
+        assert!(sample_face_pair(0, &mislabeled_clip, &subjects, &[], &epsilon).is_none());
+    }
+
+    #[test]
+    fn certified_face_overlay_refines_boundary_probes_and_empty_cycles() {
+        let coarse = Rational::new(BigInt::one(), BigInt::from(2));
+        let zero_delta = [ArrangementEdge {
+            start: exact_point(0, 0),
+            end: exact_point(10, 0),
+            subject_delta: 0,
+            clip_delta: 0,
+        }];
+        let boundary_subjects = [exact_path(&[(0, 5), (10, 5), (10, 15), (0, 15)])];
+        assert!(sample_face_pair(0, &zero_delta, &boundary_subjects, &[], &coarse).is_some());
+
+        assert_eq!(build_face_cycles(&[]), Some((Vec::new(), Vec::new())));
+        let mut no_parameters = Vec::new();
+        assert!(split_source_edges(&[], &mut no_parameters, &[]).is_empty());
+        assert!(noded_atomic_edges(&[], &[]).is_empty());
+
+        let boundary = exact_point(0, 5);
+        for (clip_type, expected) in [
+            (ClipType::Intersection, false),
+            (ClipType::Union, true),
+            (ClipType::Difference, true),
+            (ClipType::Xor, true),
+        ] {
+            assert_eq!(
+                operation_contains(
+                    &boundary,
+                    &boundary_subjects,
+                    &[],
+                    clip_type,
+                    FillRule::EvenOdd,
+                ),
+                expected
+            );
+        }
     }
 
     #[test]

@@ -165,7 +165,7 @@ pub fn offset_paths64(
 /// # Errors
 ///
 /// Propagates validation, offset, topology, and conversion errors from
-/// [offset_paths64].
+/// [`offset_paths64`].
 pub fn offset_path64(path: &Path64, delta: f64, options: OffsetOptions) -> Result<Paths64, Error> {
     offset_paths64(std::slice::from_ref(path), delta, options)
 }
@@ -227,17 +227,20 @@ pub fn offset_paths_d(
             .collect());
     }
 
-    merge_generated_contours(generated, options.preserve_collinear)
+    merge_generated_contours(&generated, options.preserve_collinear)
 }
 
-fn merge_generated_contours(generated: PathsD, preserve_collinear: bool) -> Result<PathsD, Error> {
+fn merge_generated_contours(
+    generated: &[PathD],
+    preserve_collinear: bool,
+) -> Result<PathsD, Error> {
     // Concave offsets can contain overlapping lobes and negative slivers. The
     // exact non-zero union is the topology cleanup stage and also merges
     // overlapping offsets from multiple input paths. The boolean kernel only
     // emits non-degenerate rings, so cleaning cannot collapse a result below
     // the closed-path minimum.
     let result = boolean_opd(BooleanRequestD {
-        subjects: &generated,
+        subjects: generated,
         clips: &[],
         clip_type: ClipType::Union,
         fill_rule: FillRule::NonZero,
@@ -252,7 +255,7 @@ fn merge_generated_contours(generated: PathsD, preserve_collinear: bool) -> Resu
 ///
 /// # Errors
 ///
-/// Propagates validation and topology errors from [offset_paths_d].
+/// Propagates validation and topology errors from [`offset_paths_d`].
 pub fn offset_path_d(path: &PathD, delta: f64, options: OffsetOptions) -> Result<PathsD, Error> {
     offset_paths_d(std::slice::from_ref(path), delta, options)
 }
@@ -911,9 +914,10 @@ struct SweepSegment {
 /// separate zero winding from non-zero winding; redundant nested boundaries
 /// disappear without constructing intersections or sampling with an epsilon.
 fn certify_non_zero_contours(paths: &[PathD]) -> Option<Vec<bool>> {
-    if paths.is_empty() {
+    let mut path_iter = paths.iter();
+    let Some(first) = path_iter.next() else {
         return Some(Vec::new());
-    }
+    };
     if paths.len() > MAX_CERTIFIED_CONTOURS {
         return None;
     }
@@ -922,16 +926,9 @@ fn certify_non_zero_contours(paths: &[PathD]) -> Option<Vec<bool>> {
     let mut bounds = Vec::with_capacity(paths.len());
     let mut winding_signs = Vec::with_capacity(paths.len());
     let mut segment_count = 0_usize;
-    for path in paths {
-        if path.len() < 3 {
-            return None;
-        }
-        if path.len() > MAX_CERTIFIED_CONTOUR_SEGMENTS - segment_count {
-            return None;
-        }
-        segment_count += path.len();
-        bounds.push(BoundsD::from_path(path)?);
-        winding_signs.push(certified_area_sign(path)?);
+    push_certified_contour_metadata(first, &mut bounds, &mut winding_signs, &mut segment_count)?;
+    for path in path_iter {
+        push_certified_contour_metadata(path, &mut bounds, &mut winding_signs, &mut segment_count)?;
     }
 
     if paths.len() == 1 && paths[0].len() <= SMALL_CONTOUR_CERTIFICATION_LIMIT {
@@ -964,6 +961,21 @@ fn certify_non_zero_contours(paths: &[PathD]) -> Option<Vec<bool>> {
         keep[index] = (outside == 0) != (inside == 0);
     }
     Some(keep)
+}
+
+fn push_certified_contour_metadata(
+    path: &PathD,
+    bounds: &mut Vec<BoundsD>,
+    winding_signs: &mut Vec<i32>,
+    segment_count: &mut usize,
+) -> Option<()> {
+    if path.len() < 3 || path.len() > MAX_CERTIFIED_CONTOUR_SEGMENTS - *segment_count {
+        return None;
+    }
+    *segment_count += path.len();
+    bounds.push(BoundsD::from_path(path)?);
+    winding_signs.push(certified_area_sign(path)?);
+    Some(())
 }
 
 fn contour_parents(contains: &[bool], count: usize) -> Option<Vec<Option<usize>>> {
@@ -1415,7 +1427,7 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert!(area2(&result[0]).abs() > 250.0);
 
-        let merged = merge_generated_contours(vec![first, second], false).unwrap();
+        let merged = merge_generated_contours(&[first, second], false).unwrap();
         assert_eq!(merged.len(), 1);
         assert_eq!(bounds(&merged), (0.0, 0.0, 15.0, 10.0));
     }
@@ -1720,6 +1732,19 @@ mod tests {
         negative.reverse();
         assert_eq!(certified_area_sign(&positive), Some(1));
         assert_eq!(certified_area_sign(&negative), Some(-1));
+        assert_eq!(certified_area_sign(&[PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)]), None);
+        assert_eq!(
+            certified_area_sign(&[
+                PointD::new(0.0, 0.0),
+                PointD::new(f64::MAX, 1.0),
+                PointD::new(1.0, f64::MAX),
+            ]),
+            None
+        );
+        assert_eq!(
+            certify_non_zero_contours(&[vec![PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)]]),
+            None
+        );
         assert_eq!(
             certified_area_sign(&[
                 PointD::new(0.0, 0.0),
