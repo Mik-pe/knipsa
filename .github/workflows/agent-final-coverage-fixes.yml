@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   apply:
-    if: github.actor != 'github-actions[bot]'
+    if: github.actor != 'github-actions[bot]]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +57,23 @@ jobs:
           ./scripts/coverage.sh
           status=$?
           if [[ -f target/coverage/lcov.info ]]; then
+            echo '::group::Uncovered functions'
+            awk '
+              /^SF:/ { file = substr($0, 4) }
+              /^FN:/ {
+                record = substr($0, 4)
+                comma = index(record, ",")
+                line = substr(record, 1, comma - 1)
+                name = substr(record, comma + 1)
+                function_line[name] = line
+                function_file[name] = file
+              }
+              /^FNDA:0,/ {
+                name = substr($0, 8)
+                printf "%s:%s %s\n", function_file[name], function_line[name], name
+              }
+            ' target/coverage/lcov.info
+            echo '::endgroup::'
             echo '::group::Uncovered lines'
             awk -F, '
               /^SF:/ { file = substr($0, 4) }
