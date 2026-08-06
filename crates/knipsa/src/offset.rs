@@ -1,10 +1,10 @@
 //! Polygon and polyline offsetting.
 //!
-//! The construction is deliberately independent from the boolean kernel. Each
-//! input edge is shifted in floating point, joins and caps are constructed
-//! explicitly, and the generated outlines are then passed through the exact
-//! boolean union. That last step removes the negative slivers and
-//! self-overlaps that are unavoidable when offsetting concave paths.
+//! Input edges are shifted in floating point and joins and caps are constructed
+//! explicitly. Simple generated contours with no boundary contact are reduced
+//! through a certified containment forest. Touching, overlapping, self-crossing,
+//! oversized, or numerically ambiguous contours fall back to the exact non-zero
+//! Boolean union, which removes negative slivers and merges overlapping lobes.
 
 use crate::{
     BooleanRequestD, ClipType, Error, FillRule, Path64, PathD, PathKind, Paths64, PathsD, Point64,
@@ -157,6 +157,23 @@ pub fn offset_paths64(
         .collect()
 }
 
+/// Offsets one integer-coordinate path.
+///
+/// The result remains a path collection because an inset may split a concave
+/// polygon and a stroked polyline always produces a closed outline.
+///
+/// # Errors
+///
+/// Propagates validation, offset, topology, and conversion errors from
+/// [offset_paths64].
+pub fn offset_path64(
+    path: &Path64,
+    delta: f64,
+    options: OffsetOptions,
+) -> Result<Paths64, Error> {
+    offset_paths64(std::slice::from_ref(path), delta, options)
+}
+
 /// Offsets floating-point paths and returns floating-point polygon outlines.
 ///
 /// [`OffsetOptions::end_type`] determines whether inputs are closed polygons
@@ -214,9 +231,18 @@ pub fn offset_paths_d(
             .collect());
     }
 
+    merge_generated_contours(generated, options.preserve_collinear)
+}
+
+fn merge_generated_contours(
+    generated: PathsD,
+    preserve_collinear: bool,
+) -> Result<PathsD, Error> {
     // Concave offsets can contain overlapping lobes and negative slivers. The
-    // exact union is the topology cleanup stage and also merges overlapping
-    // offsets from multiple input paths.
+    // exact non-zero union is the topology cleanup stage and also merges
+    // overlapping offsets from multiple input paths. The boolean kernel only
+    // emits non-degenerate rings, so cleaning cannot collapse a result below
+    // the closed-path minimum.
     let result = boolean_opd(BooleanRequestD {
         subjects: &generated,
         clips: &[],
@@ -225,10 +251,24 @@ pub fn offset_paths_d(
     })?;
     Ok(result
         .into_iter()
-        .filter(|path| path.len() >= 3)
-        .map(|path| clean_ring(path, options.preserve_collinear))
-        .filter(|path| path.len() >= 3)
+        .map(|path| clean_ring(path, preserve_collinear))
         .collect())
+}
+
+/// Offsets one floating-point path.
+///
+/// The result remains a path collection because an inset may split a concave
+/// polygon and a stroked polyline always produces a closed outline.
+///
+/// # Errors
+///
+/// Propagates validation and topology errors from [offset_paths_d].
+pub fn offset_path_d(
+    path: &PathD,
+    delta: f64,
+    options: OffsetOptions,
+) -> Result<PathsD, Error> {
+    offset_paths_d(std::slice::from_ref(path), delta, options)
 }
 
 /// Offsets floating-point paths; an ergonomic alias for [`offset_paths_d`].
@@ -947,13 +987,15 @@ fn contour_parents(contains: &[bool], count: usize) -> Option<Vec<Option<usize>>
             if !contains[candidate * count + inner] {
                 continue;
             }
-            let has_intermediate = (0..count).any(|middle| {
-                middle != inner
-                    && middle != candidate
-                    && contains[candidate * count + middle]
-                    && contains[middle * count + inner]
-            });
-            if !has_intermediate && parents[inner].replace(candidate).is_some() {
+            let Some(current) = parents[inner] else {
+                parents[inner] = Some(candidate);
+                continue;
+            };
+            if contains[current * count + candidate] {
+                parents[inner] = Some(candidate);
+            } else if !contains[candidate * count + current] {
+                // Certified disjoint simple contours are laminar. Two incomparable
+                // containers therefore prove that the relation matrix is invalid.
                 return None;
             }
         }
@@ -1359,6 +1401,44 @@ mod tests {
     }
 
     #[test]
+    fn single_path_offset_helpers_match_collection_helpers() {
+        let integer = vec![
+            Point64::new(0, 0),
+            Point64::new(10, 0),
+            Point64::new(10, 10),
+            Point64::new(0, 10),
+        ];
+        let integer_options = OffsetOptions::polygon(JoinType::Miter);
+        assert_eq!(
+            offset_path64(&integer, 2.0, integer_options),
+            offset_paths64(std::slice::from_ref(&integer), 2.0, integer_options)
+        );
+
+        let floating = rectangle(0.0, 0.0, 10.0, 10.0);
+        let floating_options = OffsetOptions::polygon(JoinType::Round);
+        let collection = offset_paths_d(
+            std::slice::from_ref(&floating),
+            2.0,
+            floating_options,
+        );
+        assert_eq!(offset_path_d(&floating, 2.0, floating_options), collection);
+    }
+
+    #[test]
+    fn overlapping_offsets_use_exact_merge_fallback() {
+        let first = rectangle(0.0, 0.0, 10.0, 10.0);
+        let second = rectangle(5.0, 0.0, 15.0, 10.0);
+        let options = OffsetOptions::polygon(JoinType::Round).with_arc_tolerance(0.05);
+        let result = offset_paths_d(&[first.clone(), second.clone()], 2.0, options).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(area2(&result[0]).abs() > 250.0);
+
+        let merged = merge_generated_contours(vec![first, second], false).unwrap();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(bounds(&merged), (0.0, 0.0, 15.0, 10.0));
+    }
+
+    #[test]
     fn offset_option_constructors_are_chainable() {
         assert_eq!(OffsetOptions::polygon(JoinType::Bevel).join_type, JoinType::Bevel);
         let options = OffsetOptions::polyline(JoinType::Miter, EndType::Square)
@@ -1638,6 +1718,15 @@ mod tests {
             !bounds.contains(BoundsD::from_segment(PointD::new(-1.0, 2.0), PointD::new(8.0, 8.0)))
         );
         assert!(
+            !bounds.contains(BoundsD::from_segment(PointD::new(2.0, -1.0), PointD::new(8.0, 8.0)))
+        );
+        assert!(
+            !bounds.contains(BoundsD::from_segment(PointD::new(2.0, 2.0), PointD::new(11.0, 8.0)))
+        );
+        assert!(
+            !bounds.contains(BoundsD::from_segment(PointD::new(2.0, 2.0), PointD::new(8.0, 11.0)))
+        );
+        assert!(
             bounds.overlaps(BoundsD::from_segment(PointD::new(10.0, 2.0), PointD::new(12.0, 8.0)))
         );
         assert!(
@@ -1662,6 +1751,22 @@ mod tests {
                 PointD::new(f64::MAX, f64::MAX),
                 PointD::new(-f64::MAX, f64::MAX),
                 PointD::new(f64::MAX, -f64::MAX),
+            ]),
+            None
+        );
+        assert_eq!(
+            certified_area_sign(&[
+                PointD::new(0.0, 0.0),
+                PointD::new(0.0, f64::MAX),
+                PointD::new(f64::MAX, 0.0),
+            ]),
+            None
+        );
+        assert_eq!(
+            certified_area_sign(&[
+                PointD::new(0.0, 0.0),
+                PointD::new(f64::MAX, f64::MAX),
+                PointD::new(-1.0, 1.0),
             ]),
             None
         );
@@ -1701,6 +1806,14 @@ mod tests {
             ),
             None
         );
+        assert_eq!(
+            certified_orientation(
+                PointD::new(f64::MAX, 1.0),
+                PointD::new(f64::MAX, 1.0),
+                PointD::new(0.0, 0.0)
+            ),
+            None
+        );
 
         assert!(segments_are_certifiably_disjoint(
             PointD::new(0.0, 0.0),
@@ -1726,6 +1839,24 @@ mod tests {
             PointD::new(1.0, 0.0),
             PointD::new(3.0, 0.0)
         ));
+        assert!(!segments_are_certifiably_disjoint(
+            PointD::new(0.0, 0.0),
+            PointD::new(10.0, 0.0),
+            PointD::new(-1.0, -1.0),
+            PointD::new(1.0, 1.0)
+        ));
+        assert!(!segments_are_certifiably_disjoint(
+            PointD::new(0.0, 0.0),
+            PointD::new(10.0, 0.0),
+            PointD::new(9.0, -1.0),
+            PointD::new(11.0, 1.0)
+        ));
+        assert!(segments_are_certifiably_disjoint(
+            PointD::new(0.0, 0.0),
+            PointD::new(10.0, 0.0),
+            PointD::new(9.0, -1.0),
+            PointD::new(20.0, 1.0)
+        ));
 
         let mut contains = vec![false; 9];
         contains[1] = true;
@@ -1733,6 +1864,11 @@ mod tests {
         contains[5] = true;
         assert_eq!(contour_parents(&contains, 3), Some(vec![None, Some(0), Some(1)]));
         assert_eq!(contour_depths(&[None, Some(0), Some(1)]), Some(vec![0, 1, 2]));
+        let mut reverse_order = vec![false; 9];
+        reverse_order[2] = true;
+        reverse_order[3] = true;
+        reverse_order[5] = true;
+        assert_eq!(contour_parents(&reverse_order, 3), Some(vec![Some(1), None, Some(0)]));
         let mut invalid_contains = vec![false; 9];
         invalid_contains[2] = true;
         invalid_contains[5] = true;
@@ -1780,6 +1916,14 @@ mod tests {
         let separate = SweepSegment { ring: 1, ..first_segment };
         assert!(sweep_segments_are_adjacent(first_segment, adjacent));
         assert!(!sweep_segments_are_adjacent(first_segment, separate));
+
+        let bow_tie = vec![
+            PointD::new(0.0, 0.0),
+            PointD::new(10.0, 10.0),
+            PointD::new(0.0, 10.0),
+            PointD::new(10.0, 0.0),
+        ];
+        assert_eq!(certify_non_zero_contours(&[bow_tie]), None);
 
         let too_many_contours = vec![positive.clone(); MAX_CERTIFIED_CONTOURS + 1];
         assert_eq!(certify_non_zero_contours(&too_many_contours), None);

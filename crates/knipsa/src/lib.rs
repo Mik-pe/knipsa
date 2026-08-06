@@ -19,7 +19,10 @@ pub use geometry::{
     simplify_paths64, translate_path_d, translate_path64, trim_collinear_d, trim_collinear64,
     validate_path64, validate_pathd, validate_paths_d, validate_paths64,
 };
-pub use offset::{EndType, JoinType, OffsetOptions, offset_paths, offset_paths_d, offset_paths64};
+pub use offset::{
+    EndType, JoinType, OffsetOptions, offset_path_d, offset_path64, offset_paths,
+    offset_paths_d, offset_paths64,
+};
 pub use request::{
     BooleanRequest, BooleanRequestD, ClipType, FillRule, boolean_op, boolean_opd, difference,
     difference_d, difference_path, difference_path_d, intersection, intersection_d,

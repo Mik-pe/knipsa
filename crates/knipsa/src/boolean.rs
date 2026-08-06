@@ -2,10 +2,11 @@
 //!
 //! The implementation deliberately keeps the numerical model separate from
 //! the public coordinate types. Input coordinates become reduced arbitrary
-//! precision rationals, all crossings are inserted into the arrangement, and
-//! the two sides of every atomic edge are classified before output rings are
-//! traced. This makes the first kernel easy to audit and gives the later
-//! sweep-line optimization a differential oracle.
+//! precision rationals and all crossings are inserted into the arrangement.
+//! Coincident atomic edges are merged algebraically, one exact seed labels each
+//! disconnected dual component, and winding is propagated across faces before
+//! output rings are traced. Ambiguous embeddings fail closed to the independent
+//! per-edge exact side classifier.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -477,19 +478,28 @@ fn run_boolean(
 
     let atomic_edges = split_source_edges(&edges, &mut split_parameters, &edge_subjects);
     let epsilon = Rational::new(BigInt::one(), BigInt::one() << sample_bits);
-    let directed =
-        try_face_boundary(&atomic_edges, subjects, clips, clip_type, fill_rule, &epsilon)
-            .unwrap_or_else(|| {
-                sample_atomic_boundary(
-                    &atomic_edges,
-                    subjects,
-                    clips,
-                    clip_type,
-                    fill_rule,
-                    &epsilon,
-                )
-            });
+    let directed = select_atomic_boundary(
+        &atomic_edges,
+        subjects,
+        clips,
+        clip_type,
+        fill_rule,
+        &epsilon,
+    );
     stitch_directed_edges(&directed)
+}
+
+fn select_atomic_boundary(
+    atomic_edges: &[AtomicEdge],
+    subjects: &[ExactPath],
+    clips: &[ExactPath],
+    clip_type: ClipType,
+    fill_rule: FillRule,
+    epsilon: &Rational,
+) -> Vec<DirectedEdge> {
+    try_face_boundary(atomic_edges, subjects, clips, clip_type, fill_rule, epsilon).unwrap_or_else(
+        || sample_atomic_boundary(atomic_edges, subjects, clips, clip_type, fill_rule, epsilon),
+    )
 }
 
 fn sample_atomic_boundary(
@@ -837,8 +847,8 @@ fn try_face_boundary(
     if arrangement.is_empty() {
         return Some(Vec::new());
     }
-    let (face_of, face_count) = build_face_cycles(&arrangement)?;
-    let mut links = vec![Vec::new(); face_count];
+    let (face_of, face_seeds) = build_face_cycles(&arrangement)?;
+    let mut links = vec![Vec::new(); face_seeds.len()];
     for (index, edge) in arrangement.iter().enumerate() {
         let left = face_of[index * 2];
         let right = face_of[index * 2 + 1];
@@ -857,9 +867,11 @@ fn try_face_boundary(
         });
     }
 
-    let mut labels = vec![None; face_count];
-    while let Some(seed_face) = labels.iter().position(Option::is_none) {
-        let half_edge = face_of.iter().position(|face| *face == seed_face)?;
+    let mut labels = vec![None; face_seeds.len()];
+    for (seed_face, &half_edge) in face_seeds.iter().enumerate() {
+        if labels[seed_face].is_some() {
+            continue;
+        }
         let (left_winding, right_winding) =
             sample_face_pair(half_edge, &arrangement, subjects, clips, epsilon)?;
         let left = face_of[half_edge];
@@ -924,12 +936,18 @@ fn merge_atomic_edges(atomic_edges: &[AtomicEdge]) -> Option<Vec<ArrangementEdge
     )
 }
 
-fn build_face_cycles(edges: &[ArrangementEdge]) -> Option<(Vec<usize>, usize)> {
+fn build_face_cycles(edges: &[ArrangementEdge]) -> Option<(Vec<usize>, Vec<usize>)> {
+    let half_edge_count = edges.len().checked_mul(2)?;
     let mut outgoing: BTreeMap<ExactPoint, Vec<usize>> = BTreeMap::new();
     for (index, edge) in edges.iter().enumerate() {
         outgoing.entry(edge.start.clone()).or_default().push(index * 2);
         outgoing.entry(edge.end.clone()).or_default().push(index * 2 + 1);
     }
+
+    // Remember each half-edge's rank in its origin fan while sorting. Looking
+    // up the twin's predecessor is then O(1), including at high-valence
+    // vertex-touch junctions, rather than a linear scan of the fan per edge.
+    let mut fan_position = vec![usize::MAX; half_edge_count];
     for (origin, half_edges) in &mut outgoing {
         half_edges.sort_by(|left, right| {
             compare_angle(
@@ -937,36 +955,39 @@ fn build_face_cycles(edges: &[ArrangementEdge]) -> Option<(Vec<usize>, usize)> {
                 &half_edge_end(edges, *right).sub(origin),
             )
         });
+        for (position, &half_edge) in half_edges.iter().enumerate() {
+            fan_position[half_edge] = position;
+        }
     }
 
-    let mut next = vec![usize::MAX; edges.len() * 2];
+    let mut next = vec![usize::MAX; half_edge_count];
     for (half_edge, next_edge) in next.iter_mut().enumerate() {
         let candidates = outgoing.get(half_edge_end(edges, half_edge))?;
-        let twin = half_edge ^ 1;
-        let twin_position = candidates.iter().position(|candidate| *candidate == twin)?;
+        let twin_position = fan_position[half_edge ^ 1];
         *next_edge = candidates[(twin_position + candidates.len() - 1) % candidates.len()];
     }
 
-    let mut face_of = vec![usize::MAX; edges.len() * 2];
-    let mut face_count = 0;
+    let mut face_of = vec![usize::MAX; half_edge_count];
+    let mut face_seeds = Vec::new();
     for start in 0..face_of.len() {
         if face_of[start] != usize::MAX {
             continue;
         }
+        let face = face_seeds.len();
+        face_seeds.push(start);
         let mut current = start;
         loop {
             if face_of[current] != usize::MAX {
-                if current != start {
-                    return None;
-                }
+                // The half-edge successor is a permutation: every outgoing
+                // half-edge is the predecessor of exactly one twin at its
+                // destination. A walk can therefore only close at its start.
                 break;
             }
-            face_of[current] = face_count;
+            face_of[current] = face;
             current = next[current];
         }
-        face_count += 1;
     }
-    Some((face_of, face_count))
+    Some((face_of, face_seeds))
 }
 
 fn half_edge_start(edges: &[ArrangementEdge], half_edge: usize) -> &ExactPoint {
@@ -1498,6 +1519,296 @@ mod tests {
 
     fn exact_directed(start: (i64, i64), end: (i64, i64)) -> DirectedEdge {
         DirectedEdge { start: exact_point(start.0, start.1), end: exact_point(end.0, end.1) }
+    }
+
+    fn exact_path(points: &[(i64, i64)]) -> ExactPath {
+        points.iter().map(|&(x, y)| exact_point(x, y)).collect()
+    }
+
+    fn noded_atomic_edges(subjects: &[ExactPath], clips: &[ExactPath]) -> Vec<AtomicEdge> {
+        let mut edges = Vec::new();
+        let mut owners = Vec::new();
+        for (paths, subject) in [(subjects, true), (clips, false)] {
+            for path in paths {
+                for (start, end) in
+                    path.iter().zip(path.iter().cycle().skip(1)).take(path.len())
+                {
+                    if start != end {
+                        edges.push(Edge::new(start.clone(), end.clone()));
+                        owners.push(subject);
+                    }
+                }
+            }
+        }
+        let mut parameters = vec![vec![Rational::zero(), Rational::one()]; edges.len()];
+        for first in 0..edges.len() {
+            for second in first + 1..edges.len() {
+                let (before, after) = parameters.split_at_mut(second);
+                split_edge_pair(&edges[first], &edges[second], &mut before[first], &mut after[0]);
+            }
+        }
+        split_source_edges(&edges, &mut parameters, &owners)
+    }
+
+    #[test]
+    fn certified_face_overlay_handles_diagonal_crossings_and_vertex_touch() {
+        let epsilon = Rational::new(BigInt::one(), BigInt::one() << INTEGER_SAMPLE_BITS);
+        let bow_tie = exact_path(&[(0, 0), (20, 20), (0, 20), (20, 0)]);
+        let bow_tie_subjects = [bow_tie];
+        let bow_tie_atoms = noded_atomic_edges(&bow_tie_subjects, &[]);
+        let bow_tie_boundary = try_face_boundary(
+            &bow_tie_atoms,
+            &bow_tie_subjects,
+            &[],
+            ClipType::Union,
+            FillRule::EvenOdd,
+            &epsilon,
+        )
+        .expect("a noded diagonal bow-tie has a certified face overlay");
+        let bow_tie_oracle = sample_atomic_boundary(
+            &bow_tie_atoms,
+            &bow_tie_subjects,
+            &[],
+            ClipType::Union,
+            FillRule::EvenOdd,
+            &epsilon,
+        );
+        let bow_tie_result = exact_paths_to_i64(
+            &stitch_directed_edges(&bow_tie_boundary).expect("certified boundary closes"),
+        )
+        .expect("integer bow-tie result");
+        let bow_tie_oracle = exact_paths_to_i64(
+            &stitch_directed_edges(&bow_tie_oracle).expect("oracle boundary closes"),
+        )
+        .expect("integer oracle result");
+        assert_eq!(canonical_summary(&bow_tie_result), canonical_summary(&bow_tie_oracle));
+        assert_eq!(bow_tie_result.len(), 2);
+        assert_eq!(area_sum(&bow_tie_result), 400);
+
+        // These two triangles share exactly one non-axis-aligned support
+        // vertex while their axis-aligned bounds overlap in both dimensions.
+        // This prevents the bbox short-circuit from hiding the vertex fan.
+        let left = exact_path(&[(0, 0), (-10, -1), (1, 10)]);
+        let right = exact_path(&[(0, 0), (10, 1), (-1, -10)]);
+        let subjects = [left];
+        let clips = [right];
+        let atoms = noded_atomic_edges(&subjects, &clips);
+        let boundary = try_face_boundary(
+            &atoms,
+            &subjects,
+            &clips,
+            ClipType::Xor,
+            FillRule::EvenOdd,
+            &epsilon,
+        )
+        .expect("a shared-vertex fan has a certified face overlay");
+        let certified = exact_paths_to_i64(
+            &stitch_directed_edges(&boundary).expect("shared-vertex boundary closes"),
+        )
+        .expect("integer shared-vertex result");
+        let oracle_boundary = sample_atomic_boundary(
+            &atoms,
+            &subjects,
+            &clips,
+            ClipType::Xor,
+            FillRule::EvenOdd,
+            &epsilon,
+        );
+        let oracle = exact_paths_to_i64(
+            &stitch_directed_edges(&oracle_boundary).expect("oracle boundary closes"),
+        )
+        .expect("integer oracle result");
+        assert_eq!(canonical_summary(&certified), canonical_summary(&oracle));
+        assert_eq!(certified.len(), 2);
+        assert_eq!(certified.iter().map(|path| signed_area2(path).unwrap().abs()).sum::<i128>(), 198);
+
+        // Eight disjoint wedges meet only at the origin. The arrangement keeps
+        // sixteen outgoing half-edges there, exercising the high-valence fan
+        // path without shared radial edges cancelling before topology build.
+        let wedges = vec![
+            exact_path(&[(0, 0), (10, -1), (10, 1)]),
+            exact_path(&[(0, 0), (9, 7), (7, 9)]),
+            exact_path(&[(0, 0), (1, 10), (-1, 10)]),
+            exact_path(&[(0, 0), (-7, 9), (-9, 7)]),
+            exact_path(&[(0, 0), (-10, 1), (-10, -1)]),
+            exact_path(&[(0, 0), (-9, -7), (-7, -9)]),
+            exact_path(&[(0, 0), (-1, -10), (1, -10)]),
+            exact_path(&[(0, 0), (7, -9), (9, -7)]),
+        ];
+        let wedge_atoms = noded_atomic_edges(&wedges, &[]);
+        let wedge_arrangement = merge_atomic_edges(&wedge_atoms).expect("wedge arrangement");
+        assert_eq!(
+            wedge_arrangement
+                .iter()
+                .filter(|edge| edge.start == exact_point(0, 0) || edge.end == exact_point(0, 0))
+                .count(),
+            16
+        );
+        let wedge_boundary = try_face_boundary(
+            &wedge_atoms,
+            &wedges,
+            &[],
+            ClipType::Union,
+            FillRule::EvenOdd,
+            &epsilon,
+        )
+        .expect("the high-valence vertex fan is certifiable");
+        let wedge_oracle = sample_atomic_boundary(
+            &wedge_atoms,
+            &wedges,
+            &[],
+            ClipType::Union,
+            FillRule::EvenOdd,
+            &epsilon,
+        );
+        let wedge_result = stitch_directed_edges(&wedge_boundary).expect("wedge boundary closes");
+        let wedge_oracle = stitch_directed_edges(&wedge_oracle).expect("wedge oracle closes");
+        assert_eq!(canonical_summary(&wedge_result), canonical_summary(&wedge_oracle));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn certified_face_overlay_fails_closed_to_exact_sampling() {
+        let epsilon = Rational::new(BigInt::one(), BigInt::one() << INTEGER_SAMPLE_BITS);
+        assert!(try_face_boundary(
+            &[],
+            &[],
+            &[],
+            ClipType::Union,
+            FillRule::EvenOdd,
+            &epsilon,
+        )
+        .is_some_and(|boundary| boundary.is_empty()));
+
+        // A single bridge has the same face on both sides. It is deliberately
+        // not a valid polygon arrangement, but it is a compact proof that the
+        // selector rejects ambiguous topology and invokes the exact oracle.
+        let bridge = AtomicEdge {
+            start: exact_point(0, 0),
+            end: exact_point(10, 0),
+            subject: true,
+        };
+        assert!(try_face_boundary(
+            std::slice::from_ref(&bridge),
+            &[],
+            &[],
+            ClipType::Union,
+            FillRule::EvenOdd,
+            &epsilon,
+        )
+        .is_none());
+        assert!(select_atomic_boundary(
+            std::slice::from_ref(&bridge),
+            &[],
+            &[],
+            ClipType::Union,
+            FillRule::EvenOdd,
+            &epsilon,
+        )
+        .is_empty());
+
+        let subject = [exact_path(&[(0, 0), (10, 0), (10, 10), (0, 10)])];
+        let bottom = AtomicEdge {
+            start: exact_point(0, 0),
+            end: exact_point(10, 0),
+            subject: true,
+        };
+        let reverse = AtomicEdge {
+            start: bottom.end.clone(),
+            end: bottom.start.clone(),
+            subject: true,
+        };
+        let sampled = sample_atomic_boundary(
+            &[bottom, reverse],
+            &subject,
+            &[],
+            ClipType::Union,
+            FillRule::EvenOdd,
+            &epsilon,
+        );
+        assert_eq!(sampled.len(), 1);
+        assert_eq!(sampled[0].start, exact_point(0, 0));
+        assert_eq!(sampled[0].end, exact_point(10, 0));
+
+        let arrangement = [ArrangementEdge {
+            start: exact_point(0, 0),
+            end: exact_point(10, 0),
+            subject_delta: 1,
+            clip_delta: 0,
+        }];
+        assert_eq!(
+            half_edge_delta(&arrangement, 1),
+            Some(WindingPair { subject: -1, clip: 0 })
+        );
+        let subject_overflow = [ArrangementEdge {
+            subject_delta: i128::MIN,
+            ..arrangement[0].clone()
+        }];
+        assert!(half_edge_delta(&subject_overflow, 1).is_none());
+        let clip_overflow = [ArrangementEdge {
+            subject_delta: 0,
+            clip_delta: i128::MIN,
+            ..arrangement[0].clone()
+        }];
+        assert!(half_edge_delta(&clip_overflow, 1).is_none());
+        assert!(sample_face_pair(0, &arrangement, &[], &[], &epsilon).is_none());
+
+        let crossing = [
+            arrangement[0].clone(),
+            ArrangementEdge {
+                start: exact_point(5, -5),
+                end: exact_point(5, 5),
+                subject_delta: 0,
+                clip_delta: 1,
+            },
+        ];
+        assert!(!probe_is_clear(
+            &exact_point(5, -1),
+            &exact_point(5, 1),
+            1,
+            &crossing,
+        ));
+
+        let mut labels = vec![None];
+        let mut queue = VecDeque::new();
+        let winding = WindingPair { subject: 1, clip: 0 };
+        assert_eq!(assign_face_label(&mut labels, 0, winding, &mut queue), Some(()));
+        assert_eq!(assign_face_label(&mut labels, 0, winding, &mut queue), Some(()));
+        assert_eq!(
+            assign_face_label(
+                &mut labels,
+                0,
+                WindingPair { subject: 0, clip: 1 },
+                &mut queue,
+            ),
+            None
+        );
+
+        let inside_subject = exact_point(5, 5);
+        let inside_clip = exact_point(25, 5);
+        let subjects = [exact_path(&[(0, 0), (10, 0), (10, 10), (0, 10)])];
+        let clips = [exact_path(&[(20, 0), (30, 0), (30, 10), (20, 10)])];
+        assert!(!operation_contains(
+            &inside_subject,
+            &subjects,
+            &clips,
+            ClipType::Intersection,
+            FillRule::EvenOdd,
+        ));
+        assert!(operation_contains(
+            &inside_clip,
+            &subjects,
+            &clips,
+            ClipType::Union,
+            FillRule::EvenOdd,
+        ));
+        assert!(!operation_contains(
+            &inside_clip,
+            &subjects,
+            &clips,
+            ClipType::Difference,
+            FillRule::EvenOdd,
+        ));
     }
 
     #[test]
