@@ -1,3 +1,4 @@
+# Branch-local validation trigger. Remove before opening the PR.
 name: Agent validation
 
 on:
