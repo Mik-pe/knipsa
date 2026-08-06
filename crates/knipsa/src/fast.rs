@@ -235,6 +235,9 @@ impl ConvexIndex<'_> {
 }
 
 pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<PathsD, ()>> {
+    if let Some(result) = try_rectangle_arrangement(request) {
+        return Some(result.map_err(|_| ()));
+    }
     if !fast_pair_is_provably_safe(&request) {
         return None;
     }
@@ -244,6 +247,185 @@ pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<Pat
     let subjects = fast_paths(request.subjects)?;
     let clips = fast_paths(request.clips)?;
     Some(run(&subjects, &clips, request.clip_type, request.fill_rule).map_err(|_| ()))
+}
+
+#[derive(Clone, Copy)]
+struct AxisRect {
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+    winding: i32,
+}
+
+/// Uses coordinate compression and a two-dimensional difference array for a
+/// rectangle set. This avoids sending a common layout/GIS workload through
+/// the general exact arrangement while preserving every fill rule.
+fn try_rectangle_arrangement(request: BooleanRequestD<'_>) -> Option<Result<PathsD, Error>> {
+    if request.subjects.len() + request.clips.len() < 2
+        || !eligible(request.subjects, request.clips)
+    {
+        return None;
+    }
+    let subjects =
+        request.subjects.iter().map(|path| axis_rectangle(path)).collect::<Option<Vec<_>>>()?;
+    let clips =
+        request.clips.iter().map(|path| axis_rectangle(path)).collect::<Option<Vec<_>>>()?;
+    let mut xs =
+        subjects.iter().chain(&clips).flat_map(|rect| [rect.min_x, rect.max_x]).collect::<Vec<_>>();
+    let mut ys =
+        subjects.iter().chain(&clips).flat_map(|rect| [rect.min_y, rect.max_y]).collect::<Vec<_>>();
+    xs.sort_unstable_by(f64::total_cmp);
+    ys.sort_unstable_by(f64::total_cmp);
+    xs.dedup_by(|left, right| left.to_bits() == right.to_bits());
+    ys.dedup_by(|left, right| left.to_bits() == right.to_bits());
+
+    let height = ys.len();
+    let grid_size = xs.len().checked_mul(height)?;
+    let mut subject_difference = vec![0_i32; grid_size];
+    let mut clip_difference = vec![0_i32; grid_size];
+    for rect in subjects {
+        add_rectangle_difference(&mut subject_difference, height, &xs, &ys, rect)?;
+    }
+    for rect in clips {
+        add_rectangle_difference(&mut clip_difference, height, &xs, &ys, rect)?;
+    }
+    prefix_sum(&mut subject_difference, xs.len(), height);
+    prefix_sum(&mut clip_difference, xs.len(), height);
+
+    let mut boundary: FastMap<(PointKey, PointKey), DirectedEdge> =
+        FastMap::with_capacity_and_hasher(xs.len() * ys.len(), BuildHasherDefault::default());
+    for x in 0..xs.len() - 1 {
+        for y in 0..ys.len() - 1 {
+            let index = x * height + y;
+            let subject = fill_contains(subject_difference[index], request.fill_rule);
+            let clip = fill_contains(clip_difference[index], request.fill_rule);
+            if apply_operation(subject, clip, request.clip_type) {
+                add_cell_boundary(&mut boundary, xs[x], ys[y], xs[x + 1], ys[y + 1])?;
+            }
+        }
+    }
+    Some(finish_rectangle_boundary(boundary))
+}
+
+fn finish_rectangle_boundary(
+    boundary: FastMap<(PointKey, PointKey), DirectedEdge>,
+) -> Result<PathsD, Error> {
+    stitch(&boundary.into_values().collect::<Vec<_>>())?
+        .into_iter()
+        .map(|path| crate::trim_collinear_d(&path, crate::PathKind::Closed))
+        .collect()
+}
+
+fn add_rectangle_difference(
+    difference: &mut [i32],
+    height: usize,
+    xs: &[f64],
+    ys: &[f64],
+    rect: AxisRect,
+) -> Option<()> {
+    let x0 = xs.binary_search_by(|value| value.total_cmp(&rect.min_x)).ok()?;
+    let x1 = xs.binary_search_by(|value| value.total_cmp(&rect.max_x)).ok()?;
+    let y0 = ys.binary_search_by(|value| value.total_cmp(&rect.min_y)).ok()?;
+    let y1 = ys.binary_search_by(|value| value.total_cmp(&rect.max_y)).ok()?;
+    add_difference(difference, height, x0, y0, rect.winding);
+    add_difference(difference, height, x1, y0, -rect.winding);
+    add_difference(difference, height, x0, y1, -rect.winding);
+    add_difference(difference, height, x1, y1, rect.winding);
+    Some(())
+}
+
+fn prefix_sum(difference: &mut [i32], width: usize, height: usize) {
+    for x in 0..width {
+        for y in 0..height {
+            let index = x * height + y;
+            if x > 0 {
+                difference[index] += difference[(x - 1) * height + y];
+            }
+            if y > 0 {
+                difference[index] += difference[x * height + y - 1];
+            }
+            if x > 0 && y > 0 {
+                difference[index] -= difference[(x - 1) * height + y - 1];
+            }
+        }
+    }
+}
+
+#[allow(clippy::similar_names)]
+fn axis_rectangle(path: &[Point]) -> Option<AxisRect> {
+    if path.len() != 4 {
+        return None;
+    }
+    let (min_x, min_y, max_x, max_y) = point_bounds(path);
+    let (min_x, min_y, max_x, max_y) = (min_x + 0.0, min_y + 0.0, max_x + 0.0, max_y + 0.0);
+    if min_x >= max_x || min_y >= max_y {
+        return None;
+    }
+    let mut corners = FastSet::with_capacity_and_hasher(4, BuildHasherDefault::default());
+    let min_x_key = key(Point { x: min_x, y: 0.0 })?.x;
+    let max_x_key = key(Point { x: max_x, y: 0.0 })?.x;
+    let min_y_key = key(Point { x: 0.0, y: min_y })?.y;
+    let max_y_key = key(Point { x: 0.0, y: max_y })?.y;
+    for point in path {
+        let point_key = key(*point)?;
+        if (point_key.x != min_x_key && point_key.x != max_x_key)
+            || (point_key.y != min_y_key && point_key.y != max_y_key)
+        {
+            return None;
+        }
+        corners.insert(point_key);
+    }
+    if corners.len() != 4
+        || path.iter().zip(path.iter().cycle().skip(1)).any(|(start, end)| {
+            let start = key(*start).expect("rectangle points were keyed above");
+            let end = key(*end).expect("rectangle points were keyed above");
+            start.x != end.x && start.y != end.y
+        })
+    {
+        return None;
+    }
+    let winding = if area2(path).is_sign_positive() { 1 } else { -1 };
+    Some(AxisRect { min_x, min_y, max_x, max_y, winding })
+}
+
+fn add_difference(values: &mut [i32], height: usize, x: usize, y: usize, delta: i32) {
+    values[x * height + y] += delta;
+}
+
+fn fill_contains(winding: i32, fill_rule: FillRule) -> bool {
+    match fill_rule {
+        FillRule::EvenOdd => winding.unsigned_abs() % 2 == 1,
+        FillRule::NonZero => winding != 0,
+        FillRule::Positive => winding > 0,
+        FillRule::Negative => winding < 0,
+    }
+}
+
+fn add_cell_boundary(
+    boundary: &mut FastMap<(PointKey, PointKey), DirectedEdge>,
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+) -> Option<()> {
+    let bottom_left = Point { x: min_x, y: min_y };
+    let bottom_right = Point { x: max_x, y: min_y };
+    let top_right = Point { x: max_x, y: max_y };
+    let top_left = Point { x: min_x, y: max_y };
+    for (start, end) in [
+        (bottom_left, bottom_right),
+        (bottom_right, top_right),
+        (top_right, top_left),
+        (top_left, bottom_left),
+    ] {
+        let start_key = key(start)?;
+        let end_key = key(end)?;
+        if boundary.remove(&(end_key, start_key)).is_none() {
+            boundary.insert((start_key, end_key), DirectedEdge { start, end, start_key, end_key });
+        }
+    }
+    Some(())
 }
 
 /// The public fast path is intentionally narrower than the internal sweep
@@ -2099,6 +2281,91 @@ mod tests {
         };
         assert_eq!(summary(&fast), summary(&exact));
         assert!(try_boolean_opd(request).expect("rounded input is eligible").is_ok());
+    }
+
+    #[test]
+    fn rectangle_set_kernel_matches_exact_fill_rules() {
+        let mut reversed =
+            vec![point(12.0, 2.0), point(22.0, 2.0), point(22.0, 14.0), point(12.0, 14.0)];
+        reversed.reverse();
+        let subjects = [
+            vec![point(0.0, 0.0), point(10.0, 0.0), point(10.0, 12.0), point(0.0, 12.0)],
+            vec![point(6.0, 2.0), point(16.0, 2.0), point(16.0, 14.0), point(6.0, 14.0)],
+            reversed,
+        ];
+        let summary = |paths: &PathsD| {
+            let mut values = paths
+                .iter()
+                .map(|path| (path.len(), (area2(path).abs() * 1_000_000.0).round().to_bits()))
+                .collect::<Vec<_>>();
+            values.sort_unstable();
+            values
+        };
+        for fill_rule in
+            [FillRule::EvenOdd, FillRule::NonZero, FillRule::Positive, FillRule::Negative]
+        {
+            let request = BooleanRequestD {
+                subjects: &subjects,
+                clips: &[],
+                clip_type: ClipType::Union,
+                fill_rule,
+            };
+            let fast = try_rectangle_arrangement(request)
+                .expect("rectangle set should be recognized")
+                .expect("rectangle boundary should close");
+            let exact = crate::boolean::boolean_opd_exact(request).expect("exact oracle");
+            assert_eq!(summary(&fast), summary(&exact), "fill rule: {fill_rule:?}");
+        }
+
+        assert!(axis_rectangle(&subjects[0][..3]).is_none());
+        assert!(axis_rectangle(&[point(0.0, 0.0); 4]).is_none());
+        assert!(
+            axis_rectangle(&[point(0.0, 0.0), point(0.0, 1.0), point(0.0, 2.0), point(0.0, 3.0),])
+                .is_none()
+        );
+        assert!(
+            axis_rectangle(&[point(0.0, 0.0), point(1.0, 0.0), point(2.0, 0.0), point(3.0, 0.0),])
+                .is_none()
+        );
+        assert!(
+            axis_rectangle(&[point(0.0, 0.0), point(2.0, 0.0), point(1.0, 1.0), point(0.0, 2.0),])
+                .is_none()
+        );
+        assert!(
+            axis_rectangle(&[point(0.0, 0.0), point(2.0, 0.0), point(2.0, 1.0), point(0.0, 3.0),])
+                .is_none()
+        );
+        assert!(
+            axis_rectangle(&[point(0.0, 0.0), point(2.0, 0.0), point(2.0, 2.0), point(2.0, 2.0),])
+                .is_none()
+        );
+        assert!(
+            axis_rectangle(&[point(0.0, 0.0), point(2.0, 2.0), point(2.0, 0.0), point(0.0, 2.0),])
+                .is_none()
+        );
+
+        let mut malformed = FastMap::with_capacity_and_hasher(1, BuildHasherDefault::default());
+        let open = directed(point(0.0, 0.0), point(1.0, 0.0));
+        malformed.insert((open.start_key, open.end_key), open);
+        assert!(finish_rectangle_boundary(malformed).is_err());
+
+        let positive = vec![point(0.0, 0.0), point(3.0, 0.0), point(1.0, 3.0)];
+        let mut negative = positive.clone();
+        negative.reverse();
+        for (subjects, clips) in [
+            (std::slice::from_ref(&negative), std::slice::from_ref(&positive)),
+            (std::slice::from_ref(&positive), std::slice::from_ref(&negative)),
+        ] {
+            let request = BooleanRequestD {
+                subjects,
+                clips,
+                clip_type: ClipType::Union,
+                fill_rule: FillRule::Positive,
+            };
+            assert!(try_single_convex_boolean(request).is_none());
+            assert!(run(subjects, clips, ClipType::Union, FillRule::Positive).is_ok());
+            let _ = convex_boolean(&subjects[0], &clips[0], ClipType::Union, None);
+        }
     }
 
     fn point(x: f64, y: f64) -> Point {

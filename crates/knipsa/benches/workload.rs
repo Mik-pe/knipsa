@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 
-use std::{hint::black_box, time::Instant};
+use std::{env, fs, hint::black_box, time::Instant};
 
 use knipsa::{BooleanRequestD, ClipType, FillRule, PathD, PathsD, PointD, boolean_opd};
 use serde::{Deserialize, Serialize};
@@ -43,7 +43,11 @@ struct RingRecord {
 }
 
 fn main() {
-    let workload: Workload = serde_json::from_str(WORKLOAD).expect("valid workload JSON");
+    let workload_json = env::var_os("KNIPSA_WORKLOAD").map_or_else(
+        || WORKLOAD.to_owned(),
+        |path| fs::read_to_string(path).expect("read KNIPSA_WORKLOAD"),
+    );
+    let workload: Workload = serde_json::from_str(&workload_json).expect("valid workload JSON");
     assert_eq!(workload.schema, "knipsa-workload-v1");
     println!(
         "{{\"implementation\":\"knipsa\",\"samples\":{SAMPLE_RUNS},\"warmups\":{WARMUP_RUNS}}}"

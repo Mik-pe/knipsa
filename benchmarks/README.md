@@ -49,6 +49,22 @@ python3 scripts/compare-benchmark-results.py \
   target/conformance/clipper2.jsonl
 ```
 
+For deterministic multi-outline scaling checks, generate the 4/8/16/32-ring
+overlap chains and run the same harness:
+
+```sh
+./scripts/generate-scale-workloads.py target/overlap-scale.json
+./scripts/run-conformance.sh \
+  target/overlap-scale.json target/conformance-overlap-scale "clipper2 geos"
+```
+
+The optional third argument selects reference adapters. These cases use the
+non-zero fill rule, where Clipper2 and GEOS agree on their canonical filled
+regions. Martinez 0.8.1 does not, so it is deliberately excluded from this
+matrix rather than treated as a Knipsa regression.
+The generated workload is kept under `target/`; the generator is the durable,
+reviewable fixture.
+
 Reference adapters are comparison tools only; they are not runtime
 dependencies of knipsa.
 
