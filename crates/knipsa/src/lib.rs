@@ -5,8 +5,9 @@
 
 mod boolean;
 mod error;
-#[path = "fast_dispatch.rs"]
+#[path = "standard_dispatch.rs"]
 mod fast;
+mod fast_dispatch;
 mod geometry;
 mod offset;
 mod request;
@@ -45,7 +46,7 @@ pub use triangulation::{
 pub enum PathKind {
     /// A path whose edges wrap from the final point to the first.
     Closed,
-    /// A path whose final point is not connected back to the first.
+    /// A path whose final point is not connected back to its first.
     Open,
 }
 
