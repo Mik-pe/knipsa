@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   apply:
-    if: github.actor != 'github-actions[bot]]'
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +54,8 @@ jobs:
         shell: bash
         run: |
           set +e
+          rm -rf target/llvm-cov-target target/coverage
+          find . -type f -name '*.profraw' -delete
           ./scripts/coverage.sh
           status=$?
           if [[ -f target/coverage/lcov.info ]]; then
