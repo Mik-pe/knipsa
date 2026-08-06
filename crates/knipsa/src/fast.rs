@@ -16,6 +16,7 @@ const MAX_COORDINATE: f64 = 1_000_000.0;
 const PREDICATE_TOLERANCE: f64 = 1.0e-12;
 const SAMPLE_SCALE: f64 = 1.0e-9;
 const MAX_CONTAINMENT_BUCKETS: usize = 64;
+const MAX_ORTHOGONAL_GRID_POINTS: usize = 1_000_000;
 
 #[derive(Default)]
 struct FastHasher(u64);
@@ -235,7 +236,7 @@ impl ConvexIndex<'_> {
 }
 
 pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<PathsD, ()>> {
-    if let Some(result) = try_rectangle_arrangement(request) {
+    if let Some(result) = try_orthogonal_arrangement(request) {
         return Some(result.map_err(|_| ()));
     }
     if !fast_pair_is_provably_safe(&request) {
@@ -250,65 +251,64 @@ pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<Pat
 }
 
 #[derive(Clone, Copy)]
-struct AxisRect {
-    min_x: f64,
-    min_y: f64,
-    max_x: f64,
-    max_y: f64,
-    winding: i32,
+struct GridCoordinate {
+    key: i64,
+    value: f64,
 }
 
-/// Uses coordinate compression and a two-dimensional difference array for a
-/// rectangle set. This avoids sending a common layout/GIS workload through
-/// the general exact arrangement while preserving every fill rule.
-fn try_rectangle_arrangement(request: BooleanRequestD<'_>) -> Option<Result<PathsD, Error>> {
-    if request.subjects.len() + request.clips.len() < 2
+/// Resolves rectilinear input with coordinate compression and integer winding
+/// range updates. Diagonal, over-large, or quantization-ambiguous input is
+/// rejected so the exact arrangement remains the conservative fallback.
+fn try_orthogonal_arrangement(request: BooleanRequestD<'_>) -> Option<Result<PathsD, Error>> {
+    if (request.subjects.is_empty() && request.clips.is_empty())
         || !eligible(request.subjects, request.clips)
     {
         return None;
     }
-    let subjects =
-        request.subjects.iter().map(|path| axis_rectangle(path)).collect::<Option<Vec<_>>>()?;
-    let clips =
-        request.clips.iter().map(|path| axis_rectangle(path)).collect::<Option<Vec<_>>>()?;
-    let mut xs =
-        subjects.iter().chain(&clips).flat_map(|rect| [rect.min_x, rect.max_x]).collect::<Vec<_>>();
-    let mut ys =
-        subjects.iter().chain(&clips).flat_map(|rect| [rect.min_y, rect.max_y]).collect::<Vec<_>>();
-    xs.sort_unstable_by(f64::total_cmp);
-    ys.sort_unstable_by(f64::total_cmp);
-    xs.dedup_by(|left, right| left.to_bits() == right.to_bits());
-    ys.dedup_by(|left, right| left.to_bits() == right.to_bits());
+    let subjects = fast_paths(request.subjects)?;
+    let clips = fast_paths(request.clips)?;
+    if !subjects.iter().chain(&clips).all(|path| orthogonal_path(path.points())) {
+        return None;
+    }
+    let (xs, ys) = grid_coordinates(&subjects, &clips)?;
 
     let height = ys.len();
-    let grid_size = xs.len().checked_mul(height)?;
+    let grid_size = orthogonal_grid_size(xs.len(), height)?;
     let mut subject_difference = vec![0_i32; grid_size];
     let mut clip_difference = vec![0_i32; grid_size];
-    for rect in subjects {
-        add_rectangle_difference(&mut subject_difference, height, &xs, &ys, rect)?;
+    for path in &subjects {
+        add_orthogonal_path(&mut subject_difference, height, &xs, &ys, path.points())?;
     }
-    for rect in clips {
-        add_rectangle_difference(&mut clip_difference, height, &xs, &ys, rect)?;
+    for path in &clips {
+        add_orthogonal_path(&mut clip_difference, height, &xs, &ys, path.points())?;
     }
     prefix_sum(&mut subject_difference, xs.len(), height);
     prefix_sum(&mut clip_difference, xs.len(), height);
 
+    let edge_count = subjects.iter().chain(&clips).map(|path| path.points().len()).sum::<usize>();
     let mut boundary: FastMap<(PointKey, PointKey), DirectedEdge> =
-        FastMap::with_capacity_and_hasher(xs.len() * ys.len(), BuildHasherDefault::default());
+        FastMap::with_capacity_and_hasher(
+            edge_count.saturating_mul(4),
+            BuildHasherDefault::default(),
+        );
     for x in 0..xs.len() - 1 {
         for y in 0..ys.len() - 1 {
             let index = x * height + y;
             let subject = fill_contains(subject_difference[index], request.fill_rule);
             let clip = fill_contains(clip_difference[index], request.fill_rule);
             if apply_operation(subject, clip, request.clip_type) {
-                add_cell_boundary(&mut boundary, xs[x], ys[y], xs[x + 1], ys[y + 1])?;
+                add_cell_boundary(&mut boundary, xs[x], ys[y], xs[x + 1], ys[y + 1]);
             }
         }
     }
-    Some(finish_rectangle_boundary(boundary))
+    Some(finish_orthogonal_boundary(boundary))
 }
 
-fn finish_rectangle_boundary(
+fn orthogonal_grid_size(width: usize, height: usize) -> Option<usize> {
+    width.checked_mul(height).filter(|grid_size| *grid_size <= MAX_ORTHOGONAL_GRID_POINTS)
+}
+
+fn finish_orthogonal_boundary(
     boundary: FastMap<(PointKey, PointKey), DirectedEdge>,
 ) -> Result<PathsD, Error> {
     stitch(&boundary.into_values().collect::<Vec<_>>())?
@@ -317,22 +317,82 @@ fn finish_rectangle_boundary(
         .collect()
 }
 
-fn add_rectangle_difference(
+fn grid_coordinates(
+    subjects: &[FastPath<'_>],
+    clips: &[FastPath<'_>],
+) -> Option<(Vec<GridCoordinate>, Vec<GridCoordinate>)> {
+    let point_count = subjects.iter().chain(clips).map(|path| path.points().len()).sum::<usize>();
+    let mut xs = Vec::with_capacity(point_count);
+    let mut ys = Vec::with_capacity(point_count);
+    for point in subjects.iter().chain(clips).flat_map(PathSlice::points) {
+        let point_key = key(*point)?;
+        xs.push(GridCoordinate { key: point_key.x, value: point.x + 0.0 });
+        ys.push(GridCoordinate { key: point_key.y, value: point.y + 0.0 });
+    }
+    Some((dedup_coordinates(xs)?, dedup_coordinates(ys)?))
+}
+
+fn dedup_coordinates(mut coordinates: Vec<GridCoordinate>) -> Option<Vec<GridCoordinate>> {
+    coordinates.sort_unstable_by_key(|coordinate| coordinate.key);
+    let mut result: Vec<GridCoordinate> = Vec::with_capacity(coordinates.len());
+    for coordinate in coordinates {
+        if let Some(previous) = result.last() {
+            if previous.key == coordinate.key {
+                if previous.value.to_bits() != coordinate.value.to_bits() {
+                    return None;
+                }
+                continue;
+            }
+        }
+        result.push(coordinate);
+    }
+    (result.len() >= 2).then_some(result)
+}
+
+fn orthogonal_path(path: &[Point]) -> bool {
+    path.iter().zip(path.iter().cycle().skip(1)).take(path.len()).all(|(start, end)| {
+        let (Some(start), Some(end)) = (key(*start), key(*end)) else {
+            return false;
+        };
+        (start.x == end.x) != (start.y == end.y)
+    })
+}
+
+fn add_orthogonal_path(
     difference: &mut [i32],
     height: usize,
-    xs: &[f64],
-    ys: &[f64],
-    rect: AxisRect,
+    xs: &[GridCoordinate],
+    ys: &[GridCoordinate],
+    path: &[Point],
 ) -> Option<()> {
-    let x0 = xs.binary_search_by(|value| value.total_cmp(&rect.min_x)).ok()?;
-    let x1 = xs.binary_search_by(|value| value.total_cmp(&rect.max_x)).ok()?;
-    let y0 = ys.binary_search_by(|value| value.total_cmp(&rect.min_y)).ok()?;
-    let y1 = ys.binary_search_by(|value| value.total_cmp(&rect.max_y)).ok()?;
-    add_difference(difference, height, x0, y0, rect.winding);
-    add_difference(difference, height, x1, y0, -rect.winding);
-    add_difference(difference, height, x0, y1, -rect.winding);
-    add_difference(difference, height, x1, y1, rect.winding);
+    for (start, end) in path.iter().zip(path.iter().cycle().skip(1)).take(path.len()) {
+        let start_key = key(*start)?;
+        let end_key = key(*end)?;
+        if start_key.x != end_key.x {
+            continue;
+        }
+        let x = xs.binary_search_by_key(&start_key.x, |coordinate| coordinate.key).ok()?;
+        let start_y = ys.binary_search_by_key(&start_key.y, |coordinate| coordinate.key).ok()?;
+        let end_y = ys.binary_search_by_key(&end_key.y, |coordinate| coordinate.key).ok()?;
+        let (y0, y1, winding) =
+            if start_y < end_y { (start_y, end_y, 1) } else { (end_y, start_y, -1) };
+        add_range_difference(difference, height, x, y0, y1, winding);
+    }
     Some(())
+}
+
+fn add_range_difference(
+    values: &mut [i32],
+    height: usize,
+    x1: usize,
+    y0: usize,
+    y1: usize,
+    winding: i32,
+) {
+    add_difference(values, height, 0, y0, winding);
+    add_difference(values, height, x1, y0, -winding);
+    add_difference(values, height, 0, y1, -winding);
+    add_difference(values, height, x1, y1, winding);
 }
 
 fn prefix_sum(difference: &mut [i32], width: usize, height: usize) {
@@ -352,43 +412,6 @@ fn prefix_sum(difference: &mut [i32], width: usize, height: usize) {
     }
 }
 
-#[allow(clippy::similar_names)]
-fn axis_rectangle(path: &[Point]) -> Option<AxisRect> {
-    if path.len() != 4 {
-        return None;
-    }
-    let (min_x, min_y, max_x, max_y) = point_bounds(path);
-    let (min_x, min_y, max_x, max_y) = (min_x + 0.0, min_y + 0.0, max_x + 0.0, max_y + 0.0);
-    if min_x >= max_x || min_y >= max_y {
-        return None;
-    }
-    let mut corners = FastSet::with_capacity_and_hasher(4, BuildHasherDefault::default());
-    let min_x_key = key(Point { x: min_x, y: 0.0 })?.x;
-    let max_x_key = key(Point { x: max_x, y: 0.0 })?.x;
-    let min_y_key = key(Point { x: 0.0, y: min_y })?.y;
-    let max_y_key = key(Point { x: 0.0, y: max_y })?.y;
-    for point in path {
-        let point_key = key(*point)?;
-        if (point_key.x != min_x_key && point_key.x != max_x_key)
-            || (point_key.y != min_y_key && point_key.y != max_y_key)
-        {
-            return None;
-        }
-        corners.insert(point_key);
-    }
-    if corners.len() != 4
-        || path.iter().zip(path.iter().cycle().skip(1)).any(|(start, end)| {
-            let start = key(*start).expect("rectangle points were keyed above");
-            let end = key(*end).expect("rectangle points were keyed above");
-            start.x != end.x && start.y != end.y
-        })
-    {
-        return None;
-    }
-    let winding = if area2(path).is_sign_positive() { 1 } else { -1 };
-    Some(AxisRect { min_x, min_y, max_x, max_y, winding })
-}
-
 fn add_difference(values: &mut [i32], height: usize, x: usize, y: usize, delta: i32) {
     values[x * height + y] += delta;
 }
@@ -404,41 +427,48 @@ fn fill_contains(winding: i32, fill_rule: FillRule) -> bool {
 
 fn add_cell_boundary(
     boundary: &mut FastMap<(PointKey, PointKey), DirectedEdge>,
-    min_x: f64,
-    min_y: f64,
-    max_x: f64,
-    max_y: f64,
-) -> Option<()> {
-    let bottom_left = Point { x: min_x, y: min_y };
-    let bottom_right = Point { x: max_x, y: min_y };
-    let top_right = Point { x: max_x, y: max_y };
-    let top_left = Point { x: min_x, y: max_y };
-    for (start, end) in [
+    min_x: GridCoordinate,
+    min_y: GridCoordinate,
+    max_x: GridCoordinate,
+    max_y: GridCoordinate,
+) {
+    let bottom_left =
+        (Point { x: min_x.value, y: min_y.value }, PointKey { x: min_x.key, y: min_y.key });
+    let bottom_right =
+        (Point { x: max_x.value, y: min_y.value }, PointKey { x: max_x.key, y: min_y.key });
+    let top_right =
+        (Point { x: max_x.value, y: max_y.value }, PointKey { x: max_x.key, y: max_y.key });
+    let top_left =
+        (Point { x: min_x.value, y: max_y.value }, PointKey { x: min_x.key, y: max_y.key });
+    for ((start, start_key), (end, end_key)) in [
         (bottom_left, bottom_right),
         (bottom_right, top_right),
         (top_right, top_left),
         (top_left, bottom_left),
     ] {
-        let start_key = key(start)?;
-        let end_key = key(end)?;
         if boundary.remove(&(end_key, start_key)).is_none() {
             boundary.insert((start_key, end_key), DirectedEdge { start, end, start_key, end_key });
         }
     }
-    Some(())
 }
 
-/// The public fast path is intentionally narrower than the internal sweep
-/// helpers. Shared collinear edges and non-convex rings need the exact
-/// arrangement until their specialized topology rules have a complete oracle
-/// gate. This keeps a fast result from silently replacing a correct one.
+/// The remaining non-orthogonal pair path is intentionally narrower than the
+/// internal sweep helpers. Shared collinear edges and non-convex rings use the
+/// exact arrangement until their topology rules have a complete oracle gate.
+/// This keeps a fast result from silently replacing a correct one.
 fn fast_pair_is_provably_safe(request: &BooleanRequestD<'_>) -> bool {
     if request.subjects.len() != 1 || request.clips.len() != 1 {
         return false;
     }
     let subject = request.subjects[0].as_slice();
     let clip = request.clips[0].as_slice();
-    strict_convex(subject) && strict_convex(clip) && !has_collinear_contact(subject, clip)
+    if !strict_convex(subject) {
+        return false;
+    }
+    if !strict_convex(clip) {
+        return false;
+    }
+    !has_collinear_contact(subject, clip)
 }
 
 fn has_collinear_contact(first: &[Point], second: &[Point]) -> bool {
@@ -2284,7 +2314,8 @@ mod tests {
     }
 
     #[test]
-    fn rectangle_set_kernel_matches_exact_fill_rules() {
+    #[allow(clippy::too_many_lines)]
+    fn orthogonal_kernel_matches_exact_fill_rules() {
         let mut reversed =
             vec![point(12.0, 2.0), point(22.0, 2.0), point(22.0, 14.0), point(12.0, 14.0)];
         reversed.reverse();
@@ -2310,44 +2341,109 @@ mod tests {
                 clip_type: ClipType::Union,
                 fill_rule,
             };
-            let fast = try_rectangle_arrangement(request)
-                .expect("rectangle set should be recognized")
-                .expect("rectangle boundary should close");
+            let fast = try_orthogonal_arrangement(request)
+                .expect("orthogonal set should be recognized")
+                .expect("orthogonal boundary should close");
             let exact = crate::boolean::boolean_opd_exact(request).expect("exact oracle");
             assert_eq!(summary(&fast), summary(&exact), "fill rule: {fill_rule:?}");
         }
 
-        assert!(axis_rectangle(&subjects[0][..3]).is_none());
-        assert!(axis_rectangle(&[point(0.0, 0.0); 4]).is_none());
+        let self_crossing = [vec![
+            point(0.0, 0.0),
+            point(12.0, 0.0),
+            point(12.0, 8.0),
+            point(4.0, 8.0),
+            point(4.0, -4.0),
+            point(16.0, -4.0),
+            point(16.0, 12.0),
+            point(0.0, 12.0),
+        ]];
+        let request = BooleanRequestD {
+            subjects: &self_crossing,
+            clips: &[],
+            clip_type: ClipType::Union,
+            fill_rule: FillRule::EvenOdd,
+        };
+        let fast = try_orthogonal_arrangement(request)
+            .expect("orthogonal self-crossing path should be recognized")
+            .expect("orthogonal self-crossing boundary should close");
+        let exact = crate::boolean::boolean_opd_exact(request).expect("exact oracle");
+        let exact = exact
+            .iter()
+            .map(|path| crate::trim_collinear_d(path, crate::PathKind::Closed))
+            .collect::<Result<PathsD, Error>>()
+            .expect("exact result is finite");
+        assert_eq!(summary(&fast), summary(&exact));
+
+        assert!(orthogonal_path(&subjects[0]));
+        assert!(!orthogonal_path(&[point(0.0, 0.0); 4]));
+        assert!(!orthogonal_path(&[
+            point(0.0, 0.0),
+            point(2.0, 2.0),
+            point(2.0, 0.0),
+            point(0.0, 2.0),
+        ]));
+        assert!(!orthogonal_path(&[
+            point(f64::NAN, 0.0),
+            point(2.0, 0.0),
+            point(2.0, 2.0),
+            point(0.0, 2.0),
+        ]));
+        assert!(dedup_coordinates(vec![GridCoordinate { key: 0, value: 0.0 }]).is_none());
         assert!(
-            axis_rectangle(&[point(0.0, 0.0), point(0.0, 1.0), point(0.0, 2.0), point(0.0, 3.0),])
-                .is_none()
+            dedup_coordinates(vec![
+                GridCoordinate { key: 0, value: 0.0 },
+                GridCoordinate { key: 0, value: 0.000_000_000_4 },
+            ])
+            .is_none()
         );
+        assert_eq!(orthogonal_grid_size(10, 20), Some(200));
+        assert!(orthogonal_grid_size(1_001, 1_000).is_none());
+        assert!(orthogonal_grid_size(usize::MAX, 2).is_none());
+
+        let no_paths: [PathD; 0] = [];
+        let one_clip = [subjects[0].clone()];
         assert!(
-            axis_rectangle(&[point(0.0, 0.0), point(1.0, 0.0), point(2.0, 0.0), point(3.0, 0.0),])
-                .is_none()
+            try_orthogonal_arrangement(BooleanRequestD {
+                subjects: &no_paths,
+                clips: &one_clip,
+                clip_type: ClipType::Union,
+                fill_rule: FillRule::EvenOdd,
+            })
+            .expect("clip-only orthogonal input should be recognized")
+            .is_ok()
         );
-        assert!(
-            axis_rectangle(&[point(0.0, 0.0), point(2.0, 0.0), point(1.0, 1.0), point(0.0, 2.0),])
-                .is_none()
-        );
-        assert!(
-            axis_rectangle(&[point(0.0, 0.0), point(2.0, 0.0), point(2.0, 1.0), point(0.0, 3.0),])
-                .is_none()
-        );
-        assert!(
-            axis_rectangle(&[point(0.0, 0.0), point(2.0, 0.0), point(2.0, 2.0), point(2.0, 2.0),])
-                .is_none()
-        );
-        assert!(
-            axis_rectangle(&[point(0.0, 0.0), point(2.0, 2.0), point(2.0, 0.0), point(0.0, 2.0),])
-                .is_none()
-        );
+        assert!(!fast_pair_is_provably_safe(&BooleanRequestD {
+            subjects: &one_clip,
+            clips: &no_paths,
+            clip_type: ClipType::Union,
+            fill_rule: FillRule::EvenOdd,
+        }));
+        assert!(!fast_pair_is_provably_safe(&BooleanRequestD {
+            subjects: &self_crossing,
+            clips: &one_clip,
+            clip_type: ClipType::Union,
+            fill_rule: FillRule::EvenOdd,
+        }));
+        let concave_subject = [vec![
+            point(0.0, 0.0),
+            point(10.0, 0.0),
+            point(5.0, 5.0),
+            point(10.0, 10.0),
+            point(0.0, 10.0),
+        ]];
+        assert!(!strict_convex(&concave_subject[0]));
+        assert!(!fast_pair_is_provably_safe(&BooleanRequestD {
+            subjects: &concave_subject,
+            clips: &one_clip,
+            clip_type: ClipType::Union,
+            fill_rule: FillRule::EvenOdd,
+        }));
 
         let mut malformed = FastMap::with_capacity_and_hasher(1, BuildHasherDefault::default());
         let open = directed(point(0.0, 0.0), point(1.0, 0.0));
         malformed.insert((open.start_key, open.end_key), open);
-        assert!(finish_rectangle_boundary(malformed).is_err());
+        assert!(finish_orthogonal_boundary(malformed).is_err());
 
         let positive = vec![point(0.0, 0.0), point(3.0, 0.0), point(1.0, 3.0)];
         let mut negative = positive.clone();
@@ -2918,7 +3014,8 @@ mod tests {
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::EvenOdd,
             })
-            .is_none()
+            .expect("orthogonal path should use the certified grid kernel")
+            .is_ok()
         );
         let non_convex_subjects = [concave.clone()];
         assert!(

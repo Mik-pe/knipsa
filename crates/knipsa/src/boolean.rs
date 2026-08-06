@@ -1632,6 +1632,51 @@ mod tests {
     }
 
     #[test]
+    fn rectilinear_operations_match_exact_oracle() {
+        let subject = vec![
+            PointD::new(0.0, 0.0),
+            PointD::new(30.0, 0.0),
+            PointD::new(30.0, 30.0),
+            PointD::new(20.0, 30.0),
+            PointD::new(20.0, 10.0),
+            PointD::new(10.0, 10.0),
+            PointD::new(10.0, 30.0),
+            PointD::new(0.0, 30.0),
+        ];
+        let clip = vec![
+            PointD::new(5.0, -5.0),
+            PointD::new(25.0, -5.0),
+            PointD::new(25.0, 5.0),
+            PointD::new(25.0, 35.0),
+            PointD::new(5.0, 35.0),
+        ];
+        let subjects = [subject];
+        let clips = [clip];
+        for fill_rule in
+            [FillRule::EvenOdd, FillRule::NonZero, FillRule::Positive, FillRule::Negative]
+        {
+            for clip_type in
+                [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor]
+            {
+                let request =
+                    BooleanRequestD { subjects: &subjects, clips: &clips, clip_type, fill_rule };
+                let exact = boolean_opd_exact(request).expect("exact rectilinear oracle");
+                let result = boolean_opd(request).expect("public rectilinear operation");
+                let exact = exact
+                    .iter()
+                    .map(|path| crate::trim_collinear_d(path, crate::PathKind::Closed))
+                    .collect::<Result<PathsD, Error>>()
+                    .expect("exact result is finite");
+                assert_eq!(
+                    double_summary(&result),
+                    double_summary(&exact),
+                    "{clip_type:?} {fill_rule:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn fast_double_path_matches_exact_for_all_fill_rules() {
         let subject = rectangle_d(0.0, 0.0, 10.0, 10.0);
         let mut reversed = rectangle_d(2.0, 2.0, 8.0, 8.0);

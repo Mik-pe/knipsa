@@ -7,7 +7,7 @@ returns [`crate::Error`] instead of panicking on malformed geometry.
 ## Quick start
 
 ```rust
-use knipsa::{PointD, intersection_d};
+use knipsa::{PointD, intersection_path_d};
 
 let subject = vec![
     PointD::new(0.0, 0.0),
@@ -22,15 +22,16 @@ let clip = vec![
     PointD::new(5.0, 15.0),
 ];
 
-let result = intersection_d(std::slice::from_ref(&subject), std::slice::from_ref(&clip))?;
+let result = intersection_path_d(&subject, &clip)?;
 
 assert_eq!(result.len(), 1);
 # Ok::<(), knipsa::Error>(())
 ```
 
 Use [`crate::intersection`] for exact integer output. The convenience
-operations use [`crate::FillRule::EvenOdd`]; use [`crate::boolean_op`] or
-[`crate::boolean_opd`] when another fill rule is required. Use
+operations and single-ring `_path` variants use [`crate::FillRule::EvenOdd`];
+use [`crate::boolean_op`] or [`crate::boolean_opd`] when another fill rule is
+required. Use
 [`crate::offset_paths_d`] for polygon or polyline offsets and
 [`crate::triangulate_d`] for counter-clockwise triangles.
 

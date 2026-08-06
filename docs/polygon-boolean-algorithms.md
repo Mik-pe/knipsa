@@ -31,7 +31,7 @@ reproducible workload and adapter benchmark; its f64 fast path is measured
 separately from the exact fallback, and every timing claim remains
 machine-specific.
 
-## Repository fit observed on 2026-08-05
+## Repository fit observed through 2026-08-06
 
 The current working tree already goes beyond the README's older "next major
 piece" wording:
@@ -52,8 +52,16 @@ piece" wording:
 - `src/fast.rs` now adds a separate strict-convex two-ring path: a linear
   boundary walk produces split parameters and containment hints, while
   degenerate or uncertain input stays on the exact/general fallback.
+- Rectilinear floating-point input has a certified specialized kernel. It
+  compresses the input X/Y coordinates, applies vertical-edge winding as 2-D
+  range updates, evaluates the requested fill rule per cell, and cancels
+  shared cell boundaries before stitching. This covers multiple rings,
+  concavity, holes, shared edges, and orthogonal self-crossings without
+  floating epsilon predicates. Ambiguous quantization, coordinates outside the
+  bounded fast domain, and grids above the allocation limit fall back to the
+  exact arrangement.
 
-The exact fallback splitter checks every edge pair, so its
+The remaining exact fallback splitter checks every edge pair, so its
 intersection-discovery stage is **O(E^2)** before rational-cost and output
 work. That is a concrete optimization boundary, not a reason to weaken the
 exact semantics. Also note that arbitrary-precision exact coordinates prevent

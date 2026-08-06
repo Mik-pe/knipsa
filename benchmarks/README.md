@@ -65,6 +65,19 @@ matrix rather than treated as a Knipsa regression.
 The generated workload is kept under `target/`; the generator is the durable,
 reviewable fixture.
 
+Self-crossing contours are kept in a separate pathological matrix because
+OGC-validity-oriented engines can repair or reinterpret them instead of
+applying contour fill rules. The pinned Clipper2 adapter shares the explicit
+EvenOdd semantics used by this fixture:
+
+```sh
+./scripts/run-conformance.sh benchmarks/pathological-workloads.json \
+  target/conformance-pathological clipper2
+```
+
+An adapter disagreement on invalid OGC input is recorded as a semantic
+difference; adapters are never majority-voted into an oracle.
+
 Reference adapters are comparison tools only; they are not runtime
 dependencies of knipsa.
 

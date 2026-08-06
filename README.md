@@ -22,7 +22,7 @@ cargo add --git https://github.com/Mik-pe/knipsa knipsa
 Boolean operations work directly on ordinary Rust vectors:
 
 ```rust
-use knipsa::{PointD, intersection_d};
+use knipsa::{PointD, intersection_path_d};
 
 fn main() -> Result<(), knipsa::Error> {
     let subject = vec![
@@ -38,7 +38,7 @@ fn main() -> Result<(), knipsa::Error> {
         PointD::new(5.0, 15.0),
     ];
 
-    let result = intersection_d(std::slice::from_ref(&subject), std::slice::from_ref(&clip))?;
+    let result = intersection_path_d(&subject, &clip)?;
 
     assert_eq!(result.len(), 1);
     Ok(())
@@ -56,7 +56,8 @@ cargo run -p knipsa --example quickstart
 
 | Need | Use |
 | --- | --- |
-| Common EvenOdd booleans | `intersection`, `union`, `difference`, `xor` and `_d` variants |
+| Two individual rings | `intersection_path`, `union_path`, `difference_path`, `xor_path` and `_d` variants |
+| Ring collections with EvenOdd | `intersection`, `union`, `difference`, `xor` and `_d` variants |
 | Exact integer polygon booleans | `boolean_op` with `Point64` |
 | Fractional coordinates | `boolean_opd` with `PointD` |
 | Clean self-intersections or internal boundaries | `simplify_paths64` or `simplify_paths_d` |

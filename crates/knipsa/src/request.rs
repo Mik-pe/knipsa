@@ -264,6 +264,86 @@ pub fn xor_d(subjects: &[PathD], clips: &[PathD]) -> Result<PathsD, Error> {
     boolean_opd(BooleanRequestD::new(subjects, clips, ClipType::Xor, FillRule::EvenOdd))
 }
 
+/// Intersects two integer rings using [`FillRule::EvenOdd`].
+///
+/// This is the shortest zero-allocation entry point when each side contains
+/// exactly one ring. The result can still contain multiple rings.
+///
+/// # Errors
+///
+/// Propagates errors from [`intersection`].
+pub fn intersection_path(subject: &Path64, clip: &Path64) -> Result<Paths64, Error> {
+    intersection(std::slice::from_ref(subject), std::slice::from_ref(clip))
+}
+
+/// Unites two integer rings using [`FillRule::EvenOdd`].
+///
+/// # Errors
+///
+/// Propagates errors from [`union`].
+pub fn union_path(subject: &Path64, clip: &Path64) -> Result<Paths64, Error> {
+    union(std::slice::from_ref(subject), std::slice::from_ref(clip))
+}
+
+/// Subtracts one integer ring from another using [`FillRule::EvenOdd`].
+///
+/// # Errors
+///
+/// Propagates errors from [`difference`].
+pub fn difference_path(subject: &Path64, clip: &Path64) -> Result<Paths64, Error> {
+    difference(std::slice::from_ref(subject), std::slice::from_ref(clip))
+}
+
+/// Computes the symmetric difference of two integer rings using
+/// [`FillRule::EvenOdd`].
+///
+/// # Errors
+///
+/// Propagates errors from [`xor`].
+pub fn xor_path(subject: &Path64, clip: &Path64) -> Result<Paths64, Error> {
+    xor(std::slice::from_ref(subject), std::slice::from_ref(clip))
+}
+
+/// Intersects two floating-point rings using [`FillRule::EvenOdd`].
+///
+/// This is the shortest zero-allocation entry point when each side contains
+/// exactly one ring. The result can still contain multiple rings.
+///
+/// # Errors
+///
+/// Propagates errors from [`intersection_d`].
+pub fn intersection_path_d(subject: &PathD, clip: &PathD) -> Result<PathsD, Error> {
+    intersection_d(std::slice::from_ref(subject), std::slice::from_ref(clip))
+}
+
+/// Unites two floating-point rings using [`FillRule::EvenOdd`].
+///
+/// # Errors
+///
+/// Propagates errors from [`union_d`].
+pub fn union_path_d(subject: &PathD, clip: &PathD) -> Result<PathsD, Error> {
+    union_d(std::slice::from_ref(subject), std::slice::from_ref(clip))
+}
+
+/// Subtracts one floating-point ring from another using [`FillRule::EvenOdd`].
+///
+/// # Errors
+///
+/// Propagates errors from [`difference_d`].
+pub fn difference_path_d(subject: &PathD, clip: &PathD) -> Result<PathsD, Error> {
+    difference_d(std::slice::from_ref(subject), std::slice::from_ref(clip))
+}
+
+/// Computes the symmetric difference of two floating-point rings using
+/// [`FillRule::EvenOdd`].
+///
+/// # Errors
+///
+/// Propagates errors from [`xor_d`].
+pub fn xor_path_d(subject: &PathD, clip: &PathD) -> Result<PathsD, Error> {
+    xor_d(std::slice::from_ref(subject), std::slice::from_ref(clip))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,5 +480,64 @@ mod tests {
         assert_eq!(union_d(&subjects_d, &clips_d).expect("union_d").len(), 1);
         assert_eq!(difference_d(&subjects_d, &clips_d).expect("difference_d").len(), 1);
         assert_eq!(xor_d(&subjects_d, &clips_d).expect("xor_d").len(), 2);
+    }
+
+    #[test]
+    fn single_ring_helpers_match_collection_helpers() {
+        let integer_subject = vec![
+            crate::Point64::new(0, 0),
+            crate::Point64::new(10, 0),
+            crate::Point64::new(10, 10),
+            crate::Point64::new(0, 10),
+        ];
+        let integer_clip = vec![
+            crate::Point64::new(5, 0),
+            crate::Point64::new(15, 0),
+            crate::Point64::new(15, 10),
+            crate::Point64::new(5, 10),
+        ];
+        let integer_subjects = std::slice::from_ref(&integer_subject);
+        let integer_clips = std::slice::from_ref(&integer_clip);
+        assert_eq!(
+            intersection_path(&integer_subject, &integer_clip),
+            intersection(integer_subjects, integer_clips)
+        );
+        assert_eq!(
+            union_path(&integer_subject, &integer_clip),
+            union(integer_subjects, integer_clips)
+        );
+        assert_eq!(
+            difference_path(&integer_subject, &integer_clip),
+            difference(integer_subjects, integer_clips)
+        );
+        assert_eq!(xor_path(&integer_subject, &integer_clip), xor(integer_subjects, integer_clips));
+
+        let double_subject = vec![
+            crate::PointD::new(0.0, 0.0),
+            crate::PointD::new(10.0, 0.0),
+            crate::PointD::new(10.0, 10.0),
+            crate::PointD::new(0.0, 10.0),
+        ];
+        let double_clip = vec![
+            crate::PointD::new(5.0, 0.0),
+            crate::PointD::new(15.0, 0.0),
+            crate::PointD::new(15.0, 10.0),
+            crate::PointD::new(5.0, 10.0),
+        ];
+        let double_subjects = std::slice::from_ref(&double_subject);
+        let double_clips = std::slice::from_ref(&double_clip);
+        assert_eq!(
+            intersection_path_d(&double_subject, &double_clip),
+            intersection_d(double_subjects, double_clips)
+        );
+        assert_eq!(
+            union_path_d(&double_subject, &double_clip),
+            union_d(double_subjects, double_clips)
+        );
+        assert_eq!(
+            difference_path_d(&double_subject, &double_clip),
+            difference_d(double_subjects, double_clips)
+        );
+        assert_eq!(xor_path_d(&double_subject, &double_clip), xor_d(double_subjects, double_clips));
     }
 }

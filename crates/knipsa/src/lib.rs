@@ -22,8 +22,9 @@ pub use geometry::{
 pub use offset::{EndType, JoinType, OffsetOptions, offset_paths, offset_paths_d, offset_paths64};
 pub use request::{
     BooleanRequest, BooleanRequestD, ClipType, FillRule, boolean_op, boolean_opd, difference,
-    difference_d, intersection, intersection_d, union, union_d, validate_request,
-    validate_requestd, xor, xor_d,
+    difference_d, difference_path, difference_path_d, intersection, intersection_d,
+    intersection_path, intersection_path_d, union, union_d, union_path, union_path_d,
+    validate_request, validate_requestd, xor, xor_d, xor_path, xor_path_d,
 };
 pub use triangulation::{
     Triangle64, TriangleD, triangulate_d, triangulate_path64, triangulate_pathd,

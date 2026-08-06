@@ -1,0 +1,13 @@
+{
+  "schema": "knipsa-workload-v1",
+  "coordinate_type": "f64",
+  "cases": [
+    {
+      "id": "orthogonal-self-crossing-even-odd",
+      "clip_type": "union",
+      "fill_rule": "even_odd",
+      "subjects": [[[0, 0], [12, 0], [12, 8], [4, 8], [4, -4], [16, -4], [16, 12], [0, 12]]],
+      "clips": []
+    }
+  ]
+}
