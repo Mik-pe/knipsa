@@ -430,23 +430,60 @@ fn fill_orthogonal_column(
     fill_rule: FillRule,
     clip_type: ClipType,
 ) {
-    let mut subject_winding = 0;
-    let mut clip_winding = 0;
-    for (y, cell) in filled.iter_mut().enumerate() {
-        subject_winding += difference[y].subject;
-        clip_winding += difference[y].clip;
-        let subject = fill_contains(subject_winding, fill_rule);
-        let clip = fill_contains(clip_winding, fill_rule);
-        *cell = apply_operation(subject, clip, clip_type);
+    match fill_rule {
+        FillRule::EvenOdd => {
+            fill_orthogonal_column_with(difference, filled, clip_type, |winding| {
+                (winding & 1) != 0
+            });
+        }
+        FillRule::NonZero => {
+            fill_orthogonal_column_with(difference, filled, clip_type, |winding| winding != 0);
+        }
+        FillRule::Positive => {
+            fill_orthogonal_column_with(difference, filled, clip_type, |winding| winding > 0);
+        }
+        FillRule::Negative => {
+            fill_orthogonal_column_with(difference, filled, clip_type, |winding| winding < 0);
+        }
     }
 }
 
-fn fill_contains(winding: i32, fill_rule: FillRule) -> bool {
-    match fill_rule {
-        FillRule::EvenOdd => winding.unsigned_abs() % 2 == 1,
-        FillRule::NonZero => winding != 0,
-        FillRule::Positive => winding > 0,
-        FillRule::Negative => winding < 0,
+#[inline]
+fn fill_orthogonal_column_with(
+    difference: &[WindingDifference],
+    filled: &mut [bool],
+    clip_type: ClipType,
+    contains: impl Fn(i32) -> bool,
+) {
+    match clip_type {
+        ClipType::Intersection => {
+            fill_orthogonal_cells(difference, filled, &contains, |subject, clip| subject && clip);
+        }
+        ClipType::Union => {
+            fill_orthogonal_cells(difference, filled, &contains, |subject, clip| subject || clip);
+        }
+        ClipType::Difference => {
+            fill_orthogonal_cells(difference, filled, &contains, |subject, clip| subject && !clip);
+        }
+        ClipType::Xor => {
+            fill_orthogonal_cells(difference, filled, &contains, |subject, clip| subject != clip);
+        }
+    }
+}
+
+#[inline]
+fn fill_orthogonal_cells(
+    difference: &[WindingDifference],
+    filled: &mut [bool],
+    contains: &impl Fn(i32) -> bool,
+    operation: impl Fn(bool, bool) -> bool,
+) {
+    let mut subject_winding = 0;
+    let mut clip_winding = 0;
+    for (delta, cell) in difference.iter().zip(filled.iter_mut()) {
+        subject_winding += delta.subject;
+        clip_winding += delta.clip;
+        *cell = operation(contains(subject_winding), contains(clip_winding));
     }
 }
 
@@ -618,15 +655,11 @@ fn eligible<P: PathSlice>(subjects: &[P], clips: &[P]) -> bool {
         if points.len() < 3 {
             continue;
         }
-        for (start, end) in points.iter().zip(points.iter().cycle().skip(1)).take(points.len()) {
-            if !start.x.is_finite()
-                || !start.y.is_finite()
-                || !end.x.is_finite()
-                || !end.y.is_finite()
-                || start.x.abs() > MAX_COORDINATE
-                || start.y.abs() > MAX_COORDINATE
-                || end.x.abs() > MAX_COORDINATE
-                || end.y.abs() > MAX_COORDINATE
+        for point in points {
+            if !point.x.is_finite()
+                || !point.y.is_finite()
+                || point.x.abs() > MAX_COORDINATE
+                || point.y.abs() > MAX_COORDINATE
             {
                 return false;
             }
@@ -3865,5 +3898,65 @@ mod tests {
         let collinear = vec![point(1.0, 1.0), point(2.0, 1.0), point(3.0, 1.0)];
         let clip = vec![point(0.0, 0.0), point(4.0, 0.0), point(4.0, 4.0), point(0.0, 4.0)];
         assert!(convex_intersection(&collinear, &clip).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod orthogonal_column_dispatch_tests {
+    use super::*;
+
+    fn reference_contains(winding: i32, fill_rule: FillRule) -> bool {
+        match fill_rule {
+            FillRule::EvenOdd => winding.rem_euclid(2) == 1,
+            FillRule::NonZero => winding != 0,
+            FillRule::Positive => winding > 0,
+            FillRule::Negative => winding < 0,
+        }
+    }
+
+    fn reference_operation(subject: bool, clip: bool, clip_type: ClipType) -> bool {
+        match clip_type {
+            ClipType::Intersection => subject && clip,
+            ClipType::Union => subject || clip,
+            ClipType::Difference => subject && !clip,
+            ClipType::Xor => subject != clip,
+        }
+    }
+
+    #[test]
+    fn hoisted_dispatch_matches_scalar_reference() {
+        let difference = [
+            WindingDifference { subject: 1, clip: 0 },
+            WindingDifference { subject: -3, clip: 1 },
+            WindingDifference { subject: 4, clip: -2 },
+            WindingDifference { subject: -1, clip: 3 },
+            WindingDifference { subject: 2, clip: -1 },
+            WindingDifference { subject: -3, clip: -1 },
+        ];
+        let fill_rules =
+            [FillRule::EvenOdd, FillRule::NonZero, FillRule::Positive, FillRule::Negative];
+        let clip_types =
+            [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor];
+
+        for fill_rule in fill_rules {
+            for clip_type in clip_types {
+                let mut expected = vec![false; difference.len() - 1];
+                let mut subject_winding = 0;
+                let mut clip_winding = 0;
+                for (delta, cell) in difference.iter().zip(expected.iter_mut()) {
+                    subject_winding += delta.subject;
+                    clip_winding += delta.clip;
+                    *cell = reference_operation(
+                        reference_contains(subject_winding, fill_rule),
+                        reference_contains(clip_winding, fill_rule),
+                        clip_type,
+                    );
+                }
+
+                let mut actual = vec![false; expected.len()];
+                fill_orthogonal_column(&difference, &mut actual, fill_rule, clip_type);
+                assert_eq!(actual, expected, "{fill_rule:?} {clip_type:?}");
+            }
+        }
     }
 }
