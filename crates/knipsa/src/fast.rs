@@ -779,18 +779,10 @@ fn convex_intersection(subject: &[Point], clip: &[Point]) -> PathsD {
             match (previous_inside, current_inside) {
                 (true, true) => output.push(current),
                 (true, false) => {
-                    if let Some(intersection) =
-                        line_intersection(previous, current, clip_start, clip_end)
-                    {
-                        output.push(intersection);
-                    }
+                    output.push(line_intersection(previous, current, clip_start, clip_end));
                 }
                 (false, true) => {
-                    if let Some(intersection) =
-                        line_intersection(previous, current, clip_start, clip_end)
-                    {
-                        output.push(intersection);
-                    }
+                    output.push(line_intersection(previous, current, clip_start, clip_end));
                     output.push(current);
                 }
                 (false, false) => {}
@@ -819,18 +811,17 @@ fn line_intersection(
     first_end: Point,
     second_start: Point,
     second_end: Point,
-) -> Option<Point> {
+) -> Point {
     let first_vector = subtract(first_end, first_start);
     let second_vector = subtract(second_end, second_start);
     let denominator = cross(first_vector, second_vector);
-    if denominator.abs() <= f64::EPSILON {
-        return None;
-    }
+    // This helper is only called for an edge whose endpoints lie on opposite
+    // sides of the clipping line, which guarantees a non-zero denominator.
     let parameter = cross(subtract(second_start, first_start), second_vector) / denominator;
-    Some(Point {
+    Point {
         x: first_start.x + first_vector.x * parameter,
         y: first_start.y + first_vector.y * parameter,
-    })
+    }
 }
 
 fn dedup_consecutive(points: &mut Vec<Point>) {
@@ -2075,6 +2066,15 @@ mod tests {
         let walk =
             convex_boundary_walk(subject_points[0].points(), clip_points[0].points(), false, true);
         assert!(!walk.degenerate);
+        assert!(
+            convex_boolean(
+                subject_points[0].points(),
+                clip_points[0].points(),
+                ClipType::Intersection,
+                Some((true, true)),
+            )
+            .is_some()
+        );
         let fast = convex_boolean(
             subject_points[0].points(),
             clip_points[0].points(),
@@ -3178,6 +3178,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn covers_containment_bucket_and_downward_winding_branches() {
         let rectangle =
             vec![point(0.0, 0.0), point(10.0, 0.0), point(10.0, 10.0), point(0.0, 10.0)];
@@ -3198,6 +3199,11 @@ mod tests {
         update_winding(&mut state, point(-1.0, 5.0), &downward);
         assert!(state.parity);
         assert_eq!(state.winding, -1);
+        let no_paths: Vec<Vec<Point>> = Vec::new();
+        assert_eq!(run(&no_paths, &no_paths, ClipType::Union, FillRule::EvenOdd), Ok(Vec::new()));
+        let mut closed = vec![point(0.0, 0.0), point(1.0, 0.0), point(0.0, 0.0)];
+        dedup_consecutive(&mut closed);
+        assert_eq!(closed, vec![point(0.0, 0.0), point(1.0, 0.0)]);
         assert!(!paths_are_simple_and_disjoint_with_properties(
             std::slice::from_ref(&rectangle),
             &[],
@@ -3271,5 +3277,72 @@ mod tests {
             })
             .is_none()
         );
+        let overlap = vec![point(5.0, 0.0), point(15.0, 0.0), point(15.0, 10.0), point(5.0, 10.0)];
+        let far = vec![
+            point(100.0, 100.0),
+            point(110.0, 100.0),
+            point(110.0, 110.0),
+            point(100.0, 110.0),
+        ];
+        assert!(!fast_pair_is_provably_safe(&BooleanRequestD {
+            subjects: std::slice::from_ref(&rectangle),
+            clips: std::slice::from_ref(&overlap),
+            clip_type: ClipType::Union,
+            fill_rule: FillRule::EvenOdd,
+        }));
+        let concave = vec![
+            point(0.0, 0.0),
+            point(10.0, 0.0),
+            point(5.0, 5.0),
+            point(10.0, 10.0),
+            point(0.0, 10.0),
+        ];
+        assert!(!fast_pair_is_provably_safe(&BooleanRequestD {
+            subjects: std::slice::from_ref(&rectangle),
+            clips: std::slice::from_ref(&concave),
+            clip_type: ClipType::Intersection,
+            fill_rule: FillRule::EvenOdd,
+        }));
+        let crossing_triangle = vec![point(5.0, -5.0), point(15.0, 5.0), point(5.0, 15.0)];
+        assert!(
+            convex_boolean(
+                &rectangle,
+                &crossing_triangle,
+                ClipType::Intersection,
+                Some((true, true)),
+            )
+            .is_some()
+        );
+        assert!(
+            try_single_convex_boolean(BooleanRequestD {
+                subjects: std::slice::from_ref(&rectangle),
+                clips: &[],
+                clip_type: ClipType::Union,
+                fill_rule: FillRule::EvenOdd,
+            })
+            .is_none()
+        );
+        assert!(
+            run(
+                &[rectangle, overlap],
+                std::slice::from_ref(&far),
+                ClipType::Union,
+                FillRule::EvenOdd,
+            )
+            .is_ok()
+        );
+        let rectangle =
+            vec![point(0.0, 0.0), point(10.0, 0.0), point(10.0, 10.0), point(0.0, 10.0)];
+        let overlap = vec![
+            point(105.0, 100.0),
+            point(115.0, 100.0),
+            point(115.0, 110.0),
+            point(105.0, 110.0),
+        ];
+        assert!(run(&[rectangle], &[far, overlap], ClipType::Union, FillRule::EvenOdd).is_ok());
+        assert!(!inside_half_plane(point(0.0, 1.0), point(0.0, 0.0), point(1.0, 0.0), false,));
+        let collinear = vec![point(1.0, 1.0), point(2.0, 1.0), point(3.0, 1.0)];
+        let clip = vec![point(0.0, 0.0), point(4.0, 0.0), point(4.0, 4.0), point(0.0, 4.0)];
+        assert!(convex_intersection(&collinear, &clip).is_empty());
     }
 }

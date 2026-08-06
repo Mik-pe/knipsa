@@ -1856,6 +1856,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn executes_simplification_and_rectangle_clipping() {
         let integer_path = KnipsaPath64 { points: TRIANGLE.as_ptr(), point_count: 3 };
         let mut simplified = KnipsaPaths64::default();
@@ -1952,6 +1953,114 @@ mod tests {
         assert_eq!(
             knipsa_simplify64(std::ptr::null(), 0, FillRule::EvenOdd as u8, std::ptr::null_mut(),),
             KnipsaStatus::NullPointer
+        );
+        assert_eq!(
+            knipsa_simplify_d(std::ptr::null(), 0, FillRule::EvenOdd as u8, std::ptr::null_mut(),),
+            KnipsaStatus::NullPointer
+        );
+        assert_eq!(
+            knipsa_clip_to_rect64(
+                std::ptr::null(),
+                0,
+                KnipsaRect64::default(),
+                FillRule::EvenOdd as u8,
+                std::ptr::null_mut(),
+            ),
+            KnipsaStatus::NullPointer
+        );
+        assert_eq!(
+            knipsa_clip_to_rect_d(
+                std::ptr::null(),
+                0,
+                KnipsaRectD::default(),
+                FillRule::EvenOdd as u8,
+                std::ptr::null_mut(),
+            ),
+            KnipsaStatus::NullPointer
+        );
+
+        simplified.path_count = 1;
+        assert_eq!(
+            knipsa_simplify64(
+                std::ptr::null(),
+                0,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut simplified),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
+        assert_eq!(
+            knipsa_clip_to_rect64(
+                std::ptr::null(),
+                0,
+                KnipsaRect64::default(),
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut simplified),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
+        simplified = KnipsaPaths64::default();
+        simplified_d.path_count = 1;
+        assert_eq!(
+            knipsa_simplify_d(
+                std::ptr::null(),
+                0,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut simplified_d),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
+        assert_eq!(
+            knipsa_clip_to_rect_d(
+                std::ptr::null(),
+                0,
+                KnipsaRectD::default(),
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut simplified_d),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
+        simplified_d = KnipsaPathsD::default();
+
+        let short64 = KnipsaPath64 { points: TRIANGLE.as_ptr(), point_count: 2 };
+        let short_d = KnipsaPathD { points: TRIANGLE_D.as_ptr(), point_count: 2 };
+        assert_eq!(
+            knipsa_simplify64(
+                std::ptr::from_ref(&short64),
+                1,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut simplified),
+            ),
+            KnipsaStatus::InvalidPath
+        );
+        assert_eq!(
+            knipsa_simplify_d(
+                std::ptr::from_ref(&short_d),
+                1,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut simplified_d),
+            ),
+            KnipsaStatus::InvalidPath
+        );
+        assert_eq!(
+            knipsa_clip_to_rect64(
+                std::ptr::from_ref(&short64),
+                1,
+                KnipsaRect64 { min_x: 0, min_y: 0, max_x: 5, max_y: 5 },
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut simplified),
+            ),
+            KnipsaStatus::InvalidPath
+        );
+        assert_eq!(
+            knipsa_clip_to_rect_d(
+                std::ptr::from_ref(&short_d),
+                1,
+                KnipsaRectD { min_x: 0.0, min_y: 0.0, max_x: 5.0, max_y: 5.0 },
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut simplified_d),
+            ),
+            KnipsaStatus::InvalidPath
         );
     }
 

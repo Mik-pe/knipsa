@@ -852,6 +852,19 @@ mod tests {
             Ok(vec![PointD::new(4.0, 1.0)])
         );
         assert!(translate_path_d(&[PointD::new(1.0, 2.0)], f64::INFINITY, 0.0).is_err());
+        assert!(translate_path_d(&[PointD::new(1.0, 2.0)], 0.0, f64::INFINITY).is_err());
+        assert!(translate_path_d(&[PointD::new(f64::INFINITY, 2.0)], 0.0, 0.0).is_err());
+        assert!(translate_path_d(&[PointD::new(1.0, f64::INFINITY)], 0.0, 0.0).is_err());
+        assert!(translate_path_d(&[PointD::new(f64::MAX, 0.0)], f64::MAX, 0.0).is_err());
+        assert!(translate_path_d(&[PointD::new(0.0, f64::MAX)], 0.0, f64::MAX).is_err());
+        let collinear_closed64 = [A, Point64::new(5, 0), B];
+        assert_eq!(trim_collinear64(&collinear_closed64, PathKind::Closed), Ok(vec![A, B]));
+        let collinear_closed_d =
+            [PointD::new(0.0, 0.0), PointD::new(5.0, 0.0), PointD::new(10.0, 0.0)];
+        assert_eq!(
+            trim_collinear_d(&collinear_closed_d, PathKind::Closed),
+            Ok(vec![PointD::new(0.0, 0.0), PointD::new(10.0, 0.0)])
+        );
     }
 
     #[test]
@@ -879,6 +892,7 @@ mod tests {
             clip_to_rect64(&[subject], Rect64::new(5, 5, 15, 15), FillRule::EvenOdd).unwrap();
         assert_eq!(clipped.len(), 1);
         assert_eq!(signed_area2(&clipped[0]), Ok(200));
+        assert_eq!(Rect64::new(15, 15, 5, 5), Rect64::new(5, 5, 15, 15));
 
         let subject_d = vec![
             PointD::new(0.0, 0.0),
@@ -894,6 +908,13 @@ mod tests {
         assert!(
             clip_to_rect_d(&[], RectD::new(f64::NAN, 0.0, 1.0, 1.0), FillRule::EvenOdd,).is_err()
         );
+        for rectangle in [
+            RectD::new(0.0, f64::NAN, 1.0, 1.0),
+            RectD::new(0.0, 0.0, f64::NAN, 1.0),
+            RectD::new(0.0, 0.0, 1.0, f64::NAN),
+        ] {
+            assert!(clip_to_rect_d(&[], rectangle, FillRule::EvenOdd).is_err());
+        }
     }
 
     fn signed_area2_d(path: &[PointD]) -> f64 {
