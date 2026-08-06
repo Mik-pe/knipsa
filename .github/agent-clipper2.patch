@@ -1,0 +1,9 @@
+diff --git a/crates/knipsa/src/convex_dispatch.rs b/crates/knipsa/src/convex_dispatch.rs
+--- a/crates/knipsa/src/convex_dispatch.rs
++++ b/crates/knipsa/src/convex_dispatch.rs
+@@ -676,4 +676,5 @@ fn key(point: PointD) -> Option<PointKey> {
+ }
+ 
+ #[cfg(test)]
++#[path = "convex_dispatch/tests.rs"]
+ mod tests;
