@@ -1,0 +1,207 @@
+name: Agent beat Clipper2 standard matrix
+
+on:
+  push:
+    branches:
+      - agent/beat-clipper2-standard-matrix
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-beat-clipper2-standard-matrix
+  cancel-in-progress: true
+
+jobs:
+  optimize:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Apply and format candidate
+        id: apply
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check .github/agent-clipper2.patch
+          git apply .github/agent-clipper2.patch
+          rm -f .github/agent-clipper2.patch .github/workflows/agent-beat-clipper2.yml
+          cargo +stable fmt --all
+          git diff --check
+          echo "applied=true" >> "$GITHUB_OUTPUT"
+
+      - name: Test workspace
+        run: cargo +stable test --workspace --all-features
+
+      - name: Lint workspace
+        run: cargo +stable clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo +stable doc --workspace --all-features --no-deps
+
+      - name: Check C API
+        run: RUSTUP_TOOLCHAIN=stable ./scripts/check-c-api.sh
+
+      - name: Run coverage gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ./scripts/coverage.sh; then
+            exit 0
+          fi
+          echo "Missed branch records:"
+          awk '
+            /^SF:/ { file = substr($0, 4); next }
+            /^BRDA:/ {
+              split(substr($0, 6), fields, ",")
+              taken = fields[4]
+              if (taken == "-" || taken == "" || (taken + 0) == 0) {
+                printf "%s:%s branch %s/%s taken=%s\n", file, fields[1], fields[2], fields[3], taken
+              }
+            }
+          ' target/coverage/lcov.info
+          exit 1
+
+      - name: Benchmark main, candidate, and native Clipper2
+        id: benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          results="$RUNNER_TEMP/clipper2-results"
+          baseline="$RUNNER_TEMP/knipsa-baseline"
+          base_commit="$(git merge-base HEAD origin/main)"
+          mkdir -p "$results"
+          git worktree add --detach "$baseline" "$base_commit"
+
+          {
+            printf 'candidate_parent=%s\n' "$base_commit"
+            printf 'date_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            uname -a
+            lscpu || true
+            cargo +stable --version
+            rustc +stable --version --verbose
+          } > "$results/metadata.txt"
+
+          run_baseline() {
+            local round=$1
+            CARGO_TARGET_DIR="$RUNNER_TEMP/target-baseline" \
+              cargo +stable bench --manifest-path "$baseline/Cargo.toml" \
+                -p knipsa --bench workload --profile release \
+                > "$results/baseline-$round.jsonl"
+          }
+          run_candidate() {
+            local round=$1
+            CARGO_TARGET_DIR="$RUNNER_TEMP/target-candidate" \
+              cargo +stable bench -p knipsa --bench workload --profile release \
+                > "$results/candidate-$round.jsonl"
+          }
+
+          benchmarks/reference/build-clipper2.sh > "$results/clipper2-binary.txt"
+          for round in 1 2 3 4 5 6 7; do
+            if (( round % 2 == 1 )); then
+              run_baseline "$round"
+              run_candidate "$round"
+            else
+              run_candidate "$round"
+              run_baseline "$round"
+            fi
+            benchmarks/reference/run-clipper2.sh benchmarks/workloads.json \
+              > "$results/clipper2-$round.jsonl"
+
+            for implementation in baseline candidate; do
+              jq -r 'select(has("id")) | [.id, .status, .signature] | @tsv' \
+                "$results/$implementation-$round.jsonl" \
+                > "$results/$implementation-$round.signature.tsv"
+            done
+            diff -u "$results/baseline-$round.signature.tsv" \
+              "$results/candidate-$round.signature.tsv"
+          done
+
+          jq -r 'select(has("id")) | .id' "$results/candidate-1.jsonl" \
+            > "$results/case-ids.txt"
+          printf 'case\tbaseline_ns\tcandidate_ns\tspeedup\tclipper2_ns\tcandidate_vs_clipper2\n' \
+            > "$results/summary.tsv"
+          while IFS= read -r id; do
+            for implementation in baseline candidate clipper2; do
+              : > "$results/$implementation.values"
+              for round in 1 2 3 4 5 6 7; do
+                jq -r --arg id "$id" 'select(.id == $id) | .median_ns' \
+                  "$results/$implementation-$round.jsonl" \
+                  >> "$results/$implementation.values"
+              done
+              sort -n "$results/$implementation.values" | sed -n '4p' \
+                > "$results/$implementation.median"
+            done
+            baseline_ns="$(cat "$results/baseline.median")"
+            candidate_ns="$(cat "$results/candidate.median")"
+            clipper_ns="$(cat "$results/clipper2.median")"
+            speedup="$(awk -v b="$baseline_ns" -v c="$candidate_ns" 'BEGIN { printf "%.6f", b / c }')"
+            versus_clipper="$(awk -v c="$candidate_ns" -v r="$clipper_ns" 'BEGIN { printf "%.6f", r / c }')"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "$id" "$baseline_ns" "$candidate_ns" "$speedup" "$clipper_ns" "$versus_clipper" \
+              >> "$results/summary.tsv"
+          done < "$results/case-ids.txt"
+
+          awk -F '\t' '
+            NR > 1 {
+              baseline_total += $2
+              candidate_total += $3
+              clipper_total += $5
+              baseline_log += log($2 / $3)
+              clipper_log += log($5 / $3)
+              count += 1
+              if ($3 < $5 * 0.98) candidate_wins += 1
+              else if ($5 < $3 * 0.98) clipper_wins += 1
+              else ties += 1
+            }
+            END {
+              printf "baseline_total_ns=%.0f\n", baseline_total
+              printf "candidate_total_ns=%.0f\n", candidate_total
+              printf "clipper2_total_ns=%.0f\n", clipper_total
+              printf "baseline_aggregate_speedup=%.6f\n", baseline_total / candidate_total
+              printf "candidate_vs_clipper2_aggregate=%.6f\n", clipper_total / candidate_total
+              printf "baseline_geomean_speedup=%.6f\n", exp(baseline_log / count)
+              printf "candidate_vs_clipper2_geomean=%.6f\n", exp(clipper_log / count)
+              printf "candidate_wins=%d\nclipper2_wins=%d\nties=%d\n", candidate_wins, clipper_wins, ties
+              if (candidate_total * 1.02 >= clipper_total) exit 42
+            }
+          ' "$results/summary.tsv" > "$results/aggregate.txt" || gate_status=$?
+
+          cat "$results/summary.tsv"
+          cat "$results/aggregate.txt"
+          if [[ "${gate_status:-0}" -ne 0 ]]; then
+            echo "Candidate did not clear native Clipper2 by the required 2% aggregate margin"
+            exit "$gate_status"
+          fi
+
+      - name: Upload benchmark evidence
+        if: always() && steps.apply.outputs.applied == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: beat-clipper2-standard-matrix
+          path: ${{ runner.temp }}/clipper2-results
+          retention-days: 14
+
+      - name: Commit validated source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Restore linear convex performance"
+          git push origin HEAD:agent/beat-clipper2-standard-matrix
