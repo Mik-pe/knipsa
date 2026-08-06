@@ -66,8 +66,10 @@ impl HorizontalSpanStats {
     fn record_rectangle(&mut self, rectangle: RectangleKey) {
         self.edge_count += 2;
         self.total_key_span += u128::from(rectangle.min_x.abs_diff(rectangle.max_x)) * 2;
-        self.min_x = Some(self.min_x.map_or(rectangle.min_x, |value| value.min(rectangle.min_x)));
-        self.max_x = Some(self.max_x.map_or(rectangle.max_x, |value| value.max(rectangle.max_x)));
+        self.min_x =
+            Some(self.min_x.map_or(rectangle.min_x, |value| value.min(rectangle.min_x)));
+        self.max_x =
+            Some(self.max_x.map_or(rectangle.max_x, |value| value.max(rectangle.max_x)));
     }
 
     fn should_fuse(self) -> bool {
@@ -96,10 +98,11 @@ fn try_long_rectangle_xor(request: BooleanRequestD<'_>) -> Option<PathsD> {
         return None;
     }
 
-    let mut rectangles = Vec::with_capacity(request.subjects.len() + request.clips.len());
+    let capacity = request.subjects.len() + request.clips.len();
+    let mut rectangles = Vec::with_capacity(capacity);
     let mut stats = HorizontalSpanStats::default();
-    let mut xs = Vec::with_capacity(rectangles.capacity() * 2);
-    let mut ys = Vec::with_capacity(rectangles.capacity() * 2);
+    let mut xs = Vec::with_capacity(capacity * 2);
+    let mut ys = Vec::with_capacity(capacity * 2);
     for path in request.subjects.iter().chain(request.clips) {
         if path.is_empty() {
             continue;
@@ -153,27 +156,15 @@ fn rectangle_key(path: &[PointD]) -> Option<RectangleKey> {
 
     let mut corners = 0_u8;
     for point in points {
-        let x_bit = if point.x == min_x {
-            0
-        } else if point.x == max_x {
-            1
-        } else {
-            return None;
-        };
-        let y_bit = if point.y == min_y {
-            0
-        } else if point.y == max_y {
-            1
-        } else {
-            return None;
-        };
+        let x_bit = u32::from(point.x == max_x);
+        let y_bit = u32::from(point.y == max_y);
         let bit = 1_u8 << (x_bit + 2 * y_bit);
         if corners & bit != 0 {
             return None;
         }
         corners |= bit;
     }
-    (corners == 0b1111).then_some(RectangleKey { min_x, min_y, max_x, max_y })
+    Some(RectangleKey { min_x, min_y, max_x, max_y })
 }
 
 fn coordinate(key: i64, path: &[PointD], x_axis: bool) -> Option<GridCoordinate> {
@@ -350,14 +341,18 @@ fn stitch_unique(edges: &[DirectedEdge]) -> Option<PathsD> {
     let mut outgoing = HashMap::with_capacity(edges.len());
     let mut incoming = HashMap::with_capacity(edges.len());
     for (index, edge) in edges.iter().enumerate() {
-        if let Entry::Occupied(_) = outgoing.entry(edge.start_key) {
-            return None;
+        match outgoing.entry(edge.start_key) {
+            Entry::Vacant(entry) => {
+                entry.insert(index);
+            }
+            Entry::Occupied(_) => return None,
         }
-        outgoing.insert(edge.start_key, index);
-        if let Entry::Occupied(_) = incoming.entry(edge.end_key) {
-            return None;
+        match incoming.entry(edge.end_key) {
+            Entry::Vacant(entry) => {
+                entry.insert(index);
+            }
+            Entry::Occupied(_) => return None,
         }
-        incoming.insert(edge.end_key, index);
     }
     if outgoing.len() != incoming.len()
         || outgoing.keys().any(|point| !incoming.contains_key(point))
@@ -453,8 +448,8 @@ mod tests {
         ]
     }
 
-    fn coordinate(key: i64) -> GridCoordinate {
-        GridCoordinate { key, value: key as f64 }
+    fn grid_coordinate(key: i32) -> GridCoordinate {
+        GridCoordinate { key: i64::from(key), value: f64::from(key) }
     }
 
     fn directed(start: PointD, end: PointD) -> DirectedEdge {
@@ -551,6 +546,12 @@ mod tests {
                 PointD::new(0.0, 2.0),
             ],
             vec![
+                PointD::new(0.0, 0.0),
+                PointD::new(2.0, 0.0),
+                PointD::new(2.0, 2.0),
+                PointD::new(2.0, 0.0),
+            ],
+            vec![
                 PointD::new(f64::NAN, 0.0),
                 PointD::new(2.0, 0.0),
                 PointD::new(2.0, 2.0),
@@ -563,35 +564,31 @@ mod tests {
                 PointD::new(MAX_COORDINATE + 1.0, 2.0),
             ],
         ] {
-            if invalid.is_empty() {
-                assert!(rectangle_key(&invalid).is_none());
-            } else {
-                assert!(rectangle_key(&invalid).is_none());
-            }
+            assert!(rectangle_key(&invalid).is_none());
         }
         assert!(rectangle_key(&rectangle(0.0, 0.0, 2.0, 2.0)).is_some());
     }
 
     #[test]
     fn covers_coordinate_grid_and_span_guards() {
-        assert!(coordinate(0, &[], true).is_none());
+        assert!(super::coordinate(0, &[], true).is_none());
         let path = rectangle(0.0, 0.0, 2.0, 2.0);
-        assert_eq!(coordinate(0, &path, true).unwrap().value, 0.0);
-        assert_eq!(coordinate(2_000_000_000, &path, false).unwrap().value, 2.0);
-        assert_eq!(coordinate_index(&[coordinate(0), coordinate(2)], 2), Some(1));
-        assert!(coordinate_index(&[coordinate(0), coordinate(2)], 1).is_none());
+        assert_eq!(super::coordinate(0, &path, true).unwrap().value, 0.0);
+        assert_eq!(super::coordinate(2_000_000_000, &path, false).unwrap().value, 2.0);
+        assert_eq!(coordinate_index(&[grid_coordinate(0), grid_coordinate(2)], 2), Some(1));
+        assert!(coordinate_index(&[grid_coordinate(0), grid_coordinate(2)], 1).is_none());
         assert_eq!(orthogonal_grid_size(10, 20), Some(200));
         assert!(orthogonal_grid_size(usize::MAX, 2).is_none());
         assert!(orthogonal_grid_size(1_001, 1_000).is_none());
 
-        let same = vec![coordinate(0), coordinate(0), coordinate(2)];
+        let same = vec![grid_coordinate(0), grid_coordinate(0), grid_coordinate(2)];
         assert_eq!(dedup_coordinates(same).unwrap().len(), 2);
         assert!(dedup_coordinates(vec![
             GridCoordinate { key: 0, value: 0.0 },
             GridCoordinate { key: 0, value: 0.25 },
         ])
         .is_none());
-        assert!(dedup_coordinates(vec![coordinate(0)]).is_none());
+        assert!(dedup_coordinates(vec![grid_coordinate(0)]).is_none());
 
         let mut empty = HorizontalSpanStats::default();
         assert!(!empty.should_fuse());
@@ -609,14 +606,14 @@ mod tests {
 
     #[test]
     fn coalesces_runs_and_rejects_ambiguous_stitching() {
-        let y = coordinate(7);
+        let y = grid_coordinate(7);
         let mut run = None;
         let mut boundary = Vec::new();
-        update_horizontal_run(&mut boundary, &mut run, 1, coordinate(0), y);
-        update_horizontal_run(&mut boundary, &mut run, 1, coordinate(1), y);
-        update_horizontal_run(&mut boundary, &mut run, -1, coordinate(2), y);
-        update_horizontal_run(&mut boundary, &mut run, 0, coordinate(3), y);
-        update_horizontal_run(&mut boundary, &mut run, 0, coordinate(4), y);
+        update_horizontal_run(&mut boundary, &mut run, 1, grid_coordinate(0), y);
+        update_horizontal_run(&mut boundary, &mut run, 1, grid_coordinate(1), y);
+        update_horizontal_run(&mut boundary, &mut run, -1, grid_coordinate(2), y);
+        update_horizontal_run(&mut boundary, &mut run, 0, grid_coordinate(3), y);
+        update_horizontal_run(&mut boundary, &mut run, 0, grid_coordinate(4), y);
         assert_eq!(boundary.len(), 2);
         assert!(run.is_none());
 
@@ -630,14 +627,15 @@ mod tests {
         assert_eq!(stitch_unique(&square).unwrap().len(), 1);
         assert!(stitch_unique(&[square[0]]).is_none());
         assert!(stitch_unique(&[square[0], square[0]]).is_none());
-        let duplicate_incoming = [square[0], directed(PointD::new(2.0, 0.0), PointD::new(1.0, 0.0))];
+        let duplicate_incoming =
+            [square[0], directed(PointD::new(2.0, 0.0), PointD::new(1.0, 0.0))];
         assert!(stitch_unique(&duplicate_incoming).is_none());
     }
 
     #[test]
     fn sweeps_empty_and_filled_columns() {
-        let xs = [coordinate(0), coordinate(1), coordinate(2)];
-        let ys = [coordinate(0), coordinate(1), coordinate(2)];
+        let xs = [grid_coordinate(0), grid_coordinate(1), grid_coordinate(2)];
+        let ys = [grid_coordinate(0), grid_coordinate(1), grid_coordinate(2)];
         let events = [
             GridEvent { x: 0, y0: 0, y1: 2 },
             GridEvent { x: 2, y0: 0, y1: 2 },
@@ -652,6 +650,9 @@ mod tests {
         assert!(key(PointD::new(0.0, f64::INFINITY)).is_none());
         assert!(key(PointD::new(MAX_COORDINATE + 1.0, 0.0)).is_none());
         assert!(key(PointD::new(0.0, MAX_COORDINATE + 1.0)).is_none());
-        assert_eq!(key(PointD::new(1.0, 2.0)), Some(PointKey { x: 1_000_000_000, y: 2_000_000_000 }));
+        assert_eq!(
+            key(PointD::new(1.0, 2.0)),
+            Some(PointKey { x: 1_000_000_000, y: 2_000_000_000 })
+        );
     }
 }
