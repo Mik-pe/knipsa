@@ -1,3 +1,4 @@
+# Exact source snapshot for the final branch cleanup pass.
 name: Agent source snapshot
 
 on:
