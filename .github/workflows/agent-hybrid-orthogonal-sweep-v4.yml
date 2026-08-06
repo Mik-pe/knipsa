@@ -1,0 +1,130 @@
+name: Agent hybrid orthogonal sweep v4
+
+on:
+  push:
+    branches: [agent/fuse-orthogonal-column-sweep]
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  optimize:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Extract hybrid experiment from history
+        run: |
+          git show 3fcb38d2ce3208ce678d08c298b723dbb18b5f82:.github/workflows/agent-hybrid-orthogonal-sweep.yml > /tmp/hybrid.yml
+          cat > /tmp/extract-step.js <<'NODE'
+          const fs = require("fs");
+          const name = process.argv[2];
+          const source = fs.readFileSync("/tmp/hybrid.yml", "utf8");
+          const marker = `      - name: ${name}\n        run: |\n`;
+          const start = source.indexOf(marker);
+          if (start < 0) throw new Error(`missing step: ${name}`);
+          const rest = source.slice(start + marker.length).split("\n");
+          const body = [];
+          for (const line of rest) {
+            if (line.startsWith("      - ")) break;
+            body.push(line.startsWith("          ") ? line.slice(10) : line);
+          }
+          process.stdout.write(body.join("\n"));
+          NODE
+
+      - name: Build orthogonal benchmark matrix
+        run: node /tmp/extract-step.js "Build orthogonal benchmark matrix" | bash
+
+      - name: Build baseline benchmark
+        run: |
+          CARGO_TARGET_DIR=/tmp/bench-target cargo +stable build --release -p knipsa --bench workload
+          baseline_bin=$(find /tmp/bench-target/release/deps -type f -name 'workload-*.exe' | head -n 1)
+          test -n "$baseline_bin"
+          cp "$baseline_bin" /tmp/workload-before.exe
+
+      - name: Add lint-clean adaptive fused sweep
+        run: |
+          node /tmp/extract-step.js "Add adaptive fused sweep" \
+            | sed \
+                -e 's/fn coordinate(key: i64)/fn coordinate(key: i32)/' \
+                -e 's/GridCoordinate { key, value: key as f64 }/GridCoordinate { key: i64::from(key), value: f64::from(key) }/' \
+                -e 's/coordinate(value as i64)/coordinate(i32::try_from(value).expect("test row fits i32"))/' \
+            | bash
+
+      - name: Build optimized benchmark
+        run: |
+          CARGO_TARGET_DIR=/tmp/bench-target cargo +stable build --release -p knipsa --bench workload
+          optimized_bin=$(find /tmp/bench-target/release/deps -type f -name 'workload-*.exe' -newer crates/knipsa/src/fast.rs | head -n 1)
+          if [ -z "$optimized_bin" ]; then
+            optimized_bin=$(find /tmp/bench-target/release/deps -type f -name 'workload-*.exe' | head -n 1)
+          fi
+          test -n "$optimized_bin"
+          cp "$optimized_bin" /tmp/workload-after.exe
+
+      - name: Compare alternating benchmark runs
+        run: |
+          : > /tmp/before.jsonl
+          : > /tmp/after.jsonl
+          for run in 1 2 3 4 5 6 7 8 9; do
+            KNIPSA_WORKLOAD=/tmp/orthogonal-workloads.json /tmp/workload-before.exe >> /tmp/before.jsonl
+            KNIPSA_WORKLOAD=/tmp/orthogonal-workloads.json /tmp/workload-after.exe >> /tmp/after.jsonl
+          done
+          node <<'NODE'
+          const fs = require("fs");
+          const parse = path => fs.readFileSync(path, "utf8").trim().split("\n")
+            .map(line => JSON.parse(line)).filter(row => row.id);
+          const group = rows => rows.reduce((map, row) => {
+            if (!map.has(row.id)) map.set(row.id, []);
+            map.get(row.id).push(row);
+            return map;
+          }, new Map());
+          const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+          const before = group(parse("/tmp/before.jsonl"));
+          const after = group(parse("/tmp/after.jsonl"));
+          let beforeTotal = 0;
+          let afterTotal = 0;
+          const regressions = [];
+          for (const [id, beforeRows] of before) {
+            const afterRows = after.get(id);
+            if (!afterRows || beforeRows[0].signature !== afterRows[0].signature) {
+              throw new Error(`output mismatch: ${id}`);
+            }
+            const baseline = median(beforeRows.map(row => Number(row.median_ns)));
+            const optimized = median(afterRows.map(row => Number(row.median_ns)));
+            const ratio = baseline / optimized;
+            console.log(`${id}: ${baseline} ns -> ${optimized} ns (${ratio.toFixed(4)}x)`);
+            if (optimized > baseline * 1.03) regressions.push(id);
+            beforeTotal += baseline;
+            afterTotal += optimized;
+          }
+          const aggregate = beforeTotal / afterTotal;
+          console.log(`aggregate: ${beforeTotal} ns -> ${afterTotal} ns (${aggregate.toFixed(4)}x)`);
+          if (regressions.length) throw new Error(`regressions above 3%: ${regressions.join(", ")}`);
+          if (aggregate < 1.20) throw new Error(`aggregate speedup below 1.20x: ${aggregate}`);
+          NODE
+
+      - name: Validate Rust workspace
+        run: |
+          cargo +stable fmt --all -- --check
+          cargo +stable test --workspace --all-features
+          cargo +stable clippy --workspace --all-targets --all-features -- -D warnings
+          RUSTDOCFLAGS="-D warnings" cargo +stable doc --workspace --all-features --no-deps
+
+      - name: Commit optimized implementation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/agent-hybrid-orthogonal-sweep-v4.yml
+          git add crates/knipsa/src/fast.rs
+          git commit -m "Adapt orthogonal boundary fusion"
+          git push origin HEAD:agent/fuse-orthogonal-column-sweep
