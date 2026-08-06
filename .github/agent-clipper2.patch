@@ -1,3 +1,12 @@
+diff --git a/crates/knipsa/src/convex_dispatch.rs b/crates/knipsa/src/convex_dispatch.rs
+--- a/crates/knipsa/src/convex_dispatch.rs
++++ b/crates/knipsa/src/convex_dispatch.rs
+@@ -676,4 +676,5 @@ fn key(point: PointD) -> Option<PointKey> {
+ }
+ 
+ #[cfg(test)]
++#[path = "convex_dispatch/tests.rs"]
+ mod tests;
 diff --git a/crates/knipsa/src/performance_dispatch.rs b/crates/knipsa/src/performance_dispatch.rs
 index a51a69e..f1a2715 100644
 --- a/crates/knipsa/src/performance_dispatch.rs
@@ -19,10 +28,3 @@ index a51a69e..f1a2715 100644
      }
      crate::standard_dispatch::try_boolean_opd(request)
  }
-diff --git a/crates/knipsa/src/tests.rs b/crates/knipsa/src/tests.rs
-new file mode 100644
-index 0000000..3c820a5
---- /dev/null
-+++ b/crates/knipsa/src/tests.rs
-@@ -0,0 +1 @@
-+include!("convex_dispatch/tests.rs");
