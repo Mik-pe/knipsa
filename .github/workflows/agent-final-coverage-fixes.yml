@@ -26,6 +26,21 @@ jobs:
           base64 --decode .agent/final-coverage.patch.gz.b64 | gzip --decompress > /tmp/final-coverage.patch
           git apply --check /tmp/final-coverage.patch
           git apply /tmp/final-coverage.patch
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = 'crates/knipsa/src/boolean.rs';
+          const source = fs.readFileSync(path, 'utf8');
+          const before = '        assert!(clip_atoms.iter().all(|edge| !edge.subject && edge.start != edge.end));';
+          const after = [
+            '        assert!(clip_atoms.iter().all(|edge| !edge.subject));',
+            '        assert!(clip_atoms.iter().all(|edge| edge.start != edge.end));',
+          ].join('\n');
+          const matches = source.split(before).length - 1;
+          if (matches !== 1) {
+            throw new Error(`expected one clip atom assertion, found ${matches}`);
+          }
+          fs.writeFileSync(path, source.replace(before, after));
+          NODE
           cargo fmt --all
           cargo fmt --all -- --check
           cargo test --workspace --all-features
