@@ -4,14 +4,16 @@
 #![doc(test(attr(deny(warnings))))]
 
 mod boolean;
+mod convex_dispatch;
 mod error;
-// Keep the standard-case dispatcher separate from the certified general kernels.
-#[path = "standard_dispatch.rs"]
+#[path = "performance_dispatch.rs"]
 mod fast;
 mod fast_dispatch;
 mod geometry;
 mod offset;
 mod request;
+#[path = "standard_dispatch.rs"]
+mod standard_dispatch;
 mod triangulation;
 
 pub use error::Error;

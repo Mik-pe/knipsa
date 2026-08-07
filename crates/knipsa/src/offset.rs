@@ -234,6 +234,9 @@ fn merge_generated_contours(
     generated: &[PathD],
     preserve_collinear: bool,
 ) -> Result<PathsD, Error> {
+    if let Some(result) = try_merge_rectangle_pair(generated, preserve_collinear) {
+        return result;
+    }
     // Concave offsets can contain overlapping lobes and negative slivers. The
     // exact non-zero union is the topology cleanup stage and also merges
     // overlapping offsets from multiple input paths. The boolean kernel only
@@ -246,6 +249,53 @@ fn merge_generated_contours(
         fill_rule: FillRule::NonZero,
     })?;
     Ok(result.into_iter().map(|path| clean_ring(path, preserve_collinear)).collect())
+}
+
+/// Routes two same-winding rectangles through the allocation-light pair
+/// dispatcher. Opposite winding can cancel under `NonZero` and must retain the
+/// general cleanup path.
+fn try_merge_rectangle_pair(
+    generated: &[PathD],
+    preserve_collinear: bool,
+) -> Option<Result<PathsD, Error>> {
+    let [first, second] = generated else { return None };
+    if !is_axis_aligned_rectangle(first) || !is_axis_aligned_rectangle(second) {
+        return None;
+    }
+    let first_winding = certified_area_sign(first)?;
+    if certified_area_sign(second)? != first_winding {
+        return None;
+    }
+    Some(
+        boolean_opd(BooleanRequestD {
+            subjects: std::slice::from_ref(first),
+            clips: std::slice::from_ref(second),
+            clip_type: ClipType::Union,
+            fill_rule: FillRule::NonZero,
+        })
+        .map(|paths| paths.into_iter().map(|path| clean_ring(path, preserve_collinear)).collect()),
+    )
+}
+
+#[allow(clippy::float_cmp)]
+fn is_axis_aligned_rectangle(path: &[PointD]) -> bool {
+    let [first, second, third, fourth] = path else { return false };
+    let points = [first, second, third, fourth];
+    if points
+        .iter()
+        .zip(points.iter().cycle().skip(1))
+        .any(|(start, end)| start == end || (start.x == end.x) == (start.y == end.y))
+    {
+        return false;
+    }
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (first.x, first.y, first.x, first.y);
+    for point in [second, third, fourth] {
+        min_x = min_x.min(point.x);
+        min_y = min_y.min(point.y);
+        max_x = max_x.max(point.x);
+        max_y = max_y.max(point.y);
+    }
+    min_x < max_x && min_y < max_y
 }
 
 /// Offsets one floating-point path.
@@ -1419,7 +1469,7 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_offsets_use_exact_merge_fallback() {
+    fn overlapping_offsets_merge_and_preserve_general_fallback() {
         let first = rectangle(0.0, 0.0, 10.0, 10.0);
         let second = rectangle(5.0, 0.0, 15.0, 10.0);
         let options = OffsetOptions::polygon(JoinType::Round).with_arc_tolerance(0.05);
@@ -1430,6 +1480,54 @@ mod tests {
         let merged = merge_generated_contours(&[first, second], false).unwrap();
         assert_eq!(merged.len(), 1);
         assert_eq!(bounds(&merged), (0.0, 0.0, 15.0, 10.0));
+
+        let first = rectangle(0.0, 0.0, 10.0, 10.0);
+        let mut opposite = rectangle(5.0, 0.0, 15.0, 10.0);
+        opposite.reverse();
+        assert!(try_merge_rectangle_pair(&[first.clone(), opposite.clone()], false).is_none());
+        assert!(!merge_generated_contours(&[first, opposite], false).unwrap().is_empty());
+
+        assert!(try_merge_rectangle_pair(&[], false).is_none());
+        assert!(!is_axis_aligned_rectangle(&[]));
+        assert!(
+            try_merge_rectangle_pair(
+                &[
+                    rectangle(0.0, 0.0, 1.0, 1.0),
+                    vec![
+                        PointD::new(0.0, 0.0),
+                        PointD::new(1.0, 1.0),
+                        PointD::new(0.0, 1.0),
+                        PointD::new(1.0, 0.0),
+                    ],
+                ],
+                false,
+            )
+            .is_none()
+        );
+        assert!(!is_axis_aligned_rectangle(&[
+            PointD::new(0.0, 0.0),
+            PointD::new(1.0, 1.0),
+            PointD::new(0.0, 1.0),
+            PointD::new(1.0, 0.0),
+        ]));
+        assert!(!is_axis_aligned_rectangle(&[
+            PointD::new(0.0, 0.0),
+            PointD::new(0.0, 0.0),
+            PointD::new(1.0, 1.0),
+            PointD::new(1.0, 0.0),
+        ]));
+        assert!(!is_axis_aligned_rectangle(&[
+            PointD::new(0.0, 0.0),
+            PointD::new(0.0, 1.0),
+            PointD::new(0.0, 2.0),
+            PointD::new(0.0, 3.0),
+        ]));
+        assert!(!is_axis_aligned_rectangle(&[
+            PointD::new(0.0, 0.0),
+            PointD::new(1.0, 0.0),
+            PointD::new(2.0, 0.0),
+            PointD::new(3.0, 0.0),
+        ]));
     }
 
     #[test]
