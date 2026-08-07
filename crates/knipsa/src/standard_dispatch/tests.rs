@@ -26,6 +26,10 @@ fn base_result(request: BooleanRequestD<'_>) -> PathsD {
         .expect("base fast path closes")
 }
 
+fn exact_result(request: BooleanRequestD<'_>) -> PathsD {
+    crate::boolean::boolean_opd_exact(request).expect("exact oracle")
+}
+
 fn edge(
     start: (f64, f64),
     end: (f64, f64),
@@ -121,6 +125,208 @@ fn wrapper_falls_back_for_non_rectangle_and_vertex_touch_topology() {
         canonical_geometry(try_boolean_opd(request).unwrap().unwrap()),
         canonical_geometry(base_result(request)),
     );
+}
+
+#[test]
+fn convex_point_contact_matches_exact_oracle() {
+    let left = vec![PointD::new(0.0, 0.0), PointD::new(10.0, 0.0), PointD::new(5.0, 10.0)];
+    let right = vec![PointD::new(10.0, 0.0), PointD::new(20.0, 0.0), PointD::new(15.0, 10.0)];
+    for reverse_subject in [false, true] {
+        for reverse_clip in [false, true] {
+            let mut subject = left.clone();
+            let mut clip = right.clone();
+            if reverse_subject {
+                subject.reverse();
+            }
+            if reverse_clip {
+                clip.reverse();
+            }
+            let subjects = [subject];
+            let clips = [clip];
+            for fill_rule in [FillRule::EvenOdd, FillRule::NonZero] {
+                for clip_type in
+                    [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor]
+                {
+                    let request = BooleanRequestD {
+                        subjects: &subjects,
+                        clips: &clips,
+                        clip_type,
+                        fill_rule,
+                    };
+                    let fast = try_convex_zero_area_contact(request)
+                        .expect("strictly convex point contact should be certified");
+                    assert_eq!(canonical_geometry(fast), canonical_geometry(exact_result(request)));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn convex_contact_rejects_ambiguous_or_unsupported_pairs() {
+    let subject = vec![PointD::new(0.0, 0.0), PointD::new(10.0, 0.0), PointD::new(5.0, 10.0)];
+    let shared_edge = vec![PointD::new(10.0, 0.0), PointD::new(0.0, 0.0), PointD::new(5.0, -10.0)];
+    let overlap = vec![PointD::new(5.0, 0.0), PointD::new(15.0, 0.0), PointD::new(10.0, 10.0)];
+    let disjoint = vec![PointD::new(20.0, 0.0), PointD::new(30.0, 0.0), PointD::new(25.0, 10.0)];
+    let vertically_disjoint =
+        vec![PointD::new(0.0, 20.0), PointD::new(10.0, 20.0), PointD::new(5.0, 30.0)];
+    let concave = vec![
+        PointD::new(10.0, 0.0),
+        PointD::new(20.0, 0.0),
+        PointD::new(15.0, 2.0),
+        PointD::new(20.0, 10.0),
+        PointD::new(10.0, 10.0),
+    ];
+    let aliased =
+        vec![PointD::new(10.0 + 0.25e-9, 0.0), PointD::new(20.0, 0.0), PointD::new(15.0, 10.0)];
+    let subjects = [subject];
+    for clip in [shared_edge, overlap, disjoint, vertically_disjoint, concave, aliased] {
+        let clips = [clip];
+        let request = BooleanRequestD {
+            subjects: &subjects,
+            clips: &clips,
+            clip_type: ClipType::Xor,
+            fill_rule: FillRule::EvenOdd,
+        };
+        assert!(try_convex_zero_area_contact(request).is_none());
+    }
+
+    let clips = [vec![PointD::new(10.0, 0.0), PointD::new(20.0, 0.0), PointD::new(15.0, 10.0)]];
+    let unsupported = BooleanRequestD {
+        subjects: &subjects,
+        clips: &clips,
+        clip_type: ClipType::Xor,
+        fill_rule: FillRule::Positive,
+    };
+    assert!(try_convex_zero_area_contact(unsupported).is_none());
+    assert!(key_bounds(&[]).is_none());
+    assert!(certified_strict_convex(&[]).is_none());
+    let repeated_winding = vec![
+        PointD::new(0.0, 0.0),
+        PointD::new(10.0, 0.0),
+        PointD::new(5.0, 10.0),
+        PointD::new(0.0, 0.0),
+        PointD::new(10.0, 0.0),
+        PointD::new(5.0, 10.0),
+    ];
+    assert!(certified_strict_convex(&repeated_winding).is_none());
+    let collinear = vec![PointD::new(0.0, 0.0), PointD::new(1.0, 0.0), PointD::new(2.0, 0.0)];
+    assert!(certified_strict_convex(&collinear).is_none());
+}
+
+#[test]
+fn even_odd_bow_tie_matches_exact_oracle() {
+    let original = vec![
+        PointD::new(0.0, 0.0),
+        PointD::new(20.0, 20.0),
+        PointD::new(0.0, 20.0),
+        PointD::new(20.0, 0.0),
+    ];
+    for rotation in 0..4 {
+        for reverse in [false, true] {
+            let mut path = original.clone();
+            path.rotate_left(rotation);
+            if reverse {
+                path.reverse();
+            }
+            let subjects = [path];
+            let clips = [];
+            for clip_type in [ClipType::Union, ClipType::Difference, ClipType::Xor] {
+                let request = BooleanRequestD {
+                    subjects: &subjects,
+                    clips: &clips,
+                    clip_type,
+                    fill_rule: FillRule::EvenOdd,
+                };
+                let fast = try_even_odd_bow_tie(request).expect("certified bow tie");
+                assert_eq!(canonical_geometry(fast), canonical_geometry(exact_result(request)));
+                assert!(try_boolean_opd(request).is_some());
+            }
+        }
+    }
+}
+
+#[test]
+fn bow_tie_rejects_non_grid_and_unsupported_inputs() {
+    let simple = [vec![
+        PointD::new(0.0, 0.0),
+        PointD::new(10.0, 0.0),
+        PointD::new(10.0, 10.0),
+        PointD::new(0.0, 10.0),
+    ]];
+    let empty = [];
+    let request = BooleanRequestD {
+        subjects: &simple,
+        clips: &empty,
+        clip_type: ClipType::Union,
+        fill_rule: FillRule::EvenOdd,
+    };
+    assert!(try_even_odd_bow_tie(request).is_none());
+    assert!(
+        try_even_odd_bow_tie(BooleanRequestD { fill_rule: FillRule::NonZero, ..request }).is_none()
+    );
+    assert!(
+        try_even_odd_bow_tie(BooleanRequestD { clip_type: ClipType::Intersection, ..request })
+            .is_none()
+    );
+
+    let non_grid_crossing = [vec![
+        PointD::new(0.0, 0.0),
+        PointD::new(1.0, 1.0),
+        PointD::new(0.0, 1.0),
+        PointD::new(2.0, 0.0),
+    ]];
+    assert!(
+        try_even_odd_bow_tie(BooleanRequestD { subjects: &non_grid_crossing, ..request }).is_none()
+    );
+
+    let clips = [simple[0].clone()];
+    assert!(try_even_odd_bow_tie(BooleanRequestD { clips: &clips, ..request }).is_none());
+    assert!(!opposite_signs(0, 1));
+    assert!(point_on_segment(
+        PointKey { x: 1, y: 1 },
+        PointKey { x: 0, y: 0 },
+        PointKey { x: 2, y: 2 },
+    ));
+    let mut flat = vec![PointD::new(0.0, 0.0), PointD::new(1.0, 0.0), PointD::new(2.0, 0.0)];
+    assert!(make_positive_triangle(&mut flat).is_none());
+    let mut short = vec![PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)];
+    assert!(make_positive_triangle(&mut short).is_none());
+
+    assert!(
+        proper_intersection(
+            PointD::new(-1.0, 0.0),
+            PointD::new(1.0, 0.0),
+            PointD::new(0.0, -1.0),
+            PointD::new(2.0, 1.0),
+            [
+                PointKey { x: -1, y: 0 },
+                PointKey { x: 1, y: 0 },
+                PointKey { x: 0, y: -1 },
+                PointKey { x: 2, y: 1 },
+            ],
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn exact_segment_predicates_cover_crossings_and_endpoints() {
+    let point = |x, y| PointKey { x, y };
+    assert!(segments_intersect(point(-1, 0), point(1, 0), point(0, -1), point(0, 1)));
+    assert!(segments_intersect(point(0, 0), point(2, 0), point(1, 0), point(1, 1)));
+    assert!(segments_intersect(point(0, 0), point(2, 0), point(1, 1), point(1, 0)));
+    assert!(segments_intersect(point(1, 0), point(1, 1), point(0, 0), point(2, 0)));
+    assert!(segments_intersect(point(1, 1), point(1, 0), point(0, 0), point(2, 0)));
+    assert!(!segments_intersect(point(0, 0), point(1, 0), point(2, 1), point(2, 2)));
+    assert!(!segments_intersect(point(0, 0), point(1, 0), point(2, 0), point(2, 1)));
+    assert!(!segments_intersect(point(0, 0), point(1, 0), point(2, 1), point(2, 0)));
+    assert!(!segments_intersect(point(2, 0), point(2, 1), point(0, 0), point(1, 0)));
+
+    assert!(!point_on_segment(point(-1, 1), point(0, 0), point(2, 2)));
+    assert!(!point_on_segment(point(3, 1), point(0, 0), point(2, 2)));
+    assert!(!point_on_segment(point(1, -1), point(0, 0), point(2, 2)));
+    assert!(!point_on_segment(point(1, 3), point(0, 0), point(2, 2)));
 }
 
 #[test]
