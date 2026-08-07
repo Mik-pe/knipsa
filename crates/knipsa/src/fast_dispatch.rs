@@ -43,7 +43,6 @@ struct GridEvent {
 #[derive(Clone, Copy)]
 struct DirectedEdge {
     start: PointD,
-    end: PointD,
     start_key: PointKey,
     end_key: PointKey,
 }
@@ -74,7 +73,10 @@ impl HorizontalSpanStats {
         let (Some(min_x), Some(max_x)) = (self.min_x, self.max_x) else {
             return false;
         };
-        if self.edge_count == 0 || min_x == max_x {
+        if self.edge_count == 0 {
+            return false;
+        }
+        if min_x == max_x {
             return false;
         }
         let coordinate_span = u128::from(min_x.abs_diff(max_x));
@@ -148,10 +150,6 @@ fn rectangle_key(path: &[PointD]) -> Option<RectangleKey> {
     let max_x = points.iter().map(|point| point.x).max()?;
     let min_y = points.iter().map(|point| point.y).min()?;
     let max_y = points.iter().map(|point| point.y).max()?;
-    if min_x == max_x || min_y == max_y {
-        return None;
-    }
-
     let mut corners = 0_u8;
     for point in points {
         let x_bit = u32::from(point.x == max_x);
@@ -318,7 +316,6 @@ fn push_grid_edge(
 ) {
     boundary.push(DirectedEdge {
         start: PointD::new(start_x.value, start_y.value),
-        end: PointD::new(end_x.value, end_y.value),
         start_key: PointKey { x: start_x.key, y: start_y.key },
         end_key: PointKey { x: end_x.key, y: end_y.key },
     });
@@ -345,9 +342,7 @@ fn stitch_unique(edges: &[DirectedEdge]) -> Option<PathsD> {
             Entry::Occupied(_) => return None,
         }
     }
-    if outgoing.len() != incoming.len()
-        || outgoing.keys().any(|point| !incoming.contains_key(point))
-    {
+    if outgoing.keys().any(|point| !incoming.contains_key(point)) {
         return None;
     }
 
@@ -366,20 +361,21 @@ fn stitch_unique(edges: &[DirectedEdge]) -> Option<PathsD> {
         let mut current = start;
         loop {
             if visited[current] {
-                if current != start {
-                    return None;
-                }
                 break;
             }
             visited[current] = true;
             path.push(edges[current].start);
             current = next[current];
         }
-        if path.len() >= 3 && signed_area2(&path).abs() > f64::EPSILON {
-            path = crate::trim_collinear_d(&path, crate::PathKind::Closed).ok()?;
-            canonicalize(&mut path);
-            paths.push(path);
+        if path.len() < 3 {
+            continue;
         }
+        if signed_area2(&path).abs() <= f64::EPSILON {
+            continue;
+        }
+        path = crate::trim_collinear_d(&path, crate::PathKind::Closed).ok()?;
+        canonicalize(&mut path);
+        paths.push(path);
     }
     paths.sort_by(compare_paths);
     Some(paths)
@@ -408,7 +404,7 @@ fn compare_paths(left: &PathD, right: &PathD) -> std::cmp::Ordering {
         .zip(right)
         .map(|(left, right)| left.x.total_cmp(&right.x).then(left.y.total_cmp(&right.y)))
         .find(|ordering| *ordering != std::cmp::Ordering::Equal)
-        .unwrap_or_else(|| left.len().cmp(&right.len()))
+        .unwrap_or(left.len().cmp(&right.len()))
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
@@ -446,7 +442,6 @@ mod tests {
     fn directed(start: PointD, end: PointD) -> DirectedEdge {
         DirectedEdge {
             start,
-            end,
             start_key: key(start).expect("test point is keyable"),
             end_key: key(end).expect("test point is keyable"),
         }
@@ -503,6 +498,10 @@ mod tests {
             clip_type: ClipType::Xor,
             fill_rule: FillRule::EvenOdd,
         };
+        let mut with_empty = vec![Vec::new()];
+        with_empty.extend(rectangles.iter().cloned());
+        let request_with_empty = BooleanRequestD { subjects: &with_empty, ..request };
+        assert!(try_long_rectangle_xor(request_with_empty).is_none());
         assert!(try_long_rectangle_xor(request).is_none());
         assert!(try_boolean_opd(request).unwrap().is_ok());
         assert!(
@@ -561,8 +560,11 @@ mod tests {
     fn covers_coordinate_grid_and_span_guards() {
         assert!(super::coordinate(0, &[], true).is_none());
         let path = rectangle(0.0, 0.0, 2.0, 2.0);
-        assert_eq!(super::coordinate(0, &path, true).unwrap().value, 0.0);
-        assert_eq!(super::coordinate(2_000_000_000, &path, false).unwrap().value, 2.0);
+        assert_eq!(super::coordinate(0, &path, true).unwrap().value.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(
+            super::coordinate(2_000_000_000, &path, false).unwrap().value.to_bits(),
+            2.0_f64.to_bits()
+        );
         assert_eq!(coordinate_index(&[grid_coordinate(0), grid_coordinate(2)], 2), Some(1));
         assert!(coordinate_index(&[grid_coordinate(0), grid_coordinate(2)], 1).is_none());
         assert_eq!(orthogonal_grid_size(10, 20), Some(200));
@@ -582,6 +584,13 @@ mod tests {
 
         let mut empty = HorizontalSpanStats::default();
         assert!(!empty.should_fuse());
+        let no_edges_with_bounds = HorizontalSpanStats {
+            edge_count: 0,
+            total_key_span: 0,
+            min_x: Some(0),
+            max_x: Some(1),
+        };
+        assert!(!no_edges_with_bounds.should_fuse());
         empty.record_rectangle(RectangleKey { min_x: 0, min_y: 0, max_x: 0, max_y: 1 });
         assert!(!empty.should_fuse());
         let mut short = HorizontalSpanStats::default();
@@ -608,6 +617,8 @@ mod tests {
         assert!(run.is_none());
 
         assert_eq!(stitch_unique(&[]), Some(Vec::new()));
+        let mut empty_path = Vec::new();
+        canonicalize(&mut empty_path);
         let square = [
             directed(PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)),
             directed(PointD::new(1.0, 0.0), PointD::new(1.0, 1.0)),
@@ -620,6 +631,17 @@ mod tests {
         let duplicate_incoming =
             [square[0], directed(PointD::new(2.0, 0.0), PointD::new(1.0, 0.0))];
         assert!(stitch_unique(&duplicate_incoming).is_none());
+        let two_edge_cycle = [
+            directed(PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)),
+            directed(PointD::new(1.0, 0.0), PointD::new(0.0, 0.0)),
+        ];
+        assert_eq!(stitch_unique(&two_edge_cycle), Some(Vec::new()));
+        let collinear_cycle = [
+            directed(PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)),
+            directed(PointD::new(1.0, 0.0), PointD::new(2.0, 0.0)),
+            directed(PointD::new(2.0, 0.0), PointD::new(0.0, 0.0)),
+        ];
+        assert_eq!(stitch_unique(&collinear_cycle), Some(Vec::new()));
     }
 
     #[test]

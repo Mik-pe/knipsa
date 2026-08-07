@@ -50,18 +50,10 @@ fn rectangle_pair_matches_base_for_operations_fill_rules_and_winding() {
         (rectangle(2.0, 2.0, 8.0, 8.0), rectangle(0.0, 0.0, 10.0, 10.0)),
         (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(10.0, 0.0, 20.0, 10.0)),
         (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(20.0, 0.0, 30.0, 10.0)),
-        (
-            rectangle(0.0, 0.0, 10.0, 10.0),
-            rectangle(10.0 + 2.0e-9, 0.0, 20.0, 10.0),
-        ),
+        (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(10.0 + 2.0e-9, 0.0, 20.0, 10.0)),
     ];
     let fill_rules = [FillRule::EvenOdd, FillRule::NonZero, FillRule::Positive, FillRule::Negative];
-    let clip_types = [
-        ClipType::Intersection,
-        ClipType::Union,
-        ClipType::Difference,
-        ClipType::Xor,
-    ];
+    let clip_types = [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor];
 
     for (subject, clip) in cases {
         for reverse_subject in [false, true] {
@@ -100,11 +92,7 @@ fn rectangle_pair_matches_base_for_operations_fill_rules_and_winding() {
 
 #[test]
 fn wrapper_falls_back_for_non_rectangle_and_vertex_touch_topology() {
-    let triangle = vec![
-        PointD::new(0.0, 0.0),
-        PointD::new(10.0, 0.0),
-        PointD::new(0.0, 10.0),
-    ];
+    let triangle = vec![PointD::new(1.0, 1.0), PointD::new(8.0, 1.0), PointD::new(1.0, 8.0)];
     let square = rectangle(0.0, 0.0, 10.0, 10.0);
     let subjects = [triangle];
     let clips = [square];
@@ -140,24 +128,33 @@ fn rectangle_validation_rejects_malformed_or_ambiguous_paths() {
     assert!(axis_aligned_rectangle(&[]).is_none());
     assert!(axis_aligned_rectangle(&rectangle(0.0, 0.0, 0.0, 10.0)).is_none());
     assert!(axis_aligned_rectangle(&rectangle(0.0, 0.0, 10.0, 0.0)).is_none());
-    assert!(axis_aligned_rectangle(&[
-        PointD::new(0.0, 0.0),
-        PointD::new(10.0, 10.0),
-        PointD::new(10.0, 0.0),
-        PointD::new(0.0, 10.0),
-    ]).is_none());
-    assert!(axis_aligned_rectangle(&[
-        PointD::new(0.0, 0.0),
-        PointD::new(10.0, 0.0),
-        PointD::new(0.0, 0.0),
-        PointD::new(0.0, 10.0),
-    ]).is_none());
-    assert!(axis_aligned_rectangle(&[
-        PointD::new(0.0, 0.0),
-        PointD::new(10.0, 0.0),
-        PointD::new(10.0, 10.0),
-        PointD::new(0.25e-9, 10.0),
-    ]).is_none());
+    assert!(
+        axis_aligned_rectangle(&[
+            PointD::new(0.0, 0.0),
+            PointD::new(10.0, 10.0),
+            PointD::new(10.0, 0.0),
+            PointD::new(0.0, 10.0),
+        ])
+        .is_none()
+    );
+    assert!(
+        axis_aligned_rectangle(&[
+            PointD::new(0.0, 0.0),
+            PointD::new(10.0, 0.0),
+            PointD::new(0.0, 0.0),
+            PointD::new(0.0, 10.0),
+        ])
+        .is_none()
+    );
+    assert!(
+        axis_aligned_rectangle(&[
+            PointD::new(0.0, 0.0),
+            PointD::new(10.0, 0.0),
+            PointD::new(10.0, 10.0),
+            PointD::new(0.25e-9, 10.0),
+        ])
+        .is_none()
+    );
 
     for index in 0..4 {
         let mut invalid = rectangle(0.0, 0.0, 10.0, 10.0);
@@ -176,12 +173,31 @@ fn rectangle_validation_rejects_malformed_or_ambiguous_paths() {
         key(PointD::new(1.25, -2.5)),
         Some(PointKey { x: 1_250_000_000, y: -2_500_000_000 }),
     );
+
+    let subject = rectangle(0.0, 0.0, 10.0, 10.0);
+    let subject_paths = [subject];
+    let x_alias_clip = [rectangle(0.25e-9, 0.0, 20.0, 10.0)];
+    let y_alias_clip = [rectangle(0.0, 0.25e-9, 20.0, 10.0)];
+    for clips in [&x_alias_clip, &y_alias_clip] {
+        let request = BooleanRequestD {
+            subjects: &subject_paths,
+            clips,
+            clip_type: ClipType::Intersection,
+            fill_rule: FillRule::EvenOdd,
+        };
+        assert!(try_rectangle_pair(request).is_none());
+    }
 }
 
 #[test]
 fn coordinate_helpers_reject_quantized_aliases() {
     let path = rectangle(0.0, 0.0, 10.0, 10.0);
-    let keys = [key(path[0]).unwrap(), key(path[1]).unwrap(), key(path[2]).unwrap(), key(path[3]).unwrap()];
+    let keys = [
+        key(path[0]).unwrap(),
+        key(path[1]).unwrap(),
+        key(path[2]).unwrap(),
+        key(path[3]).unwrap(),
+    ];
     assert_eq!(keyed_coordinate_value(&path, &keys, 123, true), None);
     assert_eq!(keyed_coordinate_value(&path, &keys, 0, true), Some(0.0));
     assert_eq!(keyed_coordinate_value(&path, &keys, 0, false), Some(0.0));
@@ -231,6 +247,35 @@ fn fixed_boundary_and_stitch_reject_invalid_graphs() {
         edge((1.0, 0.0), (2.0, 0.0), (1, 0), (2, 0)),
     ];
     assert!(stitch_small(&multiple).is_none());
+
+    let greater_turn = [
+        edge((0.0, 0.0), (1.0, 0.0), (0, 0), (1, 0)),
+        edge((1.0, 0.0), (2.0, 0.0), (1, 0), (2, 0)),
+        edge((1.0, 0.0), (1.0, 1.0), (1, 0), (1, 1)),
+    ];
+    assert!(stitch_small(&greater_turn).is_none());
+
+    let equal_turn = [
+        edge((0.0, 0.0), (1.0, 0.0), (0, 0), (1, 0)),
+        edge((1.0, 0.0), (2.0, 0.0), (1, 0), (2, 0)),
+        edge((1.0, 0.0), (2.0, 0.0), (1, 0), (2, 0)),
+    ];
+    assert!(stitch_small(&equal_turn).is_none());
+
+    let mut full_boundary = SmallBoundary::new();
+    for _ in 0..MAX_BOUNDARY_EDGES {
+        assert!(full_boundary.push(DirectedEdge::default()).is_some());
+    }
+    assert!(
+        finish_rectangle_boundary(
+            full_boundary,
+            GridCoordinate { key: 0, value: 0.0 },
+            &[GridCoordinate { key: 0, value: 0.0 }, GridCoordinate { key: 1, value: 1.0 }],
+            &[false],
+            &[true],
+        )
+        .is_none()
+    );
 
     let lollipop = [
         edge((0.0, 0.0), (1.0, 0.0), (0, 0), (1, 0)),
@@ -283,6 +328,8 @@ fn ordering_helpers_and_request_cardinality_branches_are_covered() {
     assert_eq!(compare_paths(&short, &short), Ordering::Equal);
     assert_eq!(compare_paths(&short, &long), Ordering::Less);
     assert_eq!(compare_paths(&shifted, &short), Ordering::Greater);
+    assert_eq!(compare_angle(PointD::new(1.0, 0.0), PointD::new(2.0, 0.0)), Ordering::Less);
+    assert_eq!(compare_angle(PointD::new(1.0, 0.0), PointD::new(1.0, 0.0)), Ordering::Equal);
 
     let rectangle = rectangle(0.0, 0.0, 10.0, 10.0);
     let subjects = [rectangle.clone(), rectangle.clone()];
