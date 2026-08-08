@@ -63,7 +63,9 @@ crate.
 ## Evidence boundary
 
 The repository currently gates floating-point Boolean behavior against six
-pinned implementations and has separate integer, offset, and triangulation
-matrices against Clipper2. These finite matrices provide reproducible evidence
-for their checked-in cases. They are not a claim of universal equivalence or
-universal performance leadership.
+pinned implementations and has separate integer and offset matrices against
+Clipper2. Integer triangulation is checked against both Clipper2 and the
+independent `geo`/Spade implementation; floating-point triangulation has a
+scale-normalized `geo`/Spade matrix from `1e-12` through `1e12`. These finite
+matrices provide reproducible evidence for their checked-in cases. They are not
+a claim of universal equivalence or universal performance leadership.
