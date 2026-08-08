@@ -30,6 +30,10 @@ minor releases before `1.0`.
   unbounded Rust triangulation path, and the duplicate `*_with_limits` family.
 - The flat `geo-types` polygon helper family, replaced by conversions that
   preserve explicit hole ownership.
+- The redundant Rust `API_VERSION`, `validate_request`, and
+  `validate_request_d` exports. Cargo owns the Rust package version, Boolean
+  operations validate automatically, and separate path validation remains
+  available through `validate_paths64` and `validate_paths_d`.
 
 ## [0.2.1] - 2026-08-08
 

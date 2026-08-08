@@ -34,8 +34,8 @@ pub use offset::{
 pub use request::{
     BooleanRequest, BooleanRequestD, ClipType, FillRule, boolean_op, boolean_op_d, difference,
     difference_d, difference_path, difference_path_d, intersection, intersection_d,
-    intersection_path, intersection_path_d, union, union_d, union_path, union_path_d,
-    validate_request, validate_request_d, xor, xor_d, xor_path, xor_path_d,
+    intersection_path, intersection_path_d, union, union_d, union_path, union_path_d, xor, xor_d,
+    xor_path, xor_path_d,
 };
 pub use topology::{Polygon64, PolygonD, build_polygons_d, build_polygons64};
 pub use triangulation::{
@@ -58,20 +58,12 @@ pub enum PathKind {
     Open,
 }
 
-/// The current semantic version of the safe Rust API.
-///
-/// This is the crate version compiled into the library. It is useful for
-/// logging or for checking that a dynamically loaded companion library is
-/// the version an application expects.
-pub const API_VERSION: &str = env!("CARGO_PKG_VERSION");
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn public_contract_is_constructible() {
-        assert_eq!(API_VERSION, env!("CARGO_PKG_VERSION"));
         assert_eq!(PathKind::Closed, PathKind::Closed);
         let request = BooleanRequest {
             subjects: &[],
@@ -79,7 +71,7 @@ mod tests {
             clip_type: ClipType::Xor,
             fill_rule: FillRule::Positive,
         };
-        assert!(validate_request(&request).is_ok());
+        assert!(boolean_op(request).is_ok());
     }
 
     #[test]

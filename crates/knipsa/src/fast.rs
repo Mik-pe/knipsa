@@ -879,28 +879,6 @@ fn classify_path(path: &[Point]) -> PathProperties {
     PathProperties { simple: true, convex: false, bounds }
 }
 
-#[cfg(test)]
-fn short_circuit<P: PathSlice>(
-    subjects: &[P],
-    clips: &[P],
-    clip_type: ClipType,
-    fill_rule: FillRule,
-) -> Option<PathsD> {
-    if let Some(result) = trivial_short_circuit(subjects, clips, clip_type) {
-        return Some(result);
-    }
-    let properties =
-        subjects.iter().chain(clips).map(|path| classify_path(path.points())).collect::<Vec<_>>();
-    short_circuit_with_properties(
-        subjects,
-        clips,
-        clip_type,
-        fill_rule,
-        &properties[..subjects.len()],
-        &properties[subjects.len()..],
-    )
-}
-
 fn trivial_short_circuit<P: PathSlice>(
     subjects: &[P],
     clips: &[P],
@@ -1579,12 +1557,6 @@ fn point_bounds(points: &[Point]) -> (f64, f64, f64, f64) {
     )
 }
 
-#[cfg(test)]
-fn direct_if_simple_and_disjoint<P: PathSlice>(paths: &[P]) -> Option<PathsD> {
-    let properties = paths.iter().map(|path| classify_path(path.points())).collect::<Vec<_>>();
-    direct_if_simple_and_disjoint_with_properties(paths, &properties)
-}
-
 fn direct_if_simple_and_disjoint_with_properties<P: PathSlice>(
     paths: &[P],
     properties: &[PathProperties],
@@ -1608,13 +1580,6 @@ fn direct_paths<P: PathSlice>(paths: &[P]) -> PathsD {
     result
 }
 
-#[rustfmt::skip]
-#[cfg(test)]
-fn paths_are_simple_and_disjoint<P: PathSlice>(paths: &[P]) -> bool {
-    let properties = paths.iter().map(|path| classify_path(path.points())).collect::<Vec<_>>();
-    paths_are_simple_and_disjoint_with_properties(paths, &properties)
-}
-
 fn paths_are_simple_and_disjoint_with_properties<P: PathSlice>(
     paths: &[P],
     properties: &[PathProperties],
@@ -1630,13 +1595,14 @@ fn paths_are_simple_and_disjoint_with_properties<P: PathSlice>(
         let Some(path_box) = bbox(std::slice::from_ref(path)) else { continue };
         for other in paths.iter().skip(index + 1) {
             let Some(other_box) = bbox(std::slice::from_ref(other)) else { continue };
-            if !(path_box.2 < other_box.0
+            let disjoint = path_box.2 < other_box.0
                 || other_box.2 < path_box.0
                 || path_box.3 < other_box.1
-                || other_box.3 < path_box.1)
-            {
-                return false;
+                || other_box.3 < path_box.1;
+            if disjoint {
+                continue;
             }
+            return false;
         }
     }
     true
@@ -2022,11 +1988,6 @@ fn containment_bucket_if_inside(
 ) -> Option<usize> {
     (point.x >= min_x && point.x <= max_x && point.y >= min_y && point.y <= max_y)
         .then(|| containment_bucket(point.y, min_y, max_y, bucket_count))
-}
-
-#[cfg(test)]
-fn containment_paths<P: PathSlice>(paths: &[P]) -> Vec<ContainmentPath<'_>> {
-    containment_paths_with_properties(paths, &[])
 }
 
 fn containment_paths_with_properties<'a, P: PathSlice>(
@@ -2995,25 +2956,21 @@ mod tests {
         {
             let _ = apply_operation(true, false, clip_type);
         }
-        assert!(
-            short_circuit(&empty_paths, &empty_paths, ClipType::Union, FillRule::EvenOdd).is_some()
+        assert_eq!(
+            trivial_short_circuit(
+                std::slice::from_ref(&rectangle),
+                &[] as &[Vec<Point>],
+                ClipType::Intersection,
+            ),
+            Some(Vec::new()),
         );
-        assert!(
-            short_circuit(&[rectangle.clone()], &[], ClipType::Intersection, FillRule::EvenOdd)
-                .is_some()
-        );
-        assert!(
-            short_circuit(&[], &[rectangle.clone()], ClipType::Difference, FillRule::EvenOdd)
-                .is_some()
-        );
-        assert!(
-            short_circuit(&[rectangle.clone()], &[], ClipType::Union, FillRule::Positive).is_none()
-        );
-        assert!(
-            short_circuit(&[], &[rectangle.clone()], ClipType::Union, FillRule::EvenOdd).is_some()
-        );
-        assert!(
-            short_circuit(&[], &[rectangle.clone()], ClipType::Xor, FillRule::EvenOdd).is_some()
+        assert_eq!(
+            trivial_short_circuit(
+                &[] as &[Vec<Point>],
+                std::slice::from_ref(&rectangle),
+                ClipType::Difference,
+            ),
+            Some(Vec::new()),
         );
         assert_eq!(
             run(&[Vec::new()], &[Vec::new()], ClipType::Union, FillRule::EvenOdd).unwrap(),
@@ -3037,6 +2994,27 @@ mod tests {
             vec![point(0.0, 20.0), point(10.0, 20.0), point(10.0, 30.0), point(0.0, 30.0)];
         let below_disjoint =
             vec![point(0.0, -30.0), point(10.0, -30.0), point(10.0, -20.0), point(0.0, -20.0)];
+        let empty_path = Vec::new();
+        assert!(paths_are_simple_and_disjoint_with_properties(
+            std::slice::from_ref(&empty_path),
+            &[classify_path(&empty_path)],
+        ));
+        let path_and_empty = [rectangle.clone(), Vec::new()];
+        let path_and_empty_properties =
+            path_and_empty.iter().map(|path| classify_path(path)).collect::<Vec<_>>();
+        assert!(paths_are_simple_and_disjoint_with_properties(
+            &path_and_empty,
+            &path_and_empty_properties,
+        ));
+        for other in [&disjoint, &left_disjoint, &above_disjoint, &below_disjoint] {
+            let disjoint_paths = [rectangle.clone(), other.clone()];
+            let disjoint_properties =
+                disjoint_paths.iter().map(|path| classify_path(path)).collect::<Vec<_>>();
+            assert!(paths_are_simple_and_disjoint_with_properties(
+                &disjoint_paths,
+                &disjoint_properties,
+            ));
+        }
         for clip_type in
             [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor]
         {
@@ -3054,26 +3032,17 @@ mod tests {
         }
         let self_crossing =
             vec![point(0.0, 0.0), point(10.0, 10.0), point(0.0, 10.0), point(10.0, 0.0)];
-        let far_self_crossing =
-            vec![point(20.0, 20.0), point(30.0, 30.0), point(20.0, 30.0), point(30.0, 20.0)];
-        assert!(
-            short_circuit(
-                &[self_crossing.clone()],
-                &[disjoint.clone()],
-                ClipType::Union,
-                FillRule::EvenOdd
-            )
-            .is_none()
-        );
-        assert!(
-            short_circuit(
-                &[rectangle.clone()],
-                &[far_self_crossing],
-                ClipType::Union,
-                FillRule::EvenOdd
-            )
-            .is_none()
-        );
+        assert!(!paths_are_simple_and_disjoint_with_properties(
+            std::slice::from_ref(&self_crossing),
+            &[classify_path(&self_crossing)],
+        ));
+        let duplicate_paths = [rectangle.clone(), rectangle.clone()];
+        let duplicate_properties =
+            duplicate_paths.iter().map(|path| classify_path(path)).collect::<Vec<_>>();
+        assert!(!paths_are_simple_and_disjoint_with_properties(
+            &duplicate_paths,
+            &duplicate_properties,
+        ));
         assert!(
             run(
                 &[vec![
@@ -3109,15 +3078,6 @@ mod tests {
             ClipType::Union,
             FillRule::EvenOdd,
         );
-        assert!(!paths_are_simple_and_disjoint(std::slice::from_ref(&self_crossing)));
-        assert!(paths_are_simple_and_disjoint(&empty_paths));
-        assert!(paths_are_simple_and_disjoint(&[Vec::new()]));
-        assert!(paths_are_simple_and_disjoint(&[rectangle.clone(), disjoint.clone()]));
-        assert!(paths_are_simple_and_disjoint(&[rectangle.clone(), left_disjoint.clone()]));
-        assert!(paths_are_simple_and_disjoint(&[rectangle.clone(), above_disjoint.clone()]));
-        assert!(paths_are_simple_and_disjoint(&[rectangle.clone(), below_disjoint.clone()]));
-        assert!(paths_are_simple_and_disjoint(&[rectangle.clone(), Vec::new()]));
-        assert!(!paths_are_simple_and_disjoint(&[rectangle.clone(), rectangle.clone()]));
         assert!(edges_intersect(&crossing_first, &crossing_second));
         assert!(edges_intersect(
             &edge(point(0.0, 0.0), point(10.0, 0.0)),
@@ -3130,8 +3090,6 @@ mod tests {
 
         let reversed = direct_paths(&[clockwise.clone()]);
         assert!(reversed[0][1].x >= reversed[0][0].x);
-        assert!(direct_if_simple_and_disjoint(&[rectangle.clone()]).is_some());
-        assert!(direct_if_simple_and_disjoint(&[self_crossing.clone()]).is_none());
         assert!(simple_local_sides_with_hint(&empty_paths, FillRule::EvenOdd, None).is_none());
         assert!(
             simple_local_sides_with_hint(&[rectangle.clone()], FillRule::EvenOdd, None).is_some()
@@ -3147,7 +3105,6 @@ mod tests {
             point(1.0, 4.0),
             point(0.0, 4.0),
         ];
-        assert!(paths_are_simple_and_disjoint(&[concave.clone()]));
         assert!(
             simple_local_sides_with_hint(&[concave.clone()], FillRule::Negative, None).is_some()
         );
@@ -3166,7 +3123,7 @@ mod tests {
         assert!(!is_convex_simple(&concave));
 
         let rectangle_paths = [rectangle.clone()];
-        let containment = containment_paths(&rectangle_paths);
+        let containment = containment_paths_with_properties(&rectangle_paths, &[]);
         assert_eq!(containment[0].buckets.len(), 2);
         let convex_rectangle_paths = [rectangle.clone()];
         let convex_containment = containment_paths_with_properties(
@@ -3870,7 +3827,7 @@ mod tests {
     fn covers_containment_bucket_and_downward_winding_branches() {
         let rectangle =
             vec![point(0.0, 0.0), point(10.0, 0.0), point(10.0, 10.0), point(0.0, 10.0)];
-        let containment = containment_paths(std::slice::from_ref(&rectangle));
+        let containment = containment_paths_with_properties(std::slice::from_ref(&rectangle), &[]);
         assert_eq!(
             paths_contain_pair(point(1.0, 1.0), point(1.2, 1.2), &containment, FillRule::EvenOdd),
             (true, true)

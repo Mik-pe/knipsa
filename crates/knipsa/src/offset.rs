@@ -1187,14 +1187,6 @@ fn segments_intersect(
     !segments_are_certifiably_disjoint(first, first_end, second, second_end)
 }
 
-#[cfg(test)]
-fn point_on_segment(point: PointD, start: PointD, end: PointD) -> bool {
-    point.x >= start.x.min(end.x) - EPSILON
-        && point.x <= start.x.max(end.x) + EPSILON
-        && point.y >= start.y.min(end.y) - EPSILON
-        && point.y <= start.y.max(end.y) + EPSILON
-}
-
 fn clean_ring(mut path: PathD, preserve_collinear: bool) -> PathD {
     path.dedup();
     if path.len() > 1 && path.first() == path.last() {
@@ -2088,12 +2080,6 @@ mod tests {
             PointD::new(1.0, 0.0),
             PointD::new(3.0, 0.0),
         ));
-        assert!(point_on_segment(PointD::new(1.0, 0.0), center, PointD::new(2.0, 0.0)));
-        assert!(!point_on_segment(PointD::new(-1.0, 0.0), center, PointD::new(2.0, 0.0)));
-        assert!(!point_on_segment(PointD::new(3.0, 0.0), center, PointD::new(2.0, 0.0)));
-        assert!(!point_on_segment(PointD::new(1.0, -1.0), center, PointD::new(2.0, 0.0)));
-        assert!(!point_on_segment(PointD::new(1.0, 1.0), center, PointD::new(2.0, 0.0)));
-
         let simple = rectangle(0.0, 0.0, 2.0, 2.0);
         assert_eq!(certify_non_zero_contours(&[]), Some(Vec::new()));
         assert_eq!(certify_non_zero_contours(std::slice::from_ref(&simple)), Some(vec![true]));

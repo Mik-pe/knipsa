@@ -1,6 +1,6 @@
 //! Public operation contracts for integer and floating-point paths.
 
-use crate::{Error, Path64, PathD, PathKind, Paths64, PathsD, validate_path_d, validate_path64};
+use crate::{Error, Path64, PathD, PathKind, Paths64, PathsD, validate_paths_d, validate_paths64};
 
 /// A boolean operation over filled paths.
 ///
@@ -99,38 +99,6 @@ impl<'a> BooleanRequestD<'a> {
     }
 }
 
-/// Validates a boolean request without executing it.
-///
-/// Use this when a caller wants to report malformed input before doing any
-/// work. [`boolean_op`] performs the same validation automatically.
-///
-/// # Errors
-///
-/// Returns [`Error::InvalidPath`] when a non-empty subject or clip path is too
-/// short to describe a closed region.
-pub fn validate_request(request: &BooleanRequest<'_>) -> Result<(), Error> {
-    for path in request.subjects.iter().chain(request.clips) {
-        validate_path64(path, PathKind::Closed)?;
-    }
-    Ok(())
-}
-
-/// Validates a floating-point boolean request without executing it.
-///
-/// In addition to path shape, this rejects NaN and infinite coordinates.
-/// [`boolean_op_d`] performs the same validation automatically.
-///
-/// # Errors
-///
-/// Returns [`Error::InvalidPath`] for a too-short path and
-/// [`Error::NonFiniteCoordinate`] for a non-finite coordinate.
-pub fn validate_request_d(request: &BooleanRequestD<'_>) -> Result<(), Error> {
-    for path in request.subjects.iter().chain(request.clips) {
-        validate_path_d(path, PathKind::Closed)?;
-    }
-    Ok(())
-}
-
 /// Executes an exact integer boolean request.
 ///
 /// # Examples
@@ -169,7 +137,8 @@ pub fn validate_request_d(request: &BooleanRequestD<'_>) -> Result<(), Error> {
 /// result cannot be represented by `i64`, or [`Error::TopologyFailure`] if the
 /// arrangement cannot be closed.
 pub fn boolean_op(request: BooleanRequest<'_>) -> Result<Paths64, Error> {
-    validate_request(&request)?;
+    validate_paths64(request.subjects, PathKind::Closed)?;
+    validate_paths64(request.clips, PathKind::Closed)?;
     crate::boolean::boolean_op64(request)
 }
 
@@ -185,7 +154,8 @@ pub fn boolean_op(request: BooleanRequest<'_>) -> Result<Paths64, Error> {
 /// Returns [`Error::InvalidPath`] or [`Error::NonFiniteCoordinate`] for invalid
 /// input and [`Error::TopologyFailure`] if the arrangement cannot be closed.
 pub fn boolean_op_d(request: BooleanRequestD<'_>) -> Result<PathsD, Error> {
-    validate_request_d(&request)?;
+    validate_paths_d(request.subjects, PathKind::Closed)?;
+    validate_paths_d(request.clips, PathKind::Closed)?;
     crate::boolean::boolean_op_d(request)
 }
 
@@ -394,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn validates_then_executes_union_with_empty_clip() {
+    fn executes_union_with_empty_clip() {
         let square =
             vec![crate::Point64::new(0, 0), crate::Point64::new(1, 0), crate::Point64::new(1, 1)];
         let request = BooleanRequest {
@@ -403,7 +373,6 @@ mod tests {
             clip_type: ClipType::Union,
             fill_rule: FillRule::NonZero,
         };
-        assert_eq!(validate_request(&request), Ok(()));
         assert_eq!(boolean_op(request).expect("valid request").len(), 1);
     }
 
@@ -419,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn validates_double_requests() {
+    fn executes_and_validates_double_requests() {
         let square = vec![
             crate::PointD::new(0.0, 0.0),
             crate::PointD::new(1.0, 0.0),
@@ -431,7 +400,6 @@ mod tests {
             clip_type: ClipType::Union,
             fill_rule: FillRule::NonZero,
         };
-        assert!(validate_request_d(&request).is_ok());
         assert_eq!(crate::boolean_op_d(request).expect("valid request").len(), 1);
         let bad = BooleanRequestD {
             subjects: &[vec![crate::PointD::new(0.0, 0.0), crate::PointD::new(f64::NAN, 0.0)]],
@@ -439,7 +407,7 @@ mod tests {
             clip_type: ClipType::Union,
             fill_rule: FillRule::EvenOdd,
         };
-        assert!(matches!(validate_request_d(&bad), Err(Error::InvalidPath { .. })));
+        assert!(matches!(boolean_op_d(bad), Err(Error::InvalidPath { .. })));
     }
 
     #[test]

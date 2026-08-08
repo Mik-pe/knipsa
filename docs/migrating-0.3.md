@@ -50,6 +50,16 @@ With the `geo-types` feature, use these one-to-one conversions:
 The old flat `paths*_from_polygon` and `polygon_from_paths*` helpers were
 removed because they discarded the typed ownership boundary.
 
+## Request validation and version reporting
+
+The standalone `validate_request` and `validate_request_d` wrappers were
+removed. Boolean operations validate their requests automatically; use
+`validate_paths64` or `validate_paths_d` when validation is needed separately.
+
+The Rust-only `API_VERSION` constant was also removed because Cargo already
+owns the statically linked crate version. The C ABI keeps its header version
+macros and `knipsa_version()` runtime function for dynamically linked callers.
+
 ## C callers
 
 The C function signatures are unchanged. Both triangulation entry points use
