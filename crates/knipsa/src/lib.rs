@@ -4,6 +4,7 @@
 #![doc(test(attr(deny(warnings))))]
 
 mod boolean;
+mod complexity;
 mod dispatch;
 mod error;
 mod fast;
@@ -17,6 +18,7 @@ mod standard_dispatch;
 mod topology;
 mod triangulation;
 
+pub use complexity::{ComplexityLimits, ComplexityResource};
 pub use error::{Error, PathValidationError};
 pub use geometry::{
     Orientation, Path64, PathD, Paths64, PathsD, Point64, PointD, PointLocation, Rect64, RectD,
@@ -37,8 +39,7 @@ pub use request::{
 };
 pub use topology::{Polygon64, PolygonD, build_polygons_d, build_polygons64};
 pub use triangulation::{
-    Triangle64, TriangleD, TriangulationError, TriangulationLimits, TriangulationResource,
-    triangulate_d, triangulate_path_d, triangulate_path64, triangulate64,
+    Triangle64, TriangleD, triangulate_d, triangulate_path_d, triangulate_path64, triangulate64,
 };
 
 /// Describes whether a path's final point connects back to its first point.
@@ -92,6 +93,7 @@ mod tests {
             Error::InvalidOffset,
             Error::TriangulationFailure,
             Error::IntersectingPaths,
+            Error::LimitExceeded { resource: ComplexityResource::Vertices, limit: 4, required: 5 },
         ];
         for error in errors {
             assert!(!error.to_string().is_empty());
@@ -126,7 +128,7 @@ mod serde_tests {
         assert_eq!(round_trip(&JoinType::Miter), JoinType::Miter);
         assert_eq!(round_trip(&EndType::Round), EndType::Round);
         assert_eq!(round_trip(&OffsetOptions::default()), OffsetOptions::default());
-        assert_eq!(round_trip(&TriangulationLimits::DEFAULT), TriangulationLimits::DEFAULT);
+        assert_eq!(round_trip(&ComplexityLimits::DEFAULT), ComplexityLimits::DEFAULT);
         let polygon = PolygonD {
             outer: vec![PointD::new(0.0, 0.0), PointD::new(4.0, 0.0), PointD::new(0.0, 4.0)],
             holes: Vec::new(),
@@ -138,11 +140,8 @@ mod serde_tests {
         };
         assert_eq!(round_trip(&polygon64), polygon64);
 
-        let limit_error = TriangulationError::LimitExceeded {
-            resource: TriangulationResource::Vertices,
-            limit: 4,
-            required: 5,
-        };
+        let limit_error =
+            Error::LimitExceeded { resource: ComplexityResource::Vertices, limit: 4, required: 5 };
         assert_eq!(round_trip(&limit_error), limit_error);
         assert_eq!(round_trip(&Error::TopologyFailure), Error::TopologyFailure);
 
@@ -162,7 +161,7 @@ mod serde_tests {
         );
         assert_eq!(serde_json::to_string(&FillRule::EvenOdd).unwrap(), "\"even_odd\"");
         assert_eq!(
-            serde_json::to_string(&TriangulationResource::EdgePairs).unwrap(),
+            serde_json::to_string(&ComplexityResource::EdgePairs).unwrap(),
             "\"edge_pairs\""
         );
     }

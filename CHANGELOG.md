@@ -14,17 +14,16 @@ minor releases before `1.0`.
 
 ### Changed
 
-- All four public Rust triangulation functions now require
-  `TriangulationLimits` and return `TriangulationError`, so resource preflight
-  cannot be bypassed accidentally.
+- Polygon builders and all four Rust triangulation functions now require the
+  same `ComplexityLimits` and return the same `Error`; structured resource
+  preflight cannot be bypassed accidentally.
 - The optional `geo-types` conversions now exchange `Polygon64` and `PolygonD`
   values instead of flattening exterior and interior rings into paths.
 
 ### Removed
 
-- The unbounded Rust triangulation path, `TriangulationLimits::UNLIMITED`, and
-  the duplicate `triangulate64_with_limits` and `triangulate_d_with_limits`
-  function family.
+- `TriangulationLimits`, `TriangulationResource`, `TriangulationError`, the
+  unbounded Rust triangulation path, and the duplicate `*_with_limits` family.
 - The flat `geo-types` polygon helper family, replaced by conversions that
   preserve explicit hole ownership.
 

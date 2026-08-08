@@ -144,14 +144,15 @@ need to choose a fast path or an epsilon policy.
   and islands.
 - Polygon builders turn flat ring collections into counter-clockwise outer
   rings with owned clockwise holes; nested islands become separate polygons.
-- Every triangulation call requires `TriangulationLimits`; `DEFAULT` bounds path
-  count, total vertices, and the conservative edge-pair workload before
-  quadratic validation begins. There is no unbounded public path.
+- Every polygon-builder and triangulation call requires `ComplexityLimits`;
+  `DEFAULT` bounds path count, total vertices, and conservative candidate
+  intersection pairs before quadratic validation begins. There is no
+  unbounded public path.
 
-Geometry operations return `knipsa::Error`; triangulation returns
-`knipsa::TriangulationError`, so callers can distinguish exceeded resource
-budgets from bad paths, non-finite coordinates, overflow, and topology failures
-without a panic. Applications that need input locations can run the `_located`
+Geometry operations return `knipsa::Error`, whose structured `LimitExceeded`
+variant distinguishes exceeded resource budgets from bad paths, non-finite
+coordinates, overflow, and topology failures without a panic. Applications
+that need input locations can run the `_located`
 collection validators first and receive `PathValidationError` with stable path
 and optional point indices.
 

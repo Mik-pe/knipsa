@@ -1,13 +1,14 @@
 //! Errors returned by the safe Rust API.
 
-use crate::PathKind;
+use crate::{PathKind, complexity::ComplexityResource};
 use core::fmt;
 
 /// An error produced while validating or executing a geometry operation.
 ///
 /// The variants are intentionally operation-independent across booleans,
 /// offsets, topology building, and checked geometry helpers. Triangulation
-/// wraps this type in [`crate::TriangulationError`] to add resource failures.
+/// Resource failures use [`Error::LimitExceeded`] across topology building and
+/// triangulation, so callers need only one error type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -41,6 +42,15 @@ pub enum Error {
     TriangulationFailure,
     /// A set of paths that must be disjoint contains an intersection.
     IntersectingPaths,
+    /// Preflight rejected quadratic topology work before it began.
+    LimitExceeded {
+        /// Resource whose required amount exceeded the configured limit.
+        resource: ComplexityResource,
+        /// Configured maximum.
+        limit: usize,
+        /// Conservative required amount, saturated at [`usize::MAX`].
+        required: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -65,6 +75,9 @@ impl fmt::Display for Error {
                 formatter.write_str("the polygon could not be triangulated")
             }
             Self::IntersectingPaths => formatter.write_str("the input paths intersect"),
+            Self::LimitExceeded { resource, limit, required } => {
+                write!(formatter, "topology requires {required} {resource:?}; limit is {limit}")
+            }
         }
     }
 }

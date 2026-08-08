@@ -1,17 +1,17 @@
 # Migrating from 0.2 to 0.3
 
-The next pre-1.0 minor release removes the unbounded triangulation API and
+The next pre-1.0 minor release removes unbounded topology analysis and
 makes polygon hole ownership explicit. These changes are intentionally
 breaking; there are no compatibility wrappers.
 
-## Triangulation limits
+## Topology complexity limits
 
-Every Rust triangulation call now takes `TriangulationLimits` and returns
-`TriangulationError`:
+Every Rust polygon-builder and triangulation call now takes
+`ComplexityLimits` and returns the shared `Error` type:
 
 ```rust
 use knipsa::{
-    FillRule, TriangulationLimits, triangulate64, triangulate_d,
+    FillRule, ComplexityLimits, build_polygons_d, triangulate64, triangulate_d,
     triangulate_path64, triangulate_path_d,
 };
 
@@ -19,22 +19,24 @@ use knipsa::{
 # let paths_d = Vec::new();
 # let path64 = Vec::new();
 # let path_d = Vec::new();
-let limits = TriangulationLimits::DEFAULT;
+let limits = ComplexityLimits::DEFAULT;
+let _ = build_polygons_d(&paths_d, FillRule::EvenOdd, limits)?;
 let _ = triangulate64(&paths64, FillRule::EvenOdd, limits)?;
 let _ = triangulate_d(&paths_d, FillRule::EvenOdd, limits)?;
 let _ = triangulate_path64(&path64, limits)?;
 let _ = triangulate_path_d(&path_d, limits)?;
-# Ok::<(), knipsa::TriangulationError>(())
+# Ok::<(), knipsa::Error>(())
 ```
 
-Tune `TriangulationLimits::new` for the application's latency and memory
-budget. `TriangulationLimits::UNLIMITED`, `triangulate64_with_limits`, and
-`triangulate_d_with_limits` were removed; do not replace them with maximum
-integer values.
+Tune `ComplexityLimits::new` for the application's latency and memory
+budget. The old `TriangulationLimits`, `TriangulationError`, unbounded
+triangulation functions, and duplicate `*_with_limits` functions were removed;
+do not recreate an unbounded path with maximum integer values.
 
 ## Polygon ownership and `geo-types`
 
-Use `build_polygons64` or `build_polygons_d` to turn a flat ring collection
+Use `build_polygons64` or `build_polygons_d`, with the same limits used for
+triangulation, to turn a flat ring collection
 into canonical polygons whose holes are owned explicitly. Nested filled
 islands become separate polygons.
 

@@ -41,9 +41,10 @@ output must retain explicit hole ownership. The same validated nesting model is
 shared with triangulation; outer rings are counter-clockwise, holes are
 clockwise, and nested islands become separate polygons.
 
-Every triangulation call requires [`crate::TriangulationLimits`]. Start with
-[`crate::TriangulationLimits::DEFAULT`] to reject oversized requests before
-quadratic intersection validation begins; there is no unbounded public path.
+Every polygon-builder and triangulation call requires
+[`crate::ComplexityLimits`]. Start with [`crate::ComplexityLimits::DEFAULT`]
+to reject oversized requests before quadratic intersection validation begins;
+there is no unbounded public path.
 
 Use [`crate::validate_paths_d_located`] or
 [`crate::validate_paths64_located`] when validation diagnostics must include

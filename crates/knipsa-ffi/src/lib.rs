@@ -13,9 +13,9 @@ use std::{
 use std::cell::Cell;
 
 use knipsa::{
-    BooleanRequest, BooleanRequestD, ClipType, EndType, Error, FillRule, JoinType, OffsetOptions,
-    Path64, PathD, PathKind, Point64, PointD, PointLocation, Rect64, RectD, TriangulationError,
-    TriangulationLimits, boolean_op, boolean_op_d, clip_to_rect_d, clip_to_rect64, offset_paths_d,
+    BooleanRequest, BooleanRequestD, ClipType, ComplexityLimits, EndType, Error, FillRule,
+    JoinType, OffsetOptions, Path64, PathD, PathKind, Point64, PointD, PointLocation, Rect64,
+    RectD, boolean_op, boolean_op_d, clip_to_rect_d, clip_to_rect64, offset_paths_d,
     point_in_polygon, simplify_paths_d, simplify_paths64, triangulate_d, triangulate64,
     validate_paths_d, validate_paths64,
 };
@@ -902,12 +902,15 @@ pub extern "C" fn knipsa_triangulate64(
     let operation = catch_unwind(AssertUnwindSafe(|| {
         #[cfg(test)]
         test_panic_if_requested();
+        check_ffi_complexity(paths, path_count, ComplexityLimits::DEFAULT, |path| {
+            path.point_count
+        })?;
         let paths = copy_paths64(paths, path_count)?;
-        triangulate64(&paths, fill_rule, TriangulationLimits::DEFAULT)
+        triangulate64(&paths, fill_rule, ComplexityLimits::DEFAULT)
             .map(|triangles| {
                 triangles.into_iter().map(|triangle| triangle.into_iter().collect()).collect()
             })
-            .map_err(|error| status_from_triangulation_error(&error))
+            .map_err(|error| status_from_error(&error))
     }));
     match operation {
         Ok(Ok(paths)) => {
@@ -955,12 +958,15 @@ pub extern "C" fn knipsa_triangulate_d(
     let operation = catch_unwind(AssertUnwindSafe(|| {
         #[cfg(test)]
         test_panic_if_requested();
+        check_ffi_complexity(paths, path_count, ComplexityLimits::DEFAULT, |path| {
+            path.point_count
+        })?;
         let paths = copy_paths_d(paths, path_count)?;
-        triangulate_d(&paths, fill_rule, TriangulationLimits::DEFAULT)
+        triangulate_d(&paths, fill_rule, ComplexityLimits::DEFAULT)
             .map(|triangles| {
                 triangles.into_iter().map(|triangle| triangle.into_iter().collect()).collect()
             })
-            .map_err(|error| status_from_triangulation_error(&error))
+            .map_err(|error| status_from_error(&error))
     }));
     match operation {
         Ok(Ok(paths)) => {
@@ -1100,13 +1106,7 @@ fn status_from_error(error: &Error) -> KnipsaStatus {
         Error::InvalidOffset => KnipsaStatus::InvalidOffset,
         Error::TriangulationFailure => KnipsaStatus::TriangulationFailure,
         Error::IntersectingPaths => KnipsaStatus::IntersectingPaths,
-    }
-}
-
-fn status_from_triangulation_error(error: &TriangulationError) -> KnipsaStatus {
-    match error {
-        TriangulationError::Geometry(error) => status_from_error(error),
-        TriangulationError::LimitExceeded { .. } => KnipsaStatus::InvalidArgument,
+        Error::LimitExceeded { .. } => KnipsaStatus::InvalidArgument,
     }
 }
 
@@ -1220,6 +1220,28 @@ fn result_is_empty_d(result: *const KnipsaPathsD) -> bool {
     // helper, and the descriptor points to caller-owned writable storage.
     let result = unsafe { &*result };
     result.paths.is_null() && result.path_count == 0
+}
+
+fn check_ffi_complexity<T>(
+    paths: *const T,
+    path_count: usize,
+    limits: ComplexityLimits,
+    point_count: impl Fn(&T) -> usize,
+) -> Result<(), KnipsaStatus> {
+    if path_count != 0 && paths.is_null() {
+        return Err(KnipsaStatus::NullPointer);
+    }
+    if path_count > limits.max_paths() {
+        return Err(KnipsaStatus::InvalidArgument);
+    }
+    let descriptors = if path_count == 0 {
+        &[]
+    } else {
+        // SAFETY: Null was rejected, the count is bounded, and the C contract
+        // requires the descriptor array to remain readable.
+        unsafe { slice::from_raw_parts(paths, path_count) }
+    };
+    limits.check(descriptors.iter().map(point_count)).map_err(|error| status_from_error(&error))
 }
 
 fn copy_paths64(
@@ -1632,8 +1654,8 @@ mod tests {
         );
         assert_eq!(status_from_error(&Error::IntersectingPaths), KnipsaStatus::IntersectingPaths);
         assert_eq!(
-            status_from_triangulation_error(&TriangulationError::LimitExceeded {
-                resource: knipsa::TriangulationResource::Paths,
+            status_from_error(&Error::LimitExceeded {
+                resource: knipsa::ComplexityResource::Paths,
                 limit: 0,
                 required: 1,
             }),
@@ -2279,6 +2301,42 @@ mod tests {
             KnipsaStatus::InvalidPath
         );
 
+        let oversized_64 = KnipsaPath64 {
+            points: std::ptr::null(),
+            point_count: ComplexityLimits::DEFAULT.max_vertices() + 1,
+        };
+        assert_eq!(
+            knipsa_triangulate64(
+                std::ptr::from_ref(&oversized_64),
+                1,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result_64),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
+        let oversized_d = KnipsaPathD {
+            points: std::ptr::null(),
+            point_count: ComplexityLimits::DEFAULT.max_vertices() + 1,
+        };
+        assert_eq!(
+            knipsa_triangulate_d(
+                std::ptr::from_ref(&oversized_d),
+                1,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result_d),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
+        assert_eq!(
+            knipsa_triangulate64(
+                std::ptr::NonNull::<KnipsaPath64>::dangling().as_ptr(),
+                ComplexityLimits::DEFAULT.max_paths() + 1,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result_64),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
+
         FORCE_BOOLEAN_PANIC.with(|panic| panic.set(true));
         assert_eq!(
             knipsa_offset64(
@@ -2361,6 +2419,24 @@ mod tests {
 
     #[test]
     fn rejects_bad_offset_and_triangulation_arguments() {
+        assert_eq!(
+            check_ffi_complexity::<KnipsaPath64>(
+                std::ptr::null(),
+                1,
+                ComplexityLimits::DEFAULT,
+                |path| path.point_count,
+            ),
+            Err(KnipsaStatus::NullPointer)
+        );
+        assert_eq!(
+            check_ffi_complexity::<KnipsaPath64>(
+                std::ptr::null(),
+                0,
+                ComplexityLimits::DEFAULT,
+                |path| path.point_count,
+            ),
+            Ok(())
+        );
         assert_eq!(offset_options_from_u8(99, 0, 2.0, 0.0, 0), None);
         assert_eq!(offset_options_from_u8(0, 99, 2.0, 0.0, 0), None);
         assert!(offset_options_from_u8(0, 0, 2.0, 0.0, 1).is_some());

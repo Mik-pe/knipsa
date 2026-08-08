@@ -1,7 +1,7 @@
 //! Validated ring nesting and strongly typed polygon output.
 
 use crate::{
-    Error, FillRule, Path64, PathD, Paths64, PathsD, Point64, PointD,
+    ComplexityLimits, Error, FillRule, Path64, PathD, Paths64, PathsD, Point64, PointD,
     geometry::{paths64_to_local_d, signed_area2_d},
     trim_collinear_d,
 };
@@ -50,13 +50,20 @@ pub struct PolygonD {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPath`] for malformed rings,
+/// Returns [`Error::LimitExceeded`] before conversion or quadratic topology
+/// work when the configured budget is insufficient,
+/// [`Error::InvalidPath`] for malformed rings,
 /// [`Error::IntersectingPaths`] for touching or crossing rings,
 /// [`Error::ArithmeticOverflow`] when coordinates do not fit the shared exact
 /// integer-to-floating conversion frame, and [`Error::TopologyFailure`] for
 /// degenerate topology. Integer coordinates are converted exactly before the
 /// shared normalized floating-point topology predicates run.
-pub fn build_polygons64(paths: &[Path64], fill_rule: FillRule) -> Result<Vec<Polygon64>, Error> {
+pub fn build_polygons64(
+    paths: &[Path64],
+    fill_rule: FillRule,
+    limits: ComplexityLimits,
+) -> Result<Vec<Polygon64>, Error> {
+    limits.check(paths.iter().map(Vec::len))?;
     let (origin, paths_d) = paths64_to_local_d(paths)?;
     let rings = collect_rings(&paths_d)?;
     polygons64_from_d(polygons_from_rings(&rings, fill_rule), origin)
@@ -72,10 +79,17 @@ pub fn build_polygons64(paths: &[Path64], fill_rule: FillRule) -> Result<Vec<Pol
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPath`] for malformed rings,
+/// Returns [`Error::LimitExceeded`] before normalization or quadratic topology
+/// work when the configured budget is insufficient,
+/// [`Error::InvalidPath`] for malformed rings,
 /// [`Error::IntersectingPaths`] for touching or crossing rings,
 /// and [`Error::TopologyFailure`] for degenerate topology.
-pub fn build_polygons_d(paths: &[PathD], fill_rule: FillRule) -> Result<Vec<PolygonD>, Error> {
+pub fn build_polygons_d(
+    paths: &[PathD],
+    fill_rule: FillRule,
+    limits: ComplexityLimits,
+) -> Result<Vec<PolygonD>, Error> {
+    limits.check(paths.iter().map(Vec::len))?;
     let rings = collect_rings(paths)?;
     Ok(polygons_from_rings(&rings, fill_rule))
 }
@@ -465,6 +479,15 @@ fn on_segment(point: PointD, first: PointD, second: PointD) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ComplexityResource;
+
+    fn build_polygons64(paths: &[Path64], fill_rule: FillRule) -> Result<Vec<Polygon64>, Error> {
+        super::build_polygons64(paths, fill_rule, ComplexityLimits::DEFAULT)
+    }
+
+    fn build_polygons_d(paths: &[PathD], fill_rule: FillRule) -> Result<Vec<PolygonD>, Error> {
+        super::build_polygons_d(paths, fill_rule, ComplexityLimits::DEFAULT)
+    }
 
     fn rectangle(left: f64, bottom: f64, right: f64, top: f64) -> PathD {
         vec![
@@ -473,6 +496,63 @@ mod tests {
             PointD::new(right, top),
             PointD::new(left, top),
         ]
+    }
+
+    #[test]
+    fn complexity_limits_are_deterministic_and_precede_geometry_work() {
+        let exact = ComplexityLimits::new(2, 8, 20);
+        assert_eq!(exact.max_paths(), 2);
+        assert_eq!(exact.max_vertices(), 8);
+        assert_eq!(exact.max_edge_pairs(), 20);
+        assert_eq!(ComplexityLimits::default(), ComplexityLimits::DEFAULT);
+        assert_eq!(exact.check([4, 4]), Ok(()));
+
+        for (limits, expected) in [
+            (
+                ComplexityLimits::new(1, 0, 0),
+                Error::LimitExceeded { resource: ComplexityResource::Paths, limit: 1, required: 2 },
+            ),
+            (
+                ComplexityLimits::new(2, 7, 0),
+                Error::LimitExceeded {
+                    resource: ComplexityResource::Vertices,
+                    limit: 7,
+                    required: 8,
+                },
+            ),
+            (
+                ComplexityLimits::new(2, 8, 19),
+                Error::LimitExceeded {
+                    resource: ComplexityResource::EdgePairs,
+                    limit: 19,
+                    required: 20,
+                },
+            ),
+        ] {
+            assert_eq!(limits.check([4, 4]), Err(expected));
+        }
+        assert_eq!(
+            ComplexityLimits::new(2, usize::MAX, usize::MAX - 1).check([usize::MAX, usize::MAX]),
+            Err(Error::LimitExceeded {
+                resource: ComplexityResource::EdgePairs,
+                limit: usize::MAX - 1,
+                required: usize::MAX,
+            })
+        );
+
+        let invalid = vec![vec![PointD::new(f64::NAN, 0.0); 4], rectangle(0.0, 0.0, 1.0, 1.0)];
+        assert_eq!(
+            super::build_polygons_d(
+                &invalid,
+                FillRule::EvenOdd,
+                ComplexityLimits::new(1, usize::MAX, usize::MAX),
+            ),
+            Err(Error::LimitExceeded {
+                resource: ComplexityResource::Paths,
+                limit: 1,
+                required: 2,
+            })
+        );
     }
 
     #[test]

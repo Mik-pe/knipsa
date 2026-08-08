@@ -2,7 +2,7 @@
 
 use std::{env, fs};
 
-use knipsa::{FillRule, PathD, PointD, TriangulationLimits, triangulate_d};
+use knipsa::{ComplexityLimits, FillRule, PathD, PointD, triangulate_d};
 use serde::{Deserialize, Serialize};
 
 #[path = "support/benchmark_protocol.rs"]
@@ -54,38 +54,37 @@ fn main() {
             .into_iter()
             .map(|path| path.into_iter().map(|[x, y]| PointD::new(x, y)).collect::<PathD>())
             .collect::<Vec<_>>();
-        let result = match measure(|| {
-            triangulate_d(&paths, FillRule::NonZero, TriangulationLimits::DEFAULT)
-        }) {
-            Ok(measured) => {
-                let signature = measured
-                    .output
-                    .iter()
-                    .map(|triangle| triangle.map(|point| [point.x, point.y]))
-                    .collect::<Vec<_>>();
-                BenchResult {
-                    id: case.id,
-                    status: "ok".to_owned(),
-                    error: None,
-                    median_ns: measured.median_ns,
-                    p95_ns: measured.p95_ns,
-                    iterations_per_sample: measured.iterations_per_sample,
-                    triangle_count: signature.len(),
-                    signature: serde_json::to_string(&signature)
-                        .expect("serializable triangle signature"),
+        let result =
+            match measure(|| triangulate_d(&paths, FillRule::NonZero, ComplexityLimits::DEFAULT)) {
+                Ok(measured) => {
+                    let signature = measured
+                        .output
+                        .iter()
+                        .map(|triangle| triangle.map(|point| [point.x, point.y]))
+                        .collect::<Vec<_>>();
+                    BenchResult {
+                        id: case.id,
+                        status: "ok".to_owned(),
+                        error: None,
+                        median_ns: measured.median_ns,
+                        p95_ns: measured.p95_ns,
+                        iterations_per_sample: measured.iterations_per_sample,
+                        triangle_count: signature.len(),
+                        signature: serde_json::to_string(&signature)
+                            .expect("serializable triangle signature"),
+                    }
                 }
-            }
-            Err(error) => BenchResult {
-                id: case.id,
-                status: "error".to_owned(),
-                error: Some(error.to_string()),
-                median_ns: 0,
-                p95_ns: 0,
-                iterations_per_sample: 0,
-                triangle_count: 0,
-                signature: "[]".to_owned(),
-            },
-        };
+                Err(error) => BenchResult {
+                    id: case.id,
+                    status: "error".to_owned(),
+                    error: Some(error.to_string()),
+                    median_ns: 0,
+                    p95_ns: 0,
+                    iterations_per_sample: 0,
+                    triangle_count: 0,
+                    signature: "[]".to_owned(),
+                },
+            };
         println!("{}", serde_json::to_string(&result).expect("serializable result"));
     }
 }
