@@ -387,6 +387,9 @@ pub(crate) fn boolean_op64(
         return closed.map(|closed| BooleanOutput { closed, open: Vec::new() });
     }
     closed.and_then(|closed| {
+        // This checked integer candidate preserves boundary semantics without
+        // quantization; ambiguous touching/overlap or arithmetic risk returns
+        // `None` and falls back to the exact rational oracle below.
         let open = if let Some(open) = try_clip_open_paths64(
             request.open_subjects,
             request.closed_subjects,

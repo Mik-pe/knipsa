@@ -154,10 +154,12 @@ fn closed_request<'a, P>(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPath`] for invalid input, [`Error::ArithmeticOverflow`]
-/// for checked integer overflow, [`Error::NonIntegralResult`] when an exact
-/// result cannot be represented by `i64`, or [`Error::TopologyFailure`] if the
-/// arrangement cannot be closed.
+/// Returns [`Error::LimitExceeded`] when the request exceeds its
+/// [`ComplexityLimits`] preflight budget. It also returns [`Error::InvalidPath`]
+/// for invalid input, [`Error::ArithmeticOverflow`] for checked integer
+/// overflow, [`Error::NonIntegralResult`] when an exact result cannot be
+/// represented by `i64`, or [`Error::TopologyFailure`] if the arrangement
+/// cannot be closed.
 pub fn boolean_op(request: BooleanRequest<'_, Path64>) -> Result<BooleanOutput<Path64>, Error> {
     validate_bounded64(&request)?;
     crate::boolean::boolean_op64(&request)
@@ -172,8 +174,10 @@ pub fn boolean_op(request: BooleanRequest<'_, Path64>) -> Result<BooleanOutput<P
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidPath`] or [`Error::NonFiniteCoordinate`] for invalid
-/// input and [`Error::TopologyFailure`] if the arrangement cannot be closed.
+/// Returns [`Error::LimitExceeded`] when the request exceeds its
+/// [`ComplexityLimits`] preflight budget, [`Error::InvalidPath`] or
+/// [`Error::NonFiniteCoordinate`] for invalid input, and
+/// [`Error::TopologyFailure`] if the arrangement cannot be closed.
 pub fn boolean_op_d(request: BooleanRequest<'_, PathD>) -> Result<BooleanOutput<PathD>, Error> {
     validate_bounded_d(&request)?;
     crate::boolean::boolean_op_d(&request)
