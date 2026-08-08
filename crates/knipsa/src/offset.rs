@@ -8,7 +8,9 @@
 
 use crate::{
     BooleanRequestD, ClipType, Error, FillRule, Path64, PathD, PathKind, Paths64, PathsD, Point64,
-    PointD, boolean_opd, normalize_pathd, validate_pathd,
+    PointD, boolean_op_d,
+    geometry::{paths64_to_local_d, signed_area2_d},
+    normalize_path_d, validate_path_d,
 };
 
 const EPSILON: f64 = 1e-12;
@@ -191,10 +193,10 @@ pub fn offset_paths_d(
     validate_options(delta, options)?;
     let kind = if options.end_type == EndType::Polygon { PathKind::Closed } else { PathKind::Open };
     for path in paths {
-        validate_pathd(path, kind)?;
+        validate_path_d(path, kind)?;
     }
 
-    let normalized = paths.iter().map(|path| normalize_pathd(path, kind)).collect::<Vec<_>>();
+    let normalized = paths.iter().map(|path| normalize_path_d(path, kind)).collect::<Vec<_>>();
     if delta.abs() <= EPSILON {
         return Ok(if options.end_type == EndType::Polygon {
             normalized
@@ -239,7 +241,7 @@ fn merge_generated_contours(
     // overlapping offsets from multiple input paths. The boolean kernel only
     // emits non-degenerate rings, so cleaning cannot collapse a result below
     // the closed-path minimum.
-    let result = boolean_opd(BooleanRequestD {
+    let result = boolean_op_d(BooleanRequestD {
         subjects: generated,
         clips: &[],
         clip_type: ClipType::Union,
@@ -258,15 +260,6 @@ fn merge_generated_contours(
 /// Propagates validation and topology errors from [`offset_paths_d`].
 pub fn offset_path_d(path: &PathD, delta: f64, options: OffsetOptions) -> Result<PathsD, Error> {
     offset_paths_d(std::slice::from_ref(path), delta, options)
-}
-
-/// Offsets floating-point paths; an ergonomic alias for [`offset_paths_d`].
-///
-/// # Errors
-///
-/// Propagates the validation and topology errors from [`offset_paths_d`].
-pub fn offset_paths(paths: &[PathD], delta: f64, options: OffsetOptions) -> Result<PathsD, Error> {
-    offset_paths_d(paths, delta, options)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -336,32 +329,6 @@ fn validate_options(delta: f64, options: OffsetOptions) -> Result<(), Error> {
     Ok(())
 }
 
-#[allow(clippy::cast_precision_loss)]
-fn paths64_to_local_d(paths: &[Path64]) -> Result<(Point64, Vec<PathD>), Error> {
-    let origin = paths.iter().find_map(|path| path.first()).copied().unwrap_or(Point64::new(0, 0));
-    let mut local = Vec::with_capacity(paths.len());
-    for path in paths {
-        let mut local_path = Vec::with_capacity(path.len());
-        for point in path {
-            local_path.push(PointD::new(
-                i128_to_exact_f64(i128::from(point.x) - i128::from(origin.x))?,
-                i128_to_exact_f64(i128::from(point.y) - i128::from(origin.y))?,
-            ));
-        }
-        local.push(local_path);
-    }
-    Ok((origin, local))
-}
-
-#[allow(clippy::cast_precision_loss)]
-fn i128_to_exact_f64(value: i128) -> Result<f64, Error> {
-    const MAX_EXACT_INTEGER: u128 = 1 << 53;
-    if value.unsigned_abs() > MAX_EXACT_INTEGER {
-        return Err(Error::ArithmeticOverflow);
-    }
-    Ok(value as f64)
-}
-
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 fn round_path_with_origin(path: PathD, origin: Point64) -> Result<Path64, Error> {
     path.into_iter()
@@ -391,7 +358,7 @@ fn closed_outline(path: &[PointD], delta: f64, options: OffsetOptions) -> Result
     if path.len() < 3 {
         return Ok(Vec::new());
     }
-    let area = signed_area2(path);
+    let area = signed_area2_d(path);
     if area.abs() <= EPSILON {
         return Err(Error::InvalidOffset);
     }
@@ -1190,14 +1157,6 @@ fn segments_are_certifiably_disjoint(
     cd_a == cd_b
 }
 
-fn signed_area2(path: &[PointD]) -> f64 {
-    path.iter()
-        .zip(path.iter().cycle().skip(1))
-        .take(path.len())
-        .map(|(first, second)| first.x * second.y - first.y * second.x)
-        .sum()
-}
-
 fn ring_self_intersects(path: &[PointD]) -> bool {
     for first in 0..path.len() {
         let first_end = (first + 1) % path.len();
@@ -1546,11 +1505,6 @@ mod tests {
             ),
             Ok(Vec::new())
         );
-        assert_eq!(
-            offset_paths(std::slice::from_ref(&path), 0.0, OffsetOptions::default()).unwrap(),
-            vec![path.clone()]
-        );
-
         let translated_origin = (1_i64 << 53) + 1;
         let translated = vec![vec![
             Point64::new(translated_origin, 0),
@@ -2085,7 +2039,6 @@ mod tests {
         assert_eq!(line_intersection(previous, horizontal, next, horizontal), None);
         assert!(line_intersection(previous, horizontal, next, vertical).is_some());
         assert!((distance(center, PointD::new(3.0, 4.0)) - 5.0).abs() < f64::EPSILON);
-        assert_eq!(i128_to_exact_f64((1_i128 << 53) + 1), Err(Error::ArithmeticOverflow));
         let excessive_span =
             vec![vec![Point64::new(0, 0), Point64::new((1_i64 << 53) + 1, 0), Point64::new(0, 1)]];
         assert_eq!(

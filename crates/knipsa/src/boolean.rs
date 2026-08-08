@@ -16,7 +16,7 @@ use num_traits::{One, Signed, ToPrimitive, Zero};
 
 use crate::{
     BooleanRequest, BooleanRequestD, ClipType, Error, FillRule, Path64, PathD, Paths64, PathsD,
-    Point64, PointD, normalize_path64, normalize_pathd,
+    Point64, PointD, normalize_path_d, normalize_path64,
 };
 
 const INTEGER_SAMPLE_BITS: usize = 120;
@@ -365,6 +365,9 @@ struct FaceLink {
 }
 
 pub(crate) fn boolean_op64(request: BooleanRequest<'_>) -> Result<Paths64, Error> {
+    if let Some(result) = crate::dispatch::try_boolean_op64(request) {
+        return Ok(result);
+    }
     let subjects = exact_paths64(request.subjects);
     let clips = exact_paths64(request.clips);
     let result =
@@ -372,14 +375,14 @@ pub(crate) fn boolean_op64(request: BooleanRequest<'_>) -> Result<Paths64, Error
     exact_paths_to_i64(&result)
 }
 
-pub(crate) fn boolean_opd(request: BooleanRequestD<'_>) -> Result<PathsD, Error> {
-    if let Some(Ok(result)) = crate::fast::try_boolean_opd(request) {
+pub(crate) fn boolean_op_d(request: BooleanRequestD<'_>) -> Result<PathsD, Error> {
+    if let Some(result) = crate::dispatch::try_boolean_op_d(request) {
         return Ok(result);
     }
-    boolean_opd_exact(request)
+    boolean_op_d_exact(request)
 }
 
-pub(crate) fn boolean_opd_exact(request: BooleanRequestD<'_>) -> Result<PathsD, Error> {
+pub(crate) fn boolean_op_d_exact(request: BooleanRequestD<'_>) -> Result<PathsD, Error> {
     let subjects = exact_paths_d(request.subjects)?;
     let clips = exact_paths_d(request.clips)?;
     let result =
@@ -406,7 +409,7 @@ fn exact_paths_d(paths: &[PathD]) -> Result<Vec<ExactPath>, Error> {
     paths
         .iter()
         .map(|path| {
-            normalize_pathd(path, crate::PathKind::Closed)
+            normalize_path_d(path, crate::PathKind::Closed)
                 .into_iter()
                 .map(|point| {
                     let x = Rational::from_f64(point.x)?;
@@ -1869,6 +1872,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unknown_lints)]
     #[allow(
         clippy::bool_assert_comparison,
         clippy::cloned_ref_to_slice_refs,
@@ -1943,6 +1947,8 @@ mod tests {
                 .is_none()
         );
         let corner_touch = exact_paths64(&[rectangle(10, 10, 20, 20)]);
+        let edge_touch = exact_paths64(&[rectangle(10, 0, 20, 10)]);
+        assert!(short_circuit(&subject, &edge_touch, ClipType::Union, FillRule::EvenOdd).is_none());
         assert!(
             short_circuit(&[invalid.clone()], &corner_touch, ClipType::Union, FillRule::EvenOdd)
                 .is_none()
@@ -2228,7 +2234,7 @@ mod tests {
     fn supports_non_integral_intersections_through_double_api() {
         let subject = rectangle_d(0.0, 0.0, 10.0, 10.0);
         let clip = vec![PointD::new(3.0, -1.0), PointD::new(13.0, 4.0), PointD::new(3.0, 9.0)];
-        let result = boolean_opd(BooleanRequestD {
+        let result = boolean_op_d(BooleanRequestD {
             subjects: &[subject],
             clips: &[clip],
             clip_type: ClipType::Intersection,
@@ -2306,10 +2312,9 @@ mod tests {
                 clip_type,
                 fill_rule: FillRule::EvenOdd,
             };
-            let fast = crate::fast::try_boolean_opd(request)
-                .expect("well-conditioned input should use fast path")
-                .expect("fast path should close");
-            let exact = boolean_opd_exact(request).expect("exact oracle should close");
+            let fast = crate::dispatch::try_boolean_op_d(request)
+                .expect("well-conditioned input should use fast path");
+            let exact = boolean_op_d_exact(request).expect("exact oracle should close");
             assert_eq!(double_summary(&fast), double_summary(&exact));
         }
     }
@@ -2334,14 +2339,15 @@ mod tests {
                 clip_type,
                 fill_rule: FillRule::EvenOdd,
             };
-            let exact = boolean_opd_exact(request).expect("exact rectangle operation should close");
-            let result = boolean_opd(request).expect("public rectangle operation should close");
+            let exact =
+                boolean_op_d_exact(request).expect("exact rectangle operation should close");
+            let result = boolean_op_d(request).expect("public rectangle operation should close");
             assert!((double_area_sum(&exact) - expected_area).abs() < f64::EPSILON);
             assert!((double_area_sum(&result) - expected_area).abs() < f64::EPSILON);
         }
 
         let touching = rectangle_d(10.0, 0.0, 20.0, 10.0);
-        let result = boolean_opd(BooleanRequestD {
+        let result = boolean_op_d(BooleanRequestD {
             subjects: &subjects,
             clips: std::slice::from_ref(&touching),
             clip_type: ClipType::Union,
@@ -2381,8 +2387,8 @@ mod tests {
             {
                 let request =
                     BooleanRequestD { subjects: &subjects, clips: &clips, clip_type, fill_rule };
-                let exact = boolean_opd_exact(request).expect("exact rectilinear oracle");
-                let result = boolean_opd(request).expect("public rectilinear operation");
+                let exact = boolean_op_d_exact(request).expect("exact rectilinear oracle");
+                let result = boolean_op_d(request).expect("public rectilinear operation");
                 let exact = exact
                     .iter()
                     .map(|path| crate::trim_collinear_d(path, crate::PathKind::Closed))
@@ -2413,10 +2419,9 @@ mod tests {
                 clip_type: ClipType::Difference,
                 fill_rule,
             };
-            let fast = crate::fast::try_boolean_opd(request)
-                .expect("well-conditioned input should use fast path")
-                .expect("fast path should close");
-            let exact = boolean_opd_exact(request).expect("exact oracle should close");
+            let fast = crate::dispatch::try_boolean_op_d(request)
+                .expect("well-conditioned input should use fast path");
+            let exact = boolean_op_d_exact(request).expect("exact oracle should close");
             assert_eq!(double_summary(&fast), double_summary(&exact), "fill rule: {fill_rule:?}");
         }
     }
@@ -2433,10 +2438,9 @@ mod tests {
             clip_type: ClipType::Xor,
             fill_rule: FillRule::EvenOdd,
         };
-        let fast = crate::fast::try_boolean_opd(request)
-            .expect("high-vertex input should use fast path")
-            .expect("fast path should close");
-        let exact = boolean_opd_exact(request).expect("exact oracle should close");
+        let fast = crate::dispatch::try_boolean_op_d(request)
+            .expect("high-vertex input should use fast path");
+        let exact = boolean_op_d_exact(request).expect("exact oracle should close");
         assert_eq!(double_summary(&fast), double_summary(&exact));
     }
 
@@ -2457,10 +2461,9 @@ mod tests {
                     clip_type,
                     fill_rule: FillRule::EvenOdd,
                 };
-                let fast = crate::fast::try_boolean_opd(request)
-                    .expect("convex input should use fast path")
-                    .expect("fast path should close");
-                let exact = boolean_opd_exact(request).expect("exact oracle should close");
+                let fast = crate::dispatch::try_boolean_op_d(request)
+                    .expect("convex input should use fast path");
+                let exact = boolean_op_d_exact(request).expect("exact oracle should close");
                 assert_eq!(double_summary(&fast), double_summary(&exact), "case: {clip_type:?}");
             }
         }
@@ -2476,8 +2479,8 @@ mod tests {
             clip_type: ClipType::Union,
             fill_rule: FillRule::EvenOdd,
         };
-        assert!(crate::fast::try_boolean_opd(request).is_none());
-        assert_eq!(boolean_opd(request).expect("exact fallback should close").len(), 1);
+        assert!(crate::dispatch::try_boolean_op_d(request).is_none());
+        assert_eq!(boolean_op_d(request).expect("exact fallback should close").len(), 1);
     }
 
     fn double_summary(paths: &PathsD) -> Vec<(usize, u64)> {

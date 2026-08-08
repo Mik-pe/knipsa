@@ -3,6 +3,13 @@
   "coordinate_type": "f64",
   "cases": [
     {
+      "id": "self-crossing-even-odd",
+      "clip_type": "union",
+      "fill_rule": "even_odd",
+      "subjects": [[[0, 0], [20, 20], [0, 20], [20, 0]]],
+      "clips": []
+    },
+    {
       "id": "orthogonal-self-crossing-even-odd",
       "clip_type": "union",
       "fill_rule": "even_odd",

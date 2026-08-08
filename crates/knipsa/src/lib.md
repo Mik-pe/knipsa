@@ -30,11 +30,15 @@ assert_eq!(result.len(), 1);
 
 Use [`crate::intersection`] for exact integer output. The convenience
 operations and single-ring `_path` variants use [`crate::FillRule::EvenOdd`];
-use [`crate::boolean_op`] or [`crate::boolean_opd`] when another fill rule is
+use [`crate::boolean_op`] or [`crate::boolean_op_d`] when another fill rule is
 required. Use
 [`crate::offset_path_d`] for one polygon or polyline offset,
 [`crate::offset_paths_d`] for offset collections, and [`crate::triangulate_d`]
 for counter-clockwise triangles.
+
+Coordinate-specific helper names use `64` for exact integer geometry and `_d`
+for floating-point geometry. Each operation has one canonical public name;
+the pre-1.0 API does not retain duplicate aliases.
 
 The repository contains a longer runnable tour in
 `crates/knipsa/examples/quickstart.rs`.

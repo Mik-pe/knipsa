@@ -2,55 +2,16 @@
 
 use std::cmp::Ordering;
 
-use crate::{BooleanRequestD, ClipType, FillRule, PathD, PathsD, PointD};
+use crate::{
+    BooleanRequestD, ClipType, FillRule, PathD, PathsD, PointD,
+    dispatch::{
+        AxisAlignedRectangle, DirectedEdge, GridCoordinate, apply_operation,
+        axis_aligned_rectangle, canonicalize, compare_paths, exact_key, fill_rule_accepts_ring,
+    },
+    geometry::signed_area2_d,
+};
 
-const KEY_SCALE: f64 = 1_000_000_000.0;
-const MAX_COORDINATE: f64 = 1_000_000.0;
 const MAX_BOUNDARY_EDGES: usize = 24;
-
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-struct PointKey {
-    x: i64,
-    y: i64,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct GridCoordinate {
-    key: i64,
-    value: f64,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct AxisAlignedRectangle {
-    min_x: GridCoordinate,
-    min_y: GridCoordinate,
-    max_x: GridCoordinate,
-    max_y: GridCoordinate,
-}
-
-impl AxisAlignedRectangle {
-    #[inline]
-    fn contains_cell(
-        self,
-        min_x: GridCoordinate,
-        max_x: GridCoordinate,
-        min_y: GridCoordinate,
-        max_y: GridCoordinate,
-    ) -> bool {
-        min_x.key >= self.min_x.key
-            && max_x.key <= self.max_x.key
-            && min_y.key >= self.min_y.key
-            && max_y.key <= self.max_y.key
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct DirectedEdge {
-    start: PointD,
-    end: PointD,
-    start_key: PointKey,
-    end_key: PointKey,
-}
 
 struct SmallBoundary {
     edges: [DirectedEdge; MAX_BOUNDARY_EDGES],
@@ -59,10 +20,7 @@ struct SmallBoundary {
 
 impl SmallBoundary {
     fn new() -> Self {
-        Self {
-            edges: [DirectedEdge::default(); MAX_BOUNDARY_EDGES],
-            len: 0,
-        }
+        Self { edges: [DirectedEdge::default(); MAX_BOUNDARY_EDGES], len: 0 }
     }
 
     #[inline]
@@ -77,11 +35,360 @@ impl SmallBoundary {
     }
 }
 
-pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<PathsD, ()>> {
+pub(crate) fn try_apply(request: BooleanRequestD<'_>) -> Option<PathsD> {
     if let Some(result) = try_rectangle_pair(request) {
-        return Some(Ok(result));
+        return Some(result);
     }
-    crate::fast_dispatch::try_boolean_opd(request)
+    if let Some(result) = try_nested_rectangle_xor(request) {
+        return Some(result);
+    }
+    if let Some(result) = try_convex_zero_area_contact(request) {
+        return Some(result);
+    }
+    if let Some(result) = try_even_odd_bow_tie(request) {
+        return Some(result);
+    }
+    None
+}
+
+/// Resolves XOR over strictly nested or disjoint exact-grid rectangles. Under
+/// `EvenOdd` semantics every surviving rectangle toggles the combined parity,
+/// so its complete boundary can be emitted without an arrangement or stitch.
+fn try_nested_rectangle_xor(request: BooleanRequestD<'_>) -> Option<PathsD> {
+    if request.clip_type != ClipType::Xor || request.fill_rule != FillRule::EvenOdd {
+        return None;
+    }
+    let paths = request.subjects.iter().chain(request.clips).filter(|path| !path.is_empty());
+    let path_count = paths.clone().count();
+    if !(3..=64).contains(&path_count) {
+        return None;
+    }
+
+    let mut rectangles = Vec::with_capacity(path_count);
+    for path in paths {
+        if !path.iter().copied().all(|point| exact_key(point).is_some()) {
+            return None;
+        }
+        let rectangle = axis_aligned_rectangle(path)?;
+        if let Some(index) = rectangles.iter().position(|known| same_rectangle(*known, rectangle)) {
+            rectangles.swap_remove(index);
+        } else {
+            rectangles.push(rectangle);
+        }
+    }
+
+    for (index, rectangle) in rectangles.iter().copied().enumerate() {
+        for other in rectangles.iter().copied().skip(index + 1) {
+            if !rectangles_strictly_disjoint(rectangle, other)
+                && !strictly_contains(rectangle, other)
+                && !strictly_contains(other, rectangle)
+            {
+                return None;
+            }
+        }
+    }
+
+    let mut result = rectangles
+        .iter()
+        .copied()
+        .map(|rectangle| {
+            let depth = rectangles
+                .iter()
+                .copied()
+                .filter(|other| strictly_contains(*other, rectangle))
+                .count();
+            rectangle_path(rectangle, depth % 2 == 0)
+        })
+        .collect::<PathsD>();
+    result.sort_by(compare_paths);
+    Some(result)
+}
+
+fn same_rectangle(first: AxisAlignedRectangle, second: AxisAlignedRectangle) -> bool {
+    first.min_x.key == second.min_x.key
+        && first.min_y.key == second.min_y.key
+        && first.max_x.key == second.max_x.key
+        && first.max_y.key == second.max_y.key
+}
+
+fn rectangles_strictly_disjoint(first: AxisAlignedRectangle, second: AxisAlignedRectangle) -> bool {
+    first.max_x.key < second.min_x.key
+        || second.max_x.key < first.min_x.key
+        || first.max_y.key < second.min_y.key
+        || second.max_y.key < first.min_y.key
+}
+
+fn strictly_contains(outer: AxisAlignedRectangle, inner: AxisAlignedRectangle) -> bool {
+    outer.min_x.key < inner.min_x.key
+        && outer.min_y.key < inner.min_y.key
+        && outer.max_x.key > inner.max_x.key
+        && outer.max_y.key > inner.max_y.key
+}
+
+fn rectangle_path(rectangle: AxisAlignedRectangle, positive: bool) -> PathD {
+    let mut path = vec![
+        PointD::new(rectangle.min_x.value, rectangle.min_y.value),
+        PointD::new(rectangle.max_x.value, rectangle.min_y.value),
+        PointD::new(rectangle.max_x.value, rectangle.max_y.value),
+        PointD::new(rectangle.min_x.value, rectangle.max_y.value),
+    ];
+    if !positive {
+        path.reverse();
+    }
+    canonicalize(&mut path);
+    path
+}
+
+/// Resolves strictly convex rings whose bounding boxes meet only on a line or
+/// point. Positive-length collinear contact stays on the general path.
+fn try_convex_zero_area_contact(request: BooleanRequestD<'_>) -> Option<PathsD> {
+    if request.subjects.len() != 1
+        || request.clips.len() != 1
+        || !matches!(request.fill_rule, FillRule::EvenOdd | FillRule::NonZero)
+    {
+        return None;
+    }
+
+    let subject = request.subjects[0].as_slice();
+    let clip = request.clips[0].as_slice();
+    if !bounds_have_zero_area_contact(path_bounds(subject)?, path_bounds(clip)?) {
+        return None;
+    }
+    let subject_keys = exact_path_keys(subject)?;
+    let clip_keys = exact_path_keys(clip)?;
+
+    let subject_positive = certified_strict_convex(&subject_keys)?;
+    let clip_positive = certified_strict_convex(&clip_keys)?;
+    if has_positive_collinear_overlap(&subject_keys, &clip_keys) {
+        return None;
+    }
+
+    let subject = direct_path(subject, subject_positive);
+    match request.clip_type {
+        ClipType::Intersection => Some(Vec::new()),
+        ClipType::Difference => Some(vec![subject]),
+        ClipType::Union | ClipType::Xor => {
+            let clip = direct_path(clip, clip_positive);
+            let mut result = vec![subject, clip];
+            result.sort_by(compare_paths);
+            Some(result)
+        }
+    }
+}
+
+fn path_bounds(path: &[PointD]) -> Option<(f64, f64, f64, f64)> {
+    let first = *path.first()?;
+    if !first.x.is_finite() || !first.y.is_finite() {
+        return None;
+    }
+    path.iter().copied().skip(1).try_fold(
+        (first.x, first.y, first.x, first.y),
+        |(x_minimum, y_minimum, x_maximum, y_maximum), point| {
+            (point.x.is_finite() && point.y.is_finite()).then_some((
+                x_minimum.min(point.x),
+                y_minimum.min(point.y),
+                x_maximum.max(point.x),
+                y_maximum.max(point.y),
+            ))
+        },
+    )
+}
+
+fn bounds_have_zero_area_contact(
+    first: (f64, f64, f64, f64),
+    second: (f64, f64, f64, f64),
+) -> bool {
+    let overlap_x = first.2.min(second.2) - first.0.max(second.0);
+    let overlap_y = first.3.min(second.3) - first.1.max(second.1);
+    overlap_x >= 0.0 && overlap_y >= 0.0 && (overlap_x == 0.0 || overlap_y == 0.0)
+}
+
+/// Splits a four-edge `EvenOdd` bow tie at its single proper crossing.
+fn try_even_odd_bow_tie(request: BooleanRequestD<'_>) -> Option<PathsD> {
+    if !request.clips.is_empty()
+        || request.subjects.len() != 1
+        || request.fill_rule != FillRule::EvenOdd
+        || !matches!(request.clip_type, ClipType::Union | ClipType::Difference | ClipType::Xor)
+    {
+        return None;
+    }
+    let [first, second, third, fourth] = request.subjects[0].as_slice() else {
+        return None;
+    };
+    let points = [*first, *second, *third, *fourth];
+    let keys = [
+        exact_key(points[0])?,
+        exact_key(points[1])?,
+        exact_key(points[2])?,
+        exact_key(points[3])?,
+    ];
+    split_bow_tie(points, keys).or_else(|| {
+        split_bow_tie(
+            [points[1], points[2], points[3], points[0]],
+            [keys[1], keys[2], keys[3], keys[0]],
+        )
+    })
+}
+
+fn split_bow_tie(points: [PointD; 4], keys: [crate::dispatch::PointKey; 4]) -> Option<PathsD> {
+    let intersection = proper_intersection(points[0], points[1], points[2], points[3], keys)?;
+    let mut first = vec![intersection, points[1], points[2]];
+    let mut second = vec![intersection, points[3], points[0]];
+    make_positive_triangle(&mut first)?;
+    make_positive_triangle(&mut second)?;
+    canonicalize(&mut first);
+    canonicalize(&mut second);
+    let mut result = vec![first, second];
+    result.sort_by(compare_paths);
+    Some(result)
+}
+
+fn exact_path_keys(path: &[PointD]) -> Option<Vec<crate::dispatch::PointKey>> {
+    (path.len() >= 3).then(|| path.iter().copied().map(exact_key).collect::<Option<Vec<_>>>())?
+}
+
+fn certified_strict_convex(keys: &[crate::dispatch::PointKey]) -> Option<bool> {
+    let mut direction = None;
+    for index in 0..keys.len() {
+        let turn =
+            orient(keys[index], keys[(index + 1) % keys.len()], keys[(index + 2) % keys.len()]);
+        let positive = match turn.cmp(&0) {
+            Ordering::Greater => true,
+            Ordering::Less => false,
+            Ordering::Equal => return None,
+        };
+        if direction.is_some_and(|known| known != positive) {
+            return None;
+        }
+        direction = Some(positive);
+    }
+    for first in 0..keys.len() {
+        let first_end = (first + 1) % keys.len();
+        for second in first + 1..keys.len() {
+            let second_end = (second + 1) % keys.len();
+            if first_end == second || second_end == first {
+                continue;
+            }
+            if segments_intersect(keys[first], keys[first_end], keys[second], keys[second_end]) {
+                return None;
+            }
+        }
+    }
+    direction
+}
+
+fn has_positive_collinear_overlap(
+    first: &[crate::dispatch::PointKey],
+    second: &[crate::dispatch::PointKey],
+) -> bool {
+    first.iter().zip(first.iter().cycle().skip(1)).take(first.len()).any(|(&a, &b)| {
+        second.iter().zip(second.iter().cycle().skip(1)).take(second.len()).any(|(&c, &d)| {
+            orient(a, b, c) == 0 && orient(a, b, d) == 0 && projected_overlap(a, b, c, d) > 0
+        })
+    })
+}
+
+fn projected_overlap(
+    a: crate::dispatch::PointKey,
+    b: crate::dispatch::PointKey,
+    c: crate::dispatch::PointKey,
+    d: crate::dispatch::PointKey,
+) -> i64 {
+    let use_x = a.x.abs_diff(b.x) >= a.y.abs_diff(b.y);
+    let (a, b, c, d) = if use_x { (a.x, b.x, c.x, d.x) } else { (a.y, b.y, c.y, d.y) };
+    a.max(b).min(c.max(d)) - a.min(b).max(c.min(d))
+}
+
+fn segments_intersect(
+    a: crate::dispatch::PointKey,
+    b: crate::dispatch::PointKey,
+    c: crate::dispatch::PointKey,
+    d: crate::dispatch::PointKey,
+) -> bool {
+    let ab_c = orient(a, b, c);
+    let ab_d = orient(a, b, d);
+    let cd_a = orient(c, d, a);
+    let cd_b = orient(c, d, b);
+    (opposite_signs(ab_c, ab_d) && opposite_signs(cd_a, cd_b))
+        || (ab_c == 0 && point_on_segment(c, a, b))
+        || (ab_d == 0 && point_on_segment(d, a, b))
+        || (cd_a == 0 && point_on_segment(a, c, d))
+        || (cd_b == 0 && point_on_segment(b, c, d))
+}
+
+fn proper_intersection(
+    a: PointD,
+    b: PointD,
+    c: PointD,
+    d: PointD,
+    keys: [crate::dispatch::PointKey; 4],
+) -> Option<PointD> {
+    let [a_key, b_key, c_key, d_key] = keys;
+    if !opposite_signs(orient(a_key, b_key, c_key), orient(a_key, b_key, d_key))
+        || !opposite_signs(orient(c_key, d_key, a_key), orient(c_key, d_key, b_key))
+    {
+        return None;
+    }
+    let first = subtract(b, a);
+    let second = subtract(d, c);
+    let between = subtract(c, a);
+    let denominator = first.x.mul_add(second.y, -(first.y * second.x));
+    let parameter = between.x.mul_add(second.y, -(between.y * second.x)) / denominator;
+    let point = PointD::new(first.x.mul_add(parameter, a.x), first.y.mul_add(parameter, a.y));
+    exact_key(point)?;
+    Some(point)
+}
+
+fn make_positive_triangle(path: &mut Vec<PointD>) -> Option<()> {
+    let [a, b, c] = path.as_slice() else {
+        return None;
+    };
+    let turn = orient(exact_key(*a)?, exact_key(*b)?, exact_key(*c)?);
+    if turn == 0 {
+        return None;
+    }
+    if turn < 0 {
+        path.reverse();
+    }
+    Some(())
+}
+
+fn direct_path(path: &[PointD], positive: bool) -> Vec<PointD> {
+    let mut result = path.to_vec();
+    if !positive {
+        result.reverse();
+    }
+    canonicalize(&mut result);
+    result
+}
+
+fn opposite_signs(first: i128, second: i128) -> bool {
+    (first < 0 && second > 0) || (first > 0 && second < 0)
+}
+
+fn point_on_segment(
+    point: crate::dispatch::PointKey,
+    start: crate::dispatch::PointKey,
+    end: crate::dispatch::PointKey,
+) -> bool {
+    point.x >= start.x.min(end.x)
+        && point.x <= start.x.max(end.x)
+        && point.y >= start.y.min(end.y)
+        && point.y <= start.y.max(end.y)
+}
+
+fn orient(
+    a: crate::dispatch::PointKey,
+    b: crate::dispatch::PointKey,
+    c: crate::dispatch::PointKey,
+) -> i128 {
+    let vector = (i128::from(b.x) - i128::from(a.x), i128::from(b.y) - i128::from(a.y));
+    let offset = (i128::from(c.x) - i128::from(a.x), i128::from(c.y) - i128::from(a.y));
+    vector.0 * offset.1 - vector.1 * offset.0
+}
+
+fn subtract(first: PointD, second: PointD) -> PointD {
+    PointD::new(first.x - second.x, first.y - second.y)
 }
 
 /// Handles one axis-aligned rectangle per side without coordinate vectors,
@@ -119,109 +426,28 @@ fn try_rectangle_pair(request: BooleanRequestD<'_>) -> Option<PathsD> {
         for y in 0..rows {
             let subject_contains = subject_enabled
                 && subject_rectangle.contains_cell(xs[x], xs[x + 1], ys[y], ys[y + 1]);
-            let clip_contains = clip_enabled
-                && clip_rectangle.contains_cell(xs[x], xs[x + 1], ys[y], ys[y + 1]);
+            let clip_contains =
+                clip_enabled && clip_rectangle.contains_cell(xs[x], xs[x + 1], ys[y], ys[y + 1]);
             current[y] = apply_operation(subject_contains, clip_contains, request.clip_type);
         }
-        add_vertical_transitions(
-            &mut boundary,
-            xs[x],
-            ys,
-            &previous[..rows],
-            &current[..rows],
-        )?;
-        add_horizontal_transitions(
-            &mut boundary,
-            xs[x],
-            xs[x + 1],
-            ys,
-            &current[..rows],
-        )?;
+        add_vertical_transitions(&mut boundary, xs[x], ys, &previous[..rows], &current[..rows])?;
+        add_horizontal_transitions(&mut boundary, xs[x], xs[x + 1], ys, &current[..rows])?;
         std::mem::swap(&mut previous, &mut current);
     }
 
-    current[..rows].fill(false);
-    add_vertical_transitions(
-        &mut boundary,
-        xs[x_len - 1],
-        ys,
-        &previous[..rows],
-        &current[..rows],
-    )?;
+    finish_rectangle_grid(&mut boundary, xs[x_len - 1], ys, &previous[..rows], &mut current[..rows])
+}
+
+fn finish_rectangle_grid(
+    boundary: &mut SmallBoundary,
+    final_x: GridCoordinate,
+    ys: &[GridCoordinate],
+    previous: &[bool],
+    current: &mut [bool],
+) -> Option<PathsD> {
+    current.fill(false);
+    add_vertical_transitions(boundary, final_x, ys, previous, current)?;
     stitch_small(boundary.as_slice())
-}
-
-fn axis_aligned_rectangle(path: &[PointD]) -> Option<AxisAlignedRectangle> {
-    let [first, second, third, fourth] = path else {
-        return None;
-    };
-    let keys = [key(*first)?, key(*second)?, key(*third)?, key(*fourth)?];
-    for (start, end) in keys.iter().zip(keys.iter().cycle().skip(1)).take(keys.len()) {
-        if start == end || (start.x == end.x) == (start.y == end.y) {
-            return None;
-        }
-    }
-
-    let min_x_key = keys.iter().map(|point| point.x).min()?;
-    let max_x_key = keys.iter().map(|point| point.x).max()?;
-    let min_y_key = keys.iter().map(|point| point.y).min()?;
-    let max_y_key = keys.iter().map(|point| point.y).max()?;
-    if min_x_key == max_x_key || min_y_key == max_y_key {
-        return None;
-    }
-
-    let mut corners = 0_u8;
-    for point in keys {
-        let x_bit = u32::from(point.x == max_x_key);
-        let y_bit = u32::from(point.y == max_y_key);
-        let bit = 1_u8 << (x_bit + 2 * y_bit);
-        if corners & bit != 0 {
-            return None;
-        }
-        corners |= bit;
-    }
-    Some(AxisAlignedRectangle {
-        min_x: GridCoordinate {
-            key: min_x_key,
-            value: keyed_coordinate_value(path, &keys, min_x_key, true)?,
-        },
-        min_y: GridCoordinate {
-            key: min_y_key,
-            value: keyed_coordinate_value(path, &keys, min_y_key, false)?,
-        },
-        max_x: GridCoordinate {
-            key: max_x_key,
-            value: keyed_coordinate_value(path, &keys, max_x_key, true)?,
-        },
-        max_y: GridCoordinate {
-            key: max_y_key,
-            value: keyed_coordinate_value(path, &keys, max_y_key, false)?,
-        },
-    })
-}
-
-fn keyed_coordinate_value(
-    path: &[PointD],
-    keys: &[PointKey; 4],
-    target: i64,
-    x_axis: bool,
-) -> Option<f64> {
-    let mut value: Option<f64> = None;
-    for (point, point_key) in path.iter().zip(keys) {
-        let (candidate_key, candidate) = if x_axis {
-            (point_key.x, point.x + 0.0)
-        } else {
-            (point_key.y, point.y + 0.0)
-        };
-        if candidate_key != target {
-            continue;
-        }
-        if value.is_some_and(|known| known.to_bits() != candidate.to_bits()) {
-            return None;
-        }
-        value = Some(candidate);
-    }
-    value
 }
 
 fn tiny_coordinates(
@@ -248,24 +474,6 @@ fn tiny_coordinates(
 }
 
 #[inline]
-fn fill_rule_accepts_ring(path: &[PointD], fill_rule: FillRule) -> bool {
-    match fill_rule {
-        FillRule::EvenOdd | FillRule::NonZero => true,
-        FillRule::Positive => signed_area2(path) > 0.0,
-        FillRule::Negative => signed_area2(path) < 0.0,
-    }
-}
-
-#[inline]
-fn apply_operation(subject: bool, clip: bool, clip_type: ClipType) -> bool {
-    match clip_type {
-        ClipType::Intersection => subject && clip,
-        ClipType::Union => subject || clip,
-        ClipType::Difference => subject && !clip,
-        ClipType::Xor => subject != clip,
-    }
-}
-
 fn add_vertical_transitions(
     boundary: &mut SmallBoundary,
     x: GridCoordinate,
@@ -321,18 +529,7 @@ fn push_grid_edge(
     end_x: GridCoordinate,
     end_y: GridCoordinate,
 ) -> Option<()> {
-    boundary.push(DirectedEdge {
-        start: PointD::new(start_x.value, start_y.value),
-        end: PointD::new(end_x.value, end_y.value),
-        start_key: PointKey {
-            x: start_x.key,
-            y: start_y.key,
-        },
-        end_key: PointKey {
-            x: end_x.key,
-            y: end_y.key,
-        },
-    })
+    boundary.push(DirectedEdge::from_grid(start_x, start_y, end_x, end_y))
 }
 
 fn stitch_small(edges: &[DirectedEdge]) -> Option<PathsD> {
@@ -376,7 +573,7 @@ fn stitch_small(edges: &[DirectedEdge]) -> Option<PathsD> {
             path.push(edges[current].start);
             current = next[current];
         }
-        if path.len() < 3 || signed_area2(&path).abs() <= f64::EPSILON {
+        if path.len() < 3 || signed_area2_d(&path).abs() <= f64::EPSILON {
             return None;
         }
         path = crate::trim_collinear_d(&path, crate::PathKind::Closed).ok()?;
@@ -386,52 +583,6 @@ fn stitch_small(edges: &[DirectedEdge]) -> Option<PathsD> {
     paths.sort_by(compare_paths);
     Some(paths)
 }
-
-fn signed_area2(path: &[PointD]) -> f64 {
-    path.iter()
-        .zip(path.iter().cycle().skip(1))
-        .take(path.len())
-        .map(|(start, end)| start.x * end.y - start.y * end.x)
-        .sum()
-}
-
-fn canonicalize(path: &mut [PointD]) {
-    if let Some((minimum, _)) = path.iter().enumerate().min_by(|(_, left), (_, right)| {
-        left.x
-            .total_cmp(&right.x)
-            .then(left.y.total_cmp(&right.y))
-    }) {
-        path.rotate_left(minimum);
-    }
-}
-
-fn compare_paths(left: &PathD, right: &PathD) -> Ordering {
-    left.iter()
-        .zip(right)
-        .map(|(left, right)| {
-            left.x
-                .total_cmp(&right.x)
-                .then(left.y.total_cmp(&right.y))
-        })
-        .find(|ordering| *ordering != Ordering::Equal)
-        .unwrap_or_else(|| left.len().cmp(&right.len()))
-}
-
-#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-fn key(point: PointD) -> Option<PointKey> {
-    if !point.x.is_finite()
-        || !point.y.is_finite()
-        || point.x.abs() > MAX_COORDINATE
-        || point.y.abs() > MAX_COORDINATE
-    {
-        return None;
-    }
-    Some(PointKey {
-        x: (point.x * KEY_SCALE).round() as i64,
-        y: (point.y * KEY_SCALE).round() as i64,
-    })
-}
-
 
 #[cfg(test)]
 mod tests;

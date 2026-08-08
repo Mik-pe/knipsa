@@ -4,7 +4,7 @@ use core::cmp::Ordering;
 use num_bigint::BigInt;
 
 use crate::{
-    BooleanRequest, BooleanRequestD, ClipType, Error, FillRule, PathKind, boolean_op, boolean_opd,
+    BooleanRequest, BooleanRequestD, ClipType, Error, FillRule, PathKind, boolean_op, boolean_op_d,
 };
 
 /// An integer point used by the exact-coordinate API.
@@ -30,7 +30,7 @@ impl Point64 {
 
 /// A double-precision point used by the floating-point API.
 ///
-/// [`crate::boolean_opd`] accepts finite `f64` coordinates. The arrangement
+/// [`crate::boolean_op_d`] accepts finite `f64` coordinates. The arrangement
 /// kernel keeps the input values exact while it computes intersections, then
 /// converts the result back to `f64`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -66,6 +66,32 @@ pub type PathD = Vec<PointD>;
 
 /// A collection of floating-point paths, usually polygon rings.
 pub type PathsD = Vec<PathD>;
+
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn paths64_to_local_d(paths: &[Path64]) -> Result<(Point64, PathsD), Error> {
+    let origin = paths.iter().find_map(|path| path.first()).copied().unwrap_or(Point64::new(0, 0));
+    let mut local = Vec::with_capacity(paths.len());
+    for path in paths {
+        let mut local_path = Vec::with_capacity(path.len());
+        for point in path {
+            local_path.push(PointD::new(
+                i128_to_exact_f64(i128::from(point.x) - i128::from(origin.x))?,
+                i128_to_exact_f64(i128::from(point.y) - i128::from(origin.y))?,
+            ));
+        }
+        local.push(local_path);
+    }
+    Ok((origin, local))
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn i128_to_exact_f64(value: i128) -> Result<f64, Error> {
+    const MAX_EXACT_INTEGER: u128 = 1 << 53;
+    if value.unsigned_abs() > MAX_EXACT_INTEGER {
+        return Err(Error::ArithmeticOverflow);
+    }
+    Ok(value as f64)
+}
 
 /// The orientation of three points in Cartesian coordinates.
 ///
@@ -205,13 +231,13 @@ pub fn validate_paths64(paths: &[Path64], kind: PathKind) -> Result<(), Error> {
 ///
 /// Empty paths are valid. Closed paths require three points and open paths
 /// require two. Consecutive duplicate points are accepted here and can be
-/// removed with [`normalize_pathd`].
+/// removed with [`normalize_path_d`].
 ///
 /// # Errors
 ///
 /// Returns [`Error::InvalidPath`] for a too-short path or
 /// [`Error::NonFiniteCoordinate`] for NaN/infinite coordinates.
-pub fn validate_pathd(path: &[PointD], kind: PathKind) -> Result<(), Error> {
+pub fn validate_path_d(path: &[PointD], kind: PathKind) -> Result<(), Error> {
     let minimum_vertices = match kind {
         PathKind::Closed => 3,
         PathKind::Open => 2,
@@ -229,7 +255,7 @@ pub fn validate_pathd(path: &[PointD], kind: PathKind) -> Result<(), Error> {
 
 /// Validates every floating-point path in a collection.
 ///
-/// This is the collection counterpart to [`validate_pathd`]. Empty paths are
+/// This is the collection counterpart to [`validate_path_d`]. Empty paths are
 /// valid and every coordinate in a non-empty path must be finite.
 ///
 /// # Errors
@@ -237,7 +263,7 @@ pub fn validate_pathd(path: &[PointD], kind: PathKind) -> Result<(), Error> {
 /// Returns the first path-shape or coordinate-finiteness error found.
 pub fn validate_paths_d(paths: &[PathD], kind: PathKind) -> Result<(), Error> {
     for path in paths {
-        validate_pathd(path, kind)?;
+        validate_path_d(path, kind)?;
     }
     Ok(())
 }
@@ -267,7 +293,7 @@ pub fn normalize_path64(path: &[Point64], kind: PathKind) -> Path64 {
 /// This is a shape normalization helper, not a validity check: a normalized
 /// path can still be too short or collinear for a particular operation.
 #[must_use]
-pub fn normalize_pathd(path: &[PointD], kind: PathKind) -> PathD {
+pub fn normalize_path_d(path: &[PointD], kind: PathKind) -> PathD {
     let mut normalized = Vec::with_capacity(path.len());
     for &point in path {
         if normalized.last().copied() != Some(point) {
@@ -308,6 +334,14 @@ pub fn signed_area2(path: &[Point64]) -> Result<i128, Error> {
         area = area.checked_add(term).ok_or(Error::ArithmeticOverflow)?;
     }
     Ok(area)
+}
+
+pub(crate) fn signed_area2_d(path: &[PointD]) -> f64 {
+    path.iter()
+        .zip(path.iter().cycle().skip(1))
+        .take(path.len())
+        .map(|(start, end)| start.x * end.y - start.y * end.x)
+        .sum()
 }
 
 /// Returns the orientation of three integer points.
@@ -469,8 +503,8 @@ pub fn trim_collinear64(path: &[Point64], kind: PathKind) -> Result<Path64, Erro
 /// Returns [`Error::InvalidPath`] or [`Error::NonFiniteCoordinate`] when the
 /// input violates the selected path contract.
 pub fn trim_collinear_d(path: &[PointD], kind: PathKind) -> Result<PathD, Error> {
-    validate_pathd(path, kind)?;
-    let mut points = normalize_pathd(path, kind);
+    validate_path_d(path, kind)?;
+    let mut points = normalize_path_d(path, kind);
     loop {
         if points.len() < 3 {
             return Ok(points);
@@ -522,9 +556,9 @@ pub fn simplify_paths64(paths: &[Path64], fill_rule: FillRule) -> Result<Paths64
 /// # Errors
 ///
 /// Returns the same validation, non-finite-coordinate, and topology errors as
-/// [`crate::boolean_opd`].
+/// [`crate::boolean_op_d`].
 pub fn simplify_paths_d(paths: &[PathD], fill_rule: FillRule) -> Result<PathsD, Error> {
-    boolean_opd(BooleanRequestD::new(paths, &[], ClipType::Union, fill_rule))
+    boolean_op_d(BooleanRequestD::new(paths, &[], ClipType::Union, fill_rule))
 }
 
 /// Clips integer paths to an axis-aligned rectangle.
@@ -566,7 +600,7 @@ pub fn clip_to_rect_d(
         return Err(Error::NonFiniteCoordinate { point_index: 0 });
     }
     let clip = rectangle.path();
-    boolean_opd(BooleanRequestD::new(
+    boolean_op_d(BooleanRequestD::new(
         paths,
         std::slice::from_ref(&clip),
         ClipType::Intersection,
@@ -661,27 +695,45 @@ mod tests {
     }
 
     #[test]
+    fn converts_integer_paths_in_one_exact_local_coordinate_frame() {
+        let origin = i64::MAX - 100;
+        let paths = [vec![
+            Point64::new(origin, origin),
+            Point64::new(origin + 10, origin),
+            Point64::new(origin + 10, origin + 20),
+        ]];
+        let (actual_origin, local) = paths64_to_local_d(&paths).unwrap();
+        assert_eq!(actual_origin, Point64::new(origin, origin));
+        assert_eq!(local[0][2], PointD::new(10.0, 20.0));
+
+        let excessive_span =
+            [vec![Point64::new(i64::MIN, 0), Point64::new(i64::MAX, 0), Point64::new(0, 1)]];
+        assert_eq!(paths64_to_local_d(&excessive_span), Err(Error::ArithmeticOverflow));
+    }
+
+    #[test]
     fn validates_double_finiteness() {
-        assert!(validate_pathd(&[], PathKind::Closed).is_ok());
-        assert!(validate_pathd(&[PointD::new(0.0, 0.0)], PathKind::Closed).is_err());
+        assert!(validate_path_d(&[], PathKind::Closed).is_ok());
+        assert!(validate_path_d(&[PointD::new(0.0, 0.0)], PathKind::Closed).is_err());
         assert!(
-            validate_pathd(&[PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)], PathKind::Open).is_ok()
+            validate_path_d(&[PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)], PathKind::Open)
+                .is_ok()
         );
-        let error = validate_pathd(
+        let error = validate_path_d(
             &[PointD::new(0.0, 0.0), PointD::new(f64::NAN, 0.0), PointD::new(1.0, 1.0)],
             PathKind::Closed,
         )
         .expect_err("NaN must be rejected");
         assert_eq!(error, Error::NonFiniteCoordinate { point_index: 1 });
         assert!(
-            validate_pathd(
+            validate_path_d(
                 &[PointD::new(0.0, 0.0), PointD::new(1.0, 0.0), PointD::new(f64::INFINITY, 1.0),],
                 PathKind::Closed,
             )
             .is_err()
         );
         assert!(
-            validate_pathd(
+            validate_path_d(
                 &[PointD::new(0.0, 0.0), PointD::new(1.0, 0.0), PointD::new(0.0, f64::INFINITY)],
                 PathKind::Closed,
             )
@@ -698,23 +750,23 @@ mod tests {
         assert!(normalize_path64(&[], PathKind::Closed).is_empty());
 
         let doubles = [PointD::new(0.0, 0.0), PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)];
-        assert_eq!(normalize_pathd(&doubles, PathKind::Open).len(), 2);
+        assert_eq!(normalize_path_d(&doubles, PathKind::Open).len(), 2);
         let closed_doubles = [
             PointD::new(0.0, 0.0),
             PointD::new(1.0, 0.0),
             PointD::new(0.0, 1.0),
             PointD::new(0.0, 0.0),
         ];
-        assert_eq!(normalize_pathd(&closed_doubles, PathKind::Closed).len(), 3);
+        assert_eq!(normalize_path_d(&closed_doubles, PathKind::Closed).len(), 3);
         assert_eq!(
-            normalize_pathd(
+            normalize_path_d(
                 &[PointD::new(0.0, 0.0), PointD::new(1.0, 0.0), PointD::new(0.0, 1.0)],
                 PathKind::Closed,
             )
             .len(),
             3
         );
-        assert_eq!(normalize_pathd(&[], PathKind::Closed), Vec::<PointD>::new());
+        assert_eq!(normalize_path_d(&[], PathKind::Closed), Vec::<PointD>::new());
     }
 
     #[test]
@@ -724,6 +776,13 @@ mod tests {
         let mut reverse = square.clone();
         reverse.reverse();
         assert_eq!(signed_area2(&reverse), Ok(-200));
+        let square_d = vec![
+            PointD::new(0.0, 0.0),
+            PointD::new(10.0, 0.0),
+            PointD::new(10.0, 10.0),
+            PointD::new(0.0, 10.0),
+        ];
+        assert!((signed_area2_d(&square_d) - 200.0).abs() < f64::EPSILON);
         assert_eq!(signed_area2(&[A, B]), Ok(0));
         assert_eq!(orientation(A, B, C), Ok(Orientation::CounterClockwise));
         assert_eq!(orientation(C, B, A), Ok(Orientation::Clockwise));
@@ -915,14 +974,5 @@ mod tests {
         ] {
             assert!(clip_to_rect_d(&[], rectangle, FillRule::EvenOdd).is_err());
         }
-    }
-
-    fn signed_area2_d(path: &[PointD]) -> f64 {
-        path.iter()
-            .copied()
-            .zip(path.iter().copied().cycle().skip(1))
-            .take(path.len())
-            .map(|(first, second)| first.x * second.y - first.y * second.x)
-            .sum()
     }
 }

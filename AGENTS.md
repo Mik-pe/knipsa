@@ -11,6 +11,7 @@ Before changing geometry code:
    and `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
 3. Run `./scripts/check-c-api.sh` for ABI changes.
 4. Run `./scripts/coverage.sh` when coverage-sensitive code changes.
+5. Run `./scripts/fuzz-replay.sh` after geometry-kernel or input-validation changes.
 
 Do not claim conformance or a speed win without a reproducible run of the
 reference matrix and benchmark protocol. Keep reference versions pinned in

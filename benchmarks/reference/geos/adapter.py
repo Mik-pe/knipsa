@@ -43,71 +43,6 @@ def operation(name, subjects, clips):
     raise ValueError(f"unknown operation: {name}")
 
 
-def area2(ring):
-    return sum(
-        point[0] * following[1] - point[1] * following[0]
-        for point, following in zip(ring, ring[1:] + ring[:1])
-    )
-
-
-def quantize(value):
-    rounded = round(value, 9)
-    return 0.0 if rounded == 0.0 else rounded
-
-
-def compare_points(left, right):
-    for a, b in zip(left, right):
-        if a != b:
-            return -1 if a < b else 1
-    return (len(left) > len(right)) - (len(left) < len(right))
-
-
-def canonical_ring(ring):
-    points = [[quantize(point[0]), quantize(point[1])] for point in ring[:-1]]
-    points = remove_collinear(points)
-    candidates = []
-    for candidate in (points, list(reversed(points))):
-        minimum = min(range(len(candidate)), key=lambda index: candidate[index])
-        candidates.append(candidate[minimum:] + candidate[:minimum])
-    return min(candidates, key=lambda candidate: PointKey(candidate))
-
-
-def remove_collinear(points):
-    points = list(points)
-    changed = True
-    while changed and len(points) >= 3:
-        changed = False
-        cleaned = []
-        for index, current in enumerate(points):
-            previous = points[index - 1]
-            following = points[(index + 1) % len(points)]
-            first = [current[0] - previous[0], current[1] - previous[1]]
-            second = [following[0] - current[0], following[1] - current[1]]
-            cross = first[0] * second[1] - first[1] * second[0]
-            dot = first[0] * second[0] + first[1] * second[1]
-            if abs(cross) <= 1e-12 and dot >= -1e-12:
-                changed = True
-            else:
-                cleaned.append(current)
-        points = cleaned
-    return points
-
-
-class PointKey(list):
-    def __lt__(self, other):
-        return compare_points(self, other) < 0
-
-
-def contains(point, ring):
-    inside = False
-    for start, end in zip(ring, ring[1:] + ring[:1]):
-        if (start[1] > point[1]) != (end[1] > point[1]):
-            cross = (end[0] - start[0]) * (point[1] - start[1]) - (end[1] - start[1]) * (point[0] - start[0])
-            if (end[1] > start[1] and cross > 0) or (end[1] < start[1] and cross < 0):
-                inside = not inside
-    return inside
-
-
 def rings(geometry):
     if geometry.geom_type == "Polygon":
         return [list(geometry.exterior.coords)] + [list(interior.coords) for interior in geometry.interiors]
@@ -120,31 +55,42 @@ def rings(geometry):
 
 
 def signature(geometry):
-    raw_rings = rings(geometry)
-    records = []
-    for index, ring in enumerate(raw_rings):
-        normalized = canonical_ring(ring)
-        point = normalized[0]
-        depth = sum(
-            other_index != index and contains(point, other[:-1])
-            for other_index, other in enumerate(raw_rings)
-        )
-        records.append({"depth": depth, "area2": quantize(abs(area2(ring[:-1]))), "points": normalized})
-    return json.dumps(sorted(records, key=lambda value: json.dumps(value, sort_keys=True)), separators=(",", ":"))
+    raw_rings = [
+        [[point[0], point[1]] for point in ring[:-1] if len(ring) > 1]
+        for ring in rings(geometry)
+    ]
+    return json.dumps(raw_rings, separators=(",", ":"))
 
 
 def main(workload_path):
     workload = json.loads(Path(workload_path).read_text(encoding="utf-8"))
-    print(json.dumps({"implementation": "geos-shapely", "samples": 25, "warmups": 3}))
+    minimum_sample_time_ns = 2_000_000
+    maximum_iterations_per_sample = 1 << 20
+    print(json.dumps({
+        "implementation": "geos-shapely",
+        "samples": 25,
+        "warmups": 3,
+        "minimum_sample_time_ns": minimum_sample_time_ns,
+    }))
     for test_case in workload["cases"]:
         for _ in range(3):
             operation(test_case["clip_type"], test_case["subjects"], test_case["clips"])
-        timings = []
         result = GeometryCollection()
+        iterations_per_sample = 1
+        while True:
+            started = time.perf_counter_ns()
+            for _ in range(iterations_per_sample):
+                result = operation(test_case["clip_type"], test_case["subjects"], test_case["clips"])
+            elapsed = time.perf_counter_ns() - started
+            if elapsed >= minimum_sample_time_ns or iterations_per_sample == maximum_iterations_per_sample:
+                break
+            iterations_per_sample = min(iterations_per_sample * 2, maximum_iterations_per_sample)
+        timings = []
         for _ in range(25):
             started = time.perf_counter_ns()
-            result = operation(test_case["clip_type"], test_case["subjects"], test_case["clips"])
-            timings.append(time.perf_counter_ns() - started)
+            for _ in range(iterations_per_sample):
+                result = operation(test_case["clip_type"], test_case["subjects"], test_case["clips"])
+            timings.append((time.perf_counter_ns() - started) // iterations_per_sample)
         timings.sort()
         print(json.dumps({
             "id": test_case["id"],
@@ -152,6 +98,7 @@ def main(workload_path):
             "error": None,
             "median_ns": timings[len(timings) // 2],
             "p95_ns": timings[math.ceil(len(timings) * 0.95) - 1],
+            "iterations_per_sample": iterations_per_sample,
             "ring_count": len(rings(result)),
             "signature": signature(result),
         }, separators=(",", ":")))

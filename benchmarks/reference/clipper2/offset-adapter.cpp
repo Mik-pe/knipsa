@@ -14,6 +14,8 @@ using namespace Clipper2Lib;
 namespace {
 constexpr std::size_t kWarmups = 3;
 constexpr std::size_t kSamples = 25;
+constexpr long long kMinimumSampleTimeNs = 2'000'000;
+constexpr std::size_t kMaximumIterationsPerSample = 1 << 20;
 
 JoinType join_type(int value) {
   switch (value) {
@@ -74,7 +76,8 @@ PathsD offset_paths(const PathsD& paths, double delta, JoinType join, EndType en
 }
 
 int main() {
-  std::cout << "{\"implementation\":\"clipper2-native-offset\",\"revision\":\"f9c5eb6e14a59f6f5d65fbfb3564519a561cf4fd\",\"samples\":25,\"warmups\":3}\n";
+  std::cout << "{\"implementation\":\"clipper2-native-offset\",\"revision\":\"f9c5eb6e14a59f6f5d65fbfb3564519a561cf4fd\",\"samples\":25,\"warmups\":3,\"minimum_sample_time_ns\":"
+            << kMinimumSampleTimeNs << "}\n";
   std::string id; double delta, miter_limit, arc_tolerance; int join, end, preserve;
   std::size_t path_count;
   while (std::cin >> id >> delta >> join >> end >> miter_limit >> arc_tolerance >> preserve >> path_count) {
@@ -86,18 +89,35 @@ int main() {
       };
       PathsD result;
       for (std::size_t i = 0; i < kWarmups; ++i) result = run();
+      std::size_t iterations_per_sample = 1;
+      while (true) {
+        const auto start = std::chrono::steady_clock::now();
+        for (std::size_t i = 0; i < iterations_per_sample; ++i) result = run();
+        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        if (elapsed >= kMinimumSampleTimeNs ||
+            iterations_per_sample == kMaximumIterationsPerSample) break;
+        iterations_per_sample = std::min(iterations_per_sample * 2,
+                                         kMaximumIterationsPerSample);
+      }
       std::vector<long long> timings; timings.reserve(kSamples);
       for (std::size_t i = 0; i < kSamples; ++i) {
-        const auto start = std::chrono::steady_clock::now(); result = run();
-        timings.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+        const auto start = std::chrono::steady_clock::now();
+        for (std::size_t iteration = 0; iteration < iterations_per_sample; ++iteration) {
+          result = run();
+        }
+        timings.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now() - start).count() /
+                          static_cast<long long>(iterations_per_sample));
       }
       std::sort(timings.begin(), timings.end());
       std::cout << "{\"id\":\"" << id << "\",\"status\":\"ok\",\"error\":null,\"median_ns\":"
                 << timings[kSamples / 2] << ",\"p95_ns\":" << timings[(kSamples * 95 + 99) / 100 - 1]
+                << ",\"iterations_per_sample\":" << iterations_per_sample
                 << ",\"ring_count\":" << result.size() << ",\"signature\":\"" << signature(result) << "\"}\n";
     } catch (const std::exception& error) {
       std::cout << "{\"id\":\"" << id << "\",\"status\":\"error\",\"error\":\"" << error.what()
-                << "\",\"median_ns\":0,\"p95_ns\":0,\"ring_count\":0,\"signature\":\"[]\"}\n";
+                << "\",\"median_ns\":0,\"p95_ns\":0,\"iterations_per_sample\":0,\"ring_count\":0,\"signature\":\"[]\"}\n";
     }
   }
 }

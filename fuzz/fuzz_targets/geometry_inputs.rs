@@ -1,7 +1,7 @@
 #![no_main]
 
+use knipsa::{PathKind, Point64, normalize_path64, orientation, point_in_polygon, signed_area2};
 use libfuzzer_sys::fuzz_target;
-use knipsa::{normalize_path64, orientation, point_in_polygon, signed_area2, PathKind, Point64};
 
 fuzz_target!(|data: &[u8]| {
     let points: Vec<Point64> = data

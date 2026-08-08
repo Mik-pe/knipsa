@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""Validate triangulations against their input region and compare timings."""
+
+import json
+import math
+import sys
+from collections import Counter
+
+
+def load_results(path):
+    records = {}
+    metadata = None
+    with open(path, encoding="utf-8") as stream:
+        for line in stream:
+            if line.lstrip().startswith("{"):
+                value = json.loads(line)
+                if "id" in value:
+                    if value["id"] in records:
+                        raise ValueError(f"{path}: duplicate case {value['id']}")
+                    records[value["id"]] = value
+                elif "implementation" in value:
+                    if metadata is not None:
+                        raise ValueError(f"{path}: duplicate metadata header")
+                    metadata = value
+    expected_metadata = {"samples": 25, "warmups": 3, "minimum_sample_time_ns": 2_000_000}
+    if metadata is None or any(metadata.get(key) != value for key, value in expected_metadata.items()):
+        raise ValueError(f"{path}: missing or incompatible metadata header")
+    return records
+
+
+def area2(ring):
+    return sum(cross(start, end) for start, end in edges(ring))
+
+
+def cross(left, right):
+    return left[0] * right[1] - left[1] * right[0]
+
+
+def edges(ring):
+    return zip(ring, ring[1:] + ring[:1])
+
+
+def undirected_edge(start, end):
+    return (tuple(start), tuple(end)) if tuple(start) < tuple(end) else (tuple(end), tuple(start))
+
+
+def triangle_boundaries(triangles):
+    counts = Counter(undirected_edge(start, end) for triangle in triangles for start, end in edges(triangle))
+    if any(count not in (1, 2) for count in counts.values()):
+        return None
+    return [edge for edge, count in counts.items() if count == 1]
+
+
+def point_segment_distance(point, segment):
+    start, end = segment
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    length2 = dx * dx + dy * dy
+    if not length2:
+        return math.hypot(point[0] - start[0], point[1] - start[1])
+    amount = max(0.0, min(1.0, ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / length2))
+    return math.hypot(point[0] - start[0] - amount * dx, point[1] - start[1] - amount * dy)
+
+
+def segment_samples(segment):
+    start, end = segment
+    return (start, end, ((start[0] + end[0]) * 0.5, (start[1] + end[1]) * 0.5))
+
+
+def boundary_distance(left, right):
+    return max((min(point_segment_distance(point, segment) for segment in right)
+                for segment in left for point in segment_samples(segment)), default=0.0)
+
+
+def boundary_length(segments):
+    return sum(math.hypot(end[0] - start[0], end[1] - start[1]) for start, end in segments)
+
+
+def projection(triangle, axis):
+    values = [point[0] * axis[0] + point[1] * axis[1] for point in triangle]
+    return min(values), max(values)
+
+
+def interiors_overlap(left, right):
+    for triangle in (left, right):
+        for start, end in edges(triangle):
+            axis = (start[1] - end[1], end[0] - start[0])
+            left_min, left_max = projection(left, axis)
+            right_min, right_max = projection(right, axis)
+            if min(left_max, right_max) <= max(left_min, right_min):
+                return False
+    return True
+
+
+def validate(case, record):
+    if not record or record.get("status") != "ok":
+        return False, "missing or errored result"
+    if not isinstance(record.get("iterations_per_sample"), int) or record["iterations_per_sample"] < 1:
+        return False, "uncalibrated result"
+    try:
+        triangles = json.loads(record["signature"])
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return False, "invalid signature"
+    if record.get("triangle_count") != len(triangles) or not triangles:
+        return False, "invalid triangle count"
+    if any(len(triangle) != 3 or any(len(point) != 2 for point in triangle) for triangle in triangles):
+        return False, "non-triangle output"
+    if any(not isinstance(coordinate, int) or isinstance(coordinate, bool)
+           for triangle in triangles for point in triangle for coordinate in point):
+        return False, "non-integer triangulate64 output"
+    triangle_areas = [abs(area2(triangle)) for triangle in triangles]
+    if any(area == 0 for area in triangle_areas):
+        return False, "degenerate triangle"
+    expected_area2 = abs(sum(area2(path) for path in case["paths"]))
+    if sum(triangle_areas) != expected_area2:
+        return False, f"area2={sum(triangle_areas)} expected={expected_area2}"
+    for index, left in enumerate(triangles):
+        if any(interiors_overlap(left, right) for right in triangles[index + 1:]):
+            return False, "triangle interiors overlap"
+    actual_boundary = triangle_boundaries(triangles)
+    if actual_boundary is None:
+        return False, "non-manifold triangle edge multiplicity"
+    expected_boundary = [(tuple(start), tuple(end)) for path in case["paths"] for start, end in edges(path)]
+    distance = max(boundary_distance(actual_boundary, expected_boundary),
+                   boundary_distance(expected_boundary, actual_boundary))
+    perimeter_error = abs(boundary_length(actual_boundary) - boundary_length(expected_boundary))
+    perimeter_tolerance = max(1e-9, boundary_length(expected_boundary) * 1e-12)
+    if distance != 0.0 or perimeter_error > perimeter_tolerance:
+        return False, f"boundary_distance={distance:.6g} perimeter_error={perimeter_error:.6g}"
+    return True, f"triangles={len(triangles)} area2={expected_area2}"
+
+
+def compare(workload_path, knipsa_path, reference_path):
+    with open(workload_path, encoding="utf-8") as stream:
+        workload = json.load(stream)
+    if workload.get("schema") != "knipsa-triangulation-workload-v1":
+        raise ValueError("unsupported triangulation workload schema")
+    knipsa = load_results(knipsa_path)
+    reference = load_results(reference_path)
+    expected_ids = {case["id"] for case in workload["cases"]}
+    if set(knipsa) != expected_ids or set(reference) != expected_ids:
+        raise ValueError("result case IDs do not exactly match the triangulation workload")
+    matches = 0
+    for case in workload["cases"]:
+        case_id = case["id"]
+        left, right = knipsa.get(case_id), reference.get(case_id)
+        left_ok, left_detail = validate(case, left)
+        right_ok, right_detail = validate(case, right)
+        same = left_ok and right_ok
+        if same:
+            matches += 1
+        speedup = "-"
+        if left_ok and right_ok and left.get("median_ns"):
+            speedup = f"{right['median_ns'] / left['median_ns']:.2f}x"
+        detail = left_detail if not left_ok else right_detail if not right_ok else left_detail
+        print(f"{case_id:28} {'MATCH' if same else 'MISMATCH':9} {detail} reference/knipsa={speedup}")
+    print(f"matched={matches}/{len(workload['cases'])}")
+    return matches == len(workload["cases"])
+
+
+def main(argv):
+    if len(argv) != 4:
+        raise SystemExit("usage: compare-triangulation-results.py <workload.json> <knipsa.jsonl> <reference.jsonl>")
+    if not compare(argv[1], argv[2], argv[3]):
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

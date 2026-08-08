@@ -9,14 +9,21 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::hash::{BuildHasherDefault, Hasher};
 
-use crate::{BooleanRequestD, ClipType, Error, FillRule, PathD, PathsD, PointD, normalize_pathd};
+use crate::{
+    BooleanRequestD, ClipType, Error, FillRule, PathD, PathsD, PointD,
+    dispatch::{
+        DirectedEdge, GridCoordinate, KEY_SCALE, MAX_COORDINATE, PointKey, apply_operation,
+        canonicalize, compare_paths, dedup_grid_coordinates, fill_rule_accepts_ring, key,
+        orthogonal_grid_size,
+    },
+    geometry::signed_area2_d as area2,
+    normalize_path_d,
+};
 
-const KEY_SCALE: f64 = 1_000_000_000.0;
-const MAX_COORDINATE: f64 = 1_000_000.0;
 const PREDICATE_TOLERANCE: f64 = 1.0e-12;
 const SAMPLE_SCALE: f64 = 1.0e-9;
 const MAX_CONTAINMENT_BUCKETS: usize = 64;
-const MAX_ORTHOGONAL_GRID_POINTS: usize = 1_000_000;
+const MIN_LINEAR_CONVEX_VERTICES: usize = 16;
 
 #[derive(Default)]
 struct FastHasher(u64);
@@ -47,12 +54,6 @@ impl Hasher for FastHasher {
 // arrangement path while keeping the public API independent of the choice.
 type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
 type FastSet<T> = HashSet<T, BuildHasherDefault<FastHasher>>;
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct PointKey {
-    x: i64,
-    y: i64,
-}
 
 type Point = PointD;
 
@@ -94,14 +95,6 @@ struct Edge {
     max_y: f64,
     min_x_key: u64,
     max_x_key: u64,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct DirectedEdge {
-    start: Point,
-    end: Point,
-    start_key: PointKey,
-    end_key: PointKey,
 }
 
 enum Outgoing {
@@ -235,25 +228,66 @@ impl ConvexIndex<'_> {
     }
 }
 
-pub(crate) fn try_boolean_opd(request: BooleanRequestD<'_>) -> Option<Result<PathsD, ()>> {
+pub(crate) fn try_apply(request: BooleanRequestD<'_>) -> Option<PathsD> {
     if let Some(result) = try_orthogonal_arrangement(request) {
-        return Some(result.map_err(|_| ()));
+        return result.ok();
+    }
+    if let Some(result) = try_large_strict_convex_boolean(request) {
+        return Some(result);
     }
     if !fast_pair_is_provably_safe(&request) {
         return None;
     }
     if let Some(result) = try_single_convex_boolean(request) {
-        return Some(result.map_err(|_| ()));
+        return result.ok();
     }
     let subjects = fast_paths(request.subjects)?;
     let clips = fast_paths(request.clips)?;
-    Some(run(&subjects, &clips, request.clip_type, request.fill_rule).map_err(|_| ()))
+    run(&subjects, &clips, request.clip_type, request.fill_rule).ok()
 }
 
-#[derive(Clone, Copy)]
-struct GridCoordinate {
-    key: i64,
-    value: f64,
+/// Routes large, positive, strictly convex pairs directly through the existing
+/// linear boundary walk. Degenerate walks defer to the conservative gate.
+fn try_large_strict_convex_boolean(request: BooleanRequestD<'_>) -> Option<PathsD> {
+    if request.subjects.len() != 1
+        || request.clips.len() != 1
+        || !matches!(request.fill_rule, FillRule::EvenOdd | FillRule::NonZero | FillRule::Positive)
+    {
+        return None;
+    }
+    let subject = request.subjects[0].as_slice();
+    let clip = request.clips[0].as_slice();
+    if subject.len() < MIN_LINEAR_CONVEX_VERTICES
+        || clip.len() < MIN_LINEAR_CONVEX_VERTICES
+        || !eligible(request.subjects, request.clips)
+        || !keyable_path(subject)
+        || !keyable_path(clip)
+        || area2(subject) <= 0.0
+        || area2(clip) <= 0.0
+        || !strict_convex(subject)
+        || !strict_convex(clip)
+    {
+        return None;
+    }
+
+    if request.clip_type == ClipType::Intersection {
+        let walk = convex_boundary_walk(subject, clip, true, false);
+        return (!walk.degenerate).then_some(walk.output);
+    }
+
+    let walk = convex_boundary_walk(subject, clip, false, true);
+    if walk.degenerate {
+        return None;
+    }
+    convex_boolean_from_splits(
+        subject,
+        clip,
+        request.clip_type,
+        walk.subject_splits,
+        walk.clip_splits,
+        &walk.subject_inside,
+        &walk.clip_inside,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -333,10 +367,6 @@ fn try_orthogonal_arrangement(request: BooleanRequestD<'_>) -> Option<Result<Pat
     Some(finish_orthogonal_boundary(&boundary))
 }
 
-fn orthogonal_grid_size(width: usize, height: usize) -> Option<usize> {
-    width.checked_mul(height).filter(|grid_size| *grid_size <= MAX_ORTHOGONAL_GRID_POINTS)
-}
-
 fn finish_orthogonal_boundary(boundary: &[DirectedEdge]) -> Result<PathsD, Error> {
     stitch(boundary)?
         .into_iter()
@@ -356,24 +386,7 @@ fn grid_coordinates(
         xs.push(GridCoordinate { key: point_key.x, value: point.x + 0.0 });
         ys.push(GridCoordinate { key: point_key.y, value: point.y + 0.0 });
     }
-    Some((dedup_coordinates(xs)?, dedup_coordinates(ys)?))
-}
-
-fn dedup_coordinates(mut coordinates: Vec<GridCoordinate>) -> Option<Vec<GridCoordinate>> {
-    coordinates.sort_unstable_by_key(|coordinate| coordinate.key);
-    let mut result: Vec<GridCoordinate> = Vec::with_capacity(coordinates.len());
-    for coordinate in coordinates {
-        if let Some(previous) = result.last() {
-            if previous.key == coordinate.key {
-                if previous.value.to_bits() != coordinate.value.to_bits() {
-                    return None;
-                }
-                continue;
-            }
-        }
-        result.push(coordinate);
-    }
-    (result.len() >= 2).then_some(result)
+    Some((dedup_grid_coordinates(xs)?, dedup_grid_coordinates(ys)?))
 }
 
 fn orthogonal_path(path: &[Point]) -> bool {
@@ -622,7 +635,7 @@ fn fast_paths(paths: &[PathD]) -> Option<Vec<FastPath<'_>>> {
             let points = if path.windows(2).any(|window| window[0] == window[1])
                 || (path.len() > 1 && path.first() == path.last())
             {
-                FastPath::Owned(normalize_pathd(path, crate::PathKind::Closed))
+                FastPath::Owned(normalize_path_d(path, crate::PathKind::Closed))
             } else {
                 FastPath::Borrowed(path)
             };
@@ -954,14 +967,6 @@ fn short_circuit_with_properties<P: PathSlice>(
     None
 }
 
-fn fill_rule_accepts_ring(path: &[Point], fill_rule: FillRule) -> bool {
-    match fill_rule {
-        FillRule::EvenOdd | FillRule::NonZero => true,
-        FillRule::Positive => area2(path) > 0.0,
-        FillRule::Negative => area2(path) < 0.0,
-    }
-}
-
 fn convex_boolean(
     subject: &[Point],
     clip: &[Point],
@@ -981,11 +986,12 @@ fn convex_boolean(
     } else {
         None
     };
-    if clip_type == ClipType::Intersection
-        && let Some(walk) = linear_walk.as_ref()
-        && (!walk.degenerate || valid_convex_intersection(&walk.output, subject, clip))
-    {
-        return Some(walk.output.clone());
+    if clip_type == ClipType::Intersection {
+        if let Some(walk) = linear_walk.as_ref() {
+            if !walk.degenerate || valid_convex_intersection(&walk.output, subject, clip) {
+                return Some(walk.output.clone());
+            }
+        }
     }
     // The linear split hints are not yet safe for every convex topology
     // (notably axis-aligned overlap and shared-edge cases). Keep the full
@@ -1097,8 +1103,12 @@ fn convex_intersection(subject: &[Point], clip: &[Point]) -> PathsD {
         dedup_consecutive(&mut output);
     }
     dedup_consecutive(&mut output);
-    if output.len() < 3 || area2(&output).abs() <= f64::EPSILON {
+    let output_area2 = area2(&output);
+    if output.len() < 3 || output_area2.abs() <= f64::EPSILON {
         return Vec::new();
+    }
+    if output_area2 < 0.0 {
+        output.reverse();
     }
     canonicalize(&mut output);
     vec![output]
@@ -1281,11 +1291,14 @@ fn strict_convex(path: &[Point]) -> bool {
         return false;
     }
     let mut direction = None;
+    let mut direction_wraps = 0;
     for index in 0..path.len() {
         let previous = path[(index + path.len() - 1) % path.len()];
         let current = path[index];
         let next = path[(index + 1) % path.len()];
-        let turn = cross(subtract(current, previous), subtract(next, current));
+        let incoming = subtract(current, previous);
+        let outgoing = subtract(next, current);
+        let turn = cross(incoming, outgoing);
         if turn.abs() <= f64::EPSILON {
             return false;
         }
@@ -1293,9 +1306,22 @@ fn strict_convex(path: &[Point]) -> bool {
         if direction.is_some_and(|known| known != positive) {
             return false;
         }
+        let incoming_half = polar_half(incoming);
+        let outgoing_half = polar_half(outgoing);
+        direction_wraps += usize::from(if positive {
+            incoming_half && !outgoing_half
+        } else {
+            !incoming_half && outgoing_half
+        });
         direction = Some(positive);
     }
-    true
+    // Equal-sign local turns also describe multi-winding star polygons. A
+    // convex boundary's edge directions make exactly one full revolution.
+    direction_wraps == 1
+}
+
+fn polar_half(vector: Point) -> bool {
+    vector.y < 0.0 || (vector.y == 0.0 && vector.x < 0.0)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1685,17 +1711,6 @@ fn append_path_edges(edges: &mut Vec<Edge>, path: &[Point], path_id: usize, subj
     });
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-fn key(point: Point) -> Option<PointKey> {
-    let x = (point.x * KEY_SCALE).round();
-    let y = (point.y * KEY_SCALE).round();
-    if !x.is_finite() || !y.is_finite() || x.abs() > i64::MAX as f64 || y.abs() > i64::MAX as f64 {
-        None
-    } else {
-        Some(PointKey { x: x as i64, y: y as i64 })
-    }
-}
-
 #[allow(clippy::cast_possible_truncation)]
 fn split_point_key(point: Point) -> PointKey {
     // Split parameters are clamped to [0, 1], so these points stay inside the
@@ -1814,16 +1829,6 @@ fn on_segment(point: Point, start: Point, end: Point) -> bool {
         && point.x <= start.x.max(end.x) + f64::EPSILON
         && point.y >= start.y.min(end.y) - f64::EPSILON
         && point.y <= start.y.max(end.y) + f64::EPSILON
-}
-
-#[inline]
-fn apply_operation(subject: bool, clip: bool, clip_type: ClipType) -> bool {
-    match clip_type {
-        ClipType::Intersection => subject && clip,
-        ClipType::Union => subject || clip,
-        ClipType::Difference => subject && !clip,
-        ClipType::Xor => subject != clip,
-    }
 }
 
 #[inline]
@@ -2270,32 +2275,6 @@ fn compare_angle(first: Point, second: Point) -> Ordering {
     first_length.total_cmp(&second_length)
 }
 
-fn area2(path: &[Point]) -> f64 {
-    path.iter()
-        .zip(path.iter().cycle().skip(1))
-        .take(path.len())
-        .map(|(start, end)| start.x * end.y - start.y * end.x)
-        .sum()
-}
-
-fn canonicalize(path: &mut [Point]) {
-    if let Some((minimum, _)) = path
-        .iter()
-        .enumerate()
-        .min_by(|(_, left), (_, right)| left.x.total_cmp(&right.x).then(left.y.total_cmp(&right.y)))
-    {
-        path.rotate_left(minimum);
-    }
-}
-
-fn compare_paths(left: &PathD, right: &PathD) -> Ordering {
-    left.iter()
-        .zip(right)
-        .map(|(left, right)| left.x.total_cmp(&right.x).then(left.y.total_cmp(&right.y)))
-        .find(|ordering| *ordering != Ordering::Equal)
-        .unwrap_or_else(|| left.len().cmp(&right.len()))
-}
-
 fn maximum_coordinate<P: PathSlice>(subjects: &[P], clips: &[P]) -> f64 {
     subjects
         .iter()
@@ -2334,16 +2313,152 @@ mod tests {
             clip_type: ClipType::Intersection,
             fill_rule: FillRule::EvenOdd,
         };
-        let result = try_boolean_opd(request).expect("high-vertex input is eligible");
-        assert!(result.is_ok(), "fast path failed: {result:?}");
-        let xor_result = try_boolean_opd(BooleanRequestD {
+        let result = try_apply(request).expect("high-vertex input is eligible");
+        assert!(!result.is_empty());
+        let xor_result = try_apply(BooleanRequestD {
             subjects: &subjects,
             clips: &clips,
             clip_type: ClipType::Xor,
             fill_rule: FillRule::EvenOdd,
         })
         .expect("high-vertex xor input is eligible");
-        assert!(xor_result.is_ok(), "fast xor path failed: {xor_result:?}");
+        assert!(!xor_result.is_empty());
+    }
+
+    #[test]
+    fn convex_results_are_stable_when_operands_are_swapped() {
+        let input = b"0A0A!K0A0\"K0K0'A0K0$F0F0%P0F0&\n";
+        let points = input[1..]
+            .chunks_exact(5)
+            .map(|bytes| {
+                let x = f64::from(i16::from_le_bytes([bytes[0], bytes[1]])) / 16.0;
+                let y = f64::from(i16::from_le_bytes([bytes[2], bytes[3]])) / 16.0;
+                let jitter = f64::from(i8::from_le_bytes([bytes[4]])) * 1.0e-10;
+                PointD::new(x + jitter, y - jitter)
+            })
+            .collect::<Vec<_>>();
+        let subjects = [points[..3].to_vec()];
+        let clips = [points[3..].to_vec()];
+
+        for clip_type in [ClipType::Intersection, ClipType::Union, ClipType::Xor] {
+            let forward = crate::boolean::boolean_op_d(BooleanRequestD {
+                subjects: &subjects,
+                clips: &clips,
+                clip_type,
+                fill_rule: FillRule::EvenOdd,
+            });
+            let reverse = crate::boolean::boolean_op_d(BooleanRequestD {
+                subjects: &clips,
+                clips: &subjects,
+                clip_type,
+                fill_rule: FillRule::EvenOdd,
+            });
+            let forward = forward.expect("forward operation closes");
+            let reverse = reverse.expect("reverse operation closes");
+            assert_eq!(forward.len(), reverse.len(), "{clip_type:?} ring count");
+            for (forward_path, reverse_path) in forward.iter().zip(&reverse) {
+                assert_eq!(forward_path.len(), reverse_path.len(), "{clip_type:?} vertex count");
+                assert_eq!(
+                    area2(forward_path) > 0.0,
+                    area2(reverse_path) > 0.0,
+                    "{clip_type:?} ring orientation"
+                );
+                if clip_type == ClipType::Intersection {
+                    assert!(area2(forward_path) > 0.0, "intersection outer ring is positive");
+                }
+                for (forward_point, reverse_point) in forward_path.iter().zip(reverse_path) {
+                    assert!((forward_point.x - reverse_point.x).abs() <= 1.0e-8);
+                    assert!((forward_point.y - reverse_point.y).abs() <= 1.0e-8);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn large_strict_convex_dispatch_matches_exact_oracle() {
+        let subject = circle(0.0, 40.0, MIN_LINEAR_CONVEX_VERTICES);
+        let clip = circle(12.0, 40.0, MIN_LINEAR_CONVEX_VERTICES);
+        let subjects = [subject];
+        let clips = [clip];
+        let summary = |paths: &PathsD| {
+            let mut values = paths
+                .iter()
+                .map(|path| (path.len(), (area2(path).abs() * 1_000_000.0).round().to_bits()))
+                .collect::<Vec<_>>();
+            values.sort_unstable();
+            values
+        };
+
+        for fill_rule in [FillRule::EvenOdd, FillRule::NonZero, FillRule::Positive] {
+            for clip_type in
+                [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor]
+            {
+                let request =
+                    BooleanRequestD { subjects: &subjects, clips: &clips, clip_type, fill_rule };
+                let fast = try_large_strict_convex_boolean(request)
+                    .expect("large positive convex pair uses linear dispatch");
+                let exact =
+                    crate::boolean::boolean_op_d_exact(request).expect("exact oracle should close");
+                assert_eq!(summary(&fast), summary(&exact), "{fill_rule:?} {clip_type:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn large_strict_convex_dispatch_rejects_unsafe_inputs() {
+        fn rejected(subjects: &[PathD], clips: &[PathD], fill_rule: FillRule) -> bool {
+            try_large_strict_convex_boolean(BooleanRequestD {
+                subjects,
+                clips,
+                clip_type: ClipType::Union,
+                fill_rule,
+            })
+            .is_none()
+        }
+
+        let subjects = [circle(0.0, 40.0, MIN_LINEAR_CONVEX_VERTICES)];
+        let clips = [circle(12.0, 40.0, MIN_LINEAR_CONVEX_VERTICES)];
+
+        assert!(rejected(&subjects, &clips, FillRule::Negative));
+        assert!(rejected(&subjects, &subjects, FillRule::EvenOdd));
+        assert!(rejected(&subjects, &[], FillRule::EvenOdd));
+
+        let short_clip = [clips[0][..MIN_LINEAR_CONVEX_VERTICES - 1].to_vec()];
+        assert!(rejected(&subjects, &short_clip, FillRule::EvenOdd));
+
+        let mut out_of_range = subjects[0].clone();
+        out_of_range[0].x = MAX_COORDINATE + 1.0;
+        assert!(rejected(std::slice::from_ref(&out_of_range), &clips, FillRule::EvenOdd));
+
+        let mut aliased_subject = subjects[0].clone();
+        aliased_subject[1] =
+            PointD::new(aliased_subject[0].x + 0.25e-9, aliased_subject[0].y + 0.25e-9);
+        assert!(rejected(std::slice::from_ref(&aliased_subject), &clips, FillRule::EvenOdd));
+
+        let mut aliased_clip = clips[0].clone();
+        aliased_clip[1] = PointD::new(aliased_clip[0].x + 0.25e-9, aliased_clip[0].y + 0.25e-9);
+        assert!(rejected(&subjects, std::slice::from_ref(&aliased_clip), FillRule::EvenOdd));
+
+        let mut clockwise_subject = subjects[0].clone();
+        clockwise_subject.reverse();
+        assert!(rejected(std::slice::from_ref(&clockwise_subject), &clips, FillRule::EvenOdd));
+
+        let mut clockwise_clip = clips[0].clone();
+        clockwise_clip.reverse();
+        assert!(rejected(&subjects, std::slice::from_ref(&clockwise_clip), FillRule::EvenOdd));
+
+        let mut concave_clip = clips[0].clone();
+        concave_clip[1] = PointD::new(12.0, 0.0);
+        assert!(rejected(&subjects, std::slice::from_ref(&concave_clip), FillRule::EvenOdd));
+
+        let star = (0..17)
+            .map(|index| {
+                let angle = std::f64::consts::TAU * f64::from((index * 2) % 17) / 17.0;
+                point(angle.cos() * 40.0, angle.sin() * 40.0)
+            })
+            .collect::<PathD>();
+        assert!(!strict_convex(&star), "multi-winding star must not be treated as convex");
+        assert!(rejected(std::slice::from_ref(&star), &clips, FillRule::EvenOdd));
     }
 
     #[test]
@@ -2392,7 +2507,7 @@ mod tests {
             clip_type: ClipType::Xor,
             fill_rule: FillRule::EvenOdd,
         };
-        let exact = crate::boolean::boolean_opd_exact(request).expect("exact oracle should close");
+        let exact = crate::boolean::boolean_op_d_exact(request).expect("exact oracle should close");
         let summary = |paths: &PathsD| {
             let mut values = paths
                 .iter()
@@ -2402,7 +2517,7 @@ mod tests {
             values
         };
         assert_eq!(summary(&fast), summary(&exact));
-        assert!(try_boolean_opd(request).expect("rounded input is eligible").is_ok());
+        assert!(try_apply(request).is_some());
     }
 
     #[test]
@@ -2436,7 +2551,7 @@ mod tests {
             let fast = try_orthogonal_arrangement(request)
                 .expect("orthogonal set should be recognized")
                 .expect("orthogonal boundary should close");
-            let exact = crate::boolean::boolean_opd_exact(request).expect("exact oracle");
+            let exact = crate::boolean::boolean_op_d_exact(request).expect("exact oracle");
             assert_eq!(summary(&fast), summary(&exact), "fill rule: {fill_rule:?}");
         }
 
@@ -2459,7 +2574,7 @@ mod tests {
         let fast = try_orthogonal_arrangement(request)
             .expect("orthogonal self-crossing path should be recognized")
             .expect("orthogonal self-crossing boundary should close");
-        let exact = crate::boolean::boolean_opd_exact(request).expect("exact oracle");
+        let exact = crate::boolean::boolean_op_d_exact(request).expect("exact oracle");
         let exact = exact
             .iter()
             .map(|path| crate::trim_collinear_d(path, crate::PathKind::Closed))
@@ -2480,8 +2595,8 @@ mod tests {
         let touching_fast = try_orthogonal_arrangement(touching_request)
             .expect("vertex-touch input should be recognized")
             .expect("vertex-touch boundary should close");
-        let touching_exact =
-            crate::boolean::boolean_opd_exact(touching_request).expect("exact vertex-touch oracle");
+        let touching_exact = crate::boolean::boolean_op_d_exact(touching_request)
+            .expect("exact vertex-touch oracle");
         assert_eq!(touching_fast.len(), 2);
         assert_eq!(summary(&touching_fast), summary(&touching_exact));
 
@@ -2553,7 +2668,7 @@ mod tests {
                 let fast = try_orthogonal_arrangement(request)
                     .expect("orthogonal operation matrix should be recognized")
                     .expect("orthogonal operation matrix should close");
-                let exact = crate::boolean::boolean_opd_exact(request)
+                let exact = crate::boolean::boolean_op_d_exact(request)
                     .expect("exact matrix oracle")
                     .iter()
                     .map(|path| crate::trim_collinear_d(path, crate::PathKind::Closed))
@@ -2581,9 +2696,9 @@ mod tests {
             point(2.0, 2.0),
             point(0.0, 2.0),
         ]));
-        assert!(dedup_coordinates(vec![GridCoordinate { key: 0, value: 0.0 }]).is_none());
+        assert!(dedup_grid_coordinates(vec![GridCoordinate { key: 0, value: 0.0 }]).is_none());
         assert!(
-            dedup_coordinates(vec![
+            dedup_grid_coordinates(vec![
                 GridCoordinate { key: 0, value: 0.0 },
                 GridCoordinate { key: 0, value: 0.000_000_000_4 },
             ])
@@ -2652,6 +2767,14 @@ mod tests {
             assert!(run(subjects, clips, ClipType::Union, FillRule::Positive).is_ok());
             let _ = convex_boolean(&subjects[0], &clips[0], ClipType::Union, None);
         }
+        let fallback_subject = vec![point(-1.0, 1.0), point(2.0, 4.0), point(4.0, -1.0)];
+        let request = BooleanRequestD {
+            subjects: std::slice::from_ref(&fallback_subject),
+            clips: std::slice::from_ref(&positive),
+            clip_type: ClipType::Union,
+            fill_rule: FillRule::Positive,
+        };
+        assert!(try_apply(request).is_some());
     }
 
     fn point(x: f64, y: f64) -> Point {
@@ -2702,6 +2825,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unknown_lints)]
     #[allow(clippy::cloned_ref_to_slice_refs, clippy::float_cmp, clippy::too_many_lines)]
     fn exercises_fast_path_predicates_and_shortcuts() {
         let rectangle =
@@ -2814,12 +2938,25 @@ mod tests {
         let mut ill_conditioned_first = SplitParameters::new();
         let mut ill_conditioned_second = SplitParameters::new();
         assert!(!split_pair(
-            &edge(point(0.0, 0.0), point(1_000_000.0, 1_000_000.0)),
-            &edge(point(0.0, 0.0), point(1_000_000.0, 1_000_000.000_000_001)),
+            &edge(point(0.0, 0.0), point(999_999.0, 999_999.0)),
+            &edge(point(0.0, 0.0), point(999_999.0, 999_999.000_000_001)),
             &mut ill_conditioned_first,
             &mut ill_conditioned_second,
             false,
         ));
+        let ill_conditioned_subjects =
+            [vec![point(0.0, 0.0), point(999_999.0, 999_999.0), point(0.0, 999_999.0)]];
+        let ill_conditioned_clips =
+            [vec![point(0.0, 0.0), point(999_999.0, 999_999.000_000_001), point(999_999.0, 0.0)]];
+        assert_eq!(
+            run(
+                &ill_conditioned_subjects,
+                &ill_conditioned_clips,
+                ClipType::Xor,
+                FillRule::EvenOdd,
+            ),
+            Err(Error::TopologyFailure)
+        );
         let mut inline_values = SplitParameters::new();
         inline_values.push(0.5);
         inline_values.sort_dedup();
@@ -3198,14 +3335,13 @@ mod tests {
         let subjects = [collinear_convex.clone()];
         let clips = [rectangle.clone()];
         assert!(
-            try_boolean_opd(BooleanRequestD {
+            try_apply(BooleanRequestD {
                 subjects: &subjects,
                 clips: &clips,
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::EvenOdd,
             })
-            .expect("orthogonal path should use the certified grid kernel")
-            .is_ok()
+            .is_some()
         );
         let non_convex_subjects = [concave.clone()];
         assert!(
@@ -3812,7 +3948,7 @@ mod tests {
         let invalid = vec![point(f64::NAN, 0.0), point(1.0, 0.0), point(0.0, 1.0)];
         let subjects = [invalid.clone(), rectangle.clone()];
         assert!(
-            try_boolean_opd(BooleanRequestD {
+            try_apply(BooleanRequestD {
                 subjects: &subjects,
                 clips: &[],
                 clip_type: ClipType::Union,
@@ -3823,7 +3959,7 @@ mod tests {
         let subjects = [rectangle.clone(), rectangle.clone()];
         let clips = [invalid];
         assert!(
-            try_boolean_opd(BooleanRequestD {
+            try_apply(BooleanRequestD {
                 subjects: &subjects,
                 clips: &clips,
                 clip_type: ClipType::Union,

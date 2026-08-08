@@ -1,6 +1,10 @@
 {
   "schema": "knipsa-workload-v1",
   "coordinate_type": "f64",
+  "comparison": {
+    "coordinate_tolerance": 0.000001,
+    "area2_tolerance": 0.0001
+  },
   "cases": [
     {
       "id": "overlap-intersection",
@@ -71,13 +75,6 @@
       "fill_rule": "even_odd",
       "subjects": [[[0, 0], [10, 0], [10, 10], [0, 10]]],
       "clips": [[[3, -1], [13, 4], [3, 9]]]
-    },
-    {
-      "id": "self-crossing-even-odd",
-      "clip_type": "union",
-      "fill_rule": "even_odd",
-      "subjects": [[[0, 0], [20, 20], [0, 20], [20, 0]]],
-      "clips": []
     },
     {
       "id": "many-horizontal-edges",

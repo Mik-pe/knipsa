@@ -1,10 +1,10 @@
-.PHONY: check test lint docs c-api coverage conformance
+.PHONY: check test lint docs c-api coverage conformance conformance-integer conformance-offset conformance-triangulation fuzz-replay release-check
 
 check: test lint c-api
 
 test:
 	cargo test --workspace --all-features
-	python3 -m unittest scripts/test_compare_benchmark_results.py
+	python3 -m unittest discover -s scripts -p 'test_*.py'
 
 lint:
 	cargo fmt --all -- --check
@@ -21,3 +21,19 @@ coverage:
 
 conformance:
 	./scripts/run-conformance.sh
+
+conformance-integer:
+	./scripts/run-conformance.sh benchmarks/integer-workloads.json \
+		target/conformance-integer clipper2-integer
+
+conformance-offset:
+	./scripts/run-offset-conformance.sh
+
+conformance-triangulation:
+	./scripts/run-triangulation-conformance.sh
+
+fuzz-replay:
+	./scripts/fuzz-replay.sh
+
+release-check:
+	./scripts/check-release.sh

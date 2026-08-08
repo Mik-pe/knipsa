@@ -15,7 +15,7 @@ use std::cell::Cell;
 use knipsa::{
     BooleanRequest, BooleanRequestD, ClipType, EndType, Error, FillRule, JoinType, OffsetOptions,
     Path64, PathD, PathKind, Point64, PointD, PointLocation, Rect64, RectD, boolean_op,
-    boolean_opd, clip_to_rect_d, clip_to_rect64, offset_paths_d, point_in_polygon,
+    boolean_op_d, clip_to_rect_d, clip_to_rect64, offset_paths_d, point_in_polygon,
     simplify_paths_d, simplify_paths64, triangulate_d, triangulate64, validate_paths_d,
     validate_paths64,
 };
@@ -125,7 +125,7 @@ pub struct KnipsaPathD {
 /// Release both the descriptor array and its point arrays with
 /// [`knipsa_free_paths64`]. A zero-path result has `paths == NULL` and
 /// `path_count == 0`. Treat the returned descriptors and points as read-only.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct KnipsaPaths64 {
     /// Pointer to the returned path descriptors.
@@ -134,18 +134,30 @@ pub struct KnipsaPaths64 {
     pub path_count: usize,
 }
 
+impl Default for KnipsaPaths64 {
+    fn default() -> Self {
+        Self { paths: std::ptr::null_mut(), path_count: 0 }
+    }
+}
+
 /// An owned floating-point result returned by a Rust operation.
 ///
 /// Release both the descriptor array and its point arrays with
 /// [`knipsa_free_paths_d`]. A zero-path result has `paths == NULL` and
 /// `path_count == 0`. Treat the returned descriptors and points as read-only.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 pub struct KnipsaPathsD {
     /// Pointer to the returned path descriptors.
     pub paths: *mut KnipsaPathD,
     /// Number of descriptors at `paths`.
     pub path_count: usize,
+}
+
+impl Default for KnipsaPathsD {
+    fn default() -> Self {
+        Self { paths: std::ptr::null_mut(), path_count: 0 }
+    }
 }
 
 /// Options shared by the integer and floating-point offset entry points.
@@ -545,7 +557,7 @@ pub extern "C" fn knipsa_boolean_d(
         test_panic_if_requested();
         let subjects = copy_paths_d(subjects, subject_count)?;
         let clips = copy_paths_d(clips, clip_count)?;
-        boolean_opd(BooleanRequestD { subjects: &subjects, clips: &clips, clip_type, fill_rule })
+        boolean_op_d(BooleanRequestD { subjects: &subjects, clips: &clips, clip_type, fill_rule })
             .map_err(|error| status_from_error(&error))
     }));
     match operation {

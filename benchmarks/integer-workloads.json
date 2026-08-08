@@ -1,0 +1,115 @@
+{
+  "schema": "knipsa-workload-v1",
+  "coordinate_type": "i64",
+  "comparison": {
+    "coordinate_tolerance": 0,
+    "area2_tolerance": 0
+  },
+  "cases": [
+    {
+      "id": "integer-overlap-intersection",
+      "clip_type": "intersection",
+      "fill_rule": "even_odd",
+      "subjects": [[[0, 0], [10, 0], [10, 10], [0, 10]]],
+      "clips": [[[5, 0], [15, 0], [15, 10], [5, 10]]]
+    },
+    {
+      "id": "integer-overlap-union",
+      "clip_type": "union",
+      "fill_rule": "even_odd",
+      "subjects": [[[0, 0], [10, 0], [10, 10], [0, 10]]],
+      "clips": [[[5, 0], [15, 0], [15, 10], [5, 10]]]
+    },
+    {
+      "id": "integer-overlap-difference",
+      "clip_type": "difference",
+      "fill_rule": "even_odd",
+      "subjects": [[[0, 0], [10, 0], [10, 10], [0, 10]]],
+      "clips": [[[5, 0], [15, 0], [15, 10], [5, 10]]]
+    },
+    {
+      "id": "integer-overlap-xor",
+      "clip_type": "xor",
+      "fill_rule": "even_odd",
+      "subjects": [[[0, 0], [10, 0], [10, 10], [0, 10]]],
+      "clips": [[[5, 0], [15, 0], [15, 10], [5, 10]]]
+    },
+    {
+      "id": "beyond-f64-intersection",
+      "clip_type": "intersection",
+      "fill_rule": "even_odd",
+      "subjects": [[[4000000000000000000, 4000000000000000000], [4000000000000001000, 4000000000000000000], [4000000000000001000, 4000000000000001000], [4000000000000000000, 4000000000000001000]]],
+      "clips": [[[4000000000000000500, 4000000000000000000], [4000000000000001500, 4000000000000000000], [4000000000000001500, 4000000000000001000], [4000000000000000500, 4000000000000001000]]]
+    },
+    {
+      "id": "beyond-f64-difference",
+      "clip_type": "difference",
+      "fill_rule": "even_odd",
+      "subjects": [[[4000000000000000000, 4000000000000000000], [4000000000000001000, 4000000000000000000], [4000000000000001000, 4000000000000001000], [4000000000000000000, 4000000000000001000]]],
+      "clips": [[[4000000000000000250, 4000000000000000250], [4000000000000000750, 4000000000000000250], [4000000000000000750, 4000000000000000750], [4000000000000000250, 4000000000000000750]]]
+    },
+    {
+      "id": "disjoint-multipolygon-union",
+      "clip_type": "union",
+      "fill_rule": "even_odd",
+      "subjects": [[[0, 0], [4, 0], [4, 4], [0, 4]], [[10, 0], [14, 0], [14, 4], [10, 4]]],
+      "clips": [[[20, 0], [24, 0], [24, 4], [20, 4]]]
+    },
+    {
+      "id": "hole-producing-difference",
+      "clip_type": "difference",
+      "fill_rule": "even_odd",
+      "subjects": [[[0, 0], [20, 0], [20, 20], [0, 20]]],
+      "clips": [[[5, 5], [15, 5], [15, 15], [5, 15]]]
+    },
+    {
+      "id": "nested-xor",
+      "clip_type": "xor",
+      "fill_rule": "even_odd",
+      "subjects": [[[0, 0], [20, 0], [20, 20], [0, 20]]],
+      "clips": [[[5, 5], [15, 5], [15, 15], [5, 15]], [[8, 8], [12, 8], [12, 12], [8, 12]]]
+    },
+    {
+      "id": "shared-edge-union",
+      "clip_type": "union",
+      "fill_rule": "even_odd",
+      "subjects": [[[0, 0], [10, 0], [10, 10], [0, 10]]],
+      "clips": [[[10, 0], [20, 0], [20, 10], [10, 10]]]
+    },
+    {
+      "id": "shared-vertex-xor",
+      "clip_type": "xor",
+      "fill_rule": "even_odd",
+      "subjects": [[[0, 0], [10, 0], [10, 10], [0, 10]]],
+      "clips": [[[10, 10], [20, 10], [20, 20], [10, 20]]]
+    },
+    {
+      "id": "nonzero-duplicate-contours",
+      "clip_type": "union",
+      "fill_rule": "non_zero",
+      "subjects": [[[0, 0], [10, 0], [10, 10], [0, 10]], [[0, 0], [10, 0], [10, 10], [0, 10]]],
+      "clips": []
+    },
+    {
+      "id": "positive-orientation-filter",
+      "clip_type": "union",
+      "fill_rule": "positive",
+      "subjects": [[[0, 0], [8, 0], [8, 8], [0, 8]], [[20, 0], [20, 8], [28, 8], [28, 0]]],
+      "clips": []
+    },
+    {
+      "id": "negative-orientation-filter",
+      "clip_type": "union",
+      "fill_rule": "negative",
+      "subjects": [[[0, 0], [8, 0], [8, 8], [0, 8]], [[20, 0], [20, 8], [28, 8], [28, 0]]],
+      "clips": []
+    },
+    {
+      "id": "collinear-vertices-intersection",
+      "clip_type": "intersection",
+      "fill_rule": "even_odd",
+      "subjects": [[[0, 0], [5, 0], [10, 0], [10, 5], [10, 10], [0, 10]]],
+      "clips": [[[2, 2], [8, 2], [8, 8], [2, 8]]]
+    }
+  ]
+}

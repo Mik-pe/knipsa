@@ -1,6 +1,6 @@
 //! Public operation contracts for integer and floating-point paths.
 
-use crate::{Error, Path64, PathD, PathKind, Paths64, PathsD, validate_path64, validate_pathd};
+use crate::{Error, Path64, PathD, PathKind, Paths64, PathsD, validate_path_d, validate_path64};
 
 /// A boolean operation over filled paths.
 ///
@@ -114,15 +114,15 @@ pub fn validate_request(request: &BooleanRequest<'_>) -> Result<(), Error> {
 /// Validates a floating-point boolean request without executing it.
 ///
 /// In addition to path shape, this rejects NaN and infinite coordinates.
-/// [`boolean_opd`] performs the same validation automatically.
+/// [`boolean_op_d`] performs the same validation automatically.
 ///
 /// # Errors
 ///
 /// Returns [`Error::InvalidPath`] for a too-short path and
 /// [`Error::NonFiniteCoordinate`] for a non-finite coordinate.
-pub fn validate_requestd(request: &BooleanRequestD<'_>) -> Result<(), Error> {
+pub fn validate_request_d(request: &BooleanRequestD<'_>) -> Result<(), Error> {
     for path in request.subjects.iter().chain(request.clips) {
-        validate_pathd(path, PathKind::Closed)?;
+        validate_path_d(path, PathKind::Closed)?;
     }
     Ok(())
 }
@@ -180,9 +180,9 @@ pub fn boolean_op(request: BooleanRequest<'_>) -> Result<Paths64, Error> {
 ///
 /// Returns [`Error::InvalidPath`] or [`Error::NonFiniteCoordinate`] for invalid
 /// input and [`Error::TopologyFailure`] if the arrangement cannot be closed.
-pub fn boolean_opd(request: BooleanRequestD<'_>) -> Result<PathsD, Error> {
-    validate_requestd(&request)?;
-    crate::boolean::boolean_opd(request)
+pub fn boolean_op_d(request: BooleanRequestD<'_>) -> Result<PathsD, Error> {
+    validate_request_d(&request)?;
+    crate::boolean::boolean_op_d(request)
 }
 
 /// Intersects integer path collections using the orientation-independent
@@ -227,22 +227,22 @@ pub fn xor(subjects: &[Path64], clips: &[Path64]) -> Result<Paths64, Error> {
 
 /// Intersects floating-point path collections using [`FillRule::EvenOdd`].
 ///
-/// Use [`boolean_opd`] when a different fill rule is required.
+/// Use [`boolean_op_d`] when a different fill rule is required.
 ///
 /// # Errors
 ///
-/// Propagates validation, arithmetic, and topology errors from [`boolean_opd`].
+/// Propagates validation, arithmetic, and topology errors from [`boolean_op_d`].
 pub fn intersection_d(subjects: &[PathD], clips: &[PathD]) -> Result<PathsD, Error> {
-    boolean_opd(BooleanRequestD::new(subjects, clips, ClipType::Intersection, FillRule::EvenOdd))
+    boolean_op_d(BooleanRequestD::new(subjects, clips, ClipType::Intersection, FillRule::EvenOdd))
 }
 
 /// Unites two floating-point path collections using [`FillRule::EvenOdd`].
 ///
 /// # Errors
 ///
-/// Propagates errors from [`boolean_opd`].
+/// Propagates errors from [`boolean_op_d`].
 pub fn union_d(subjects: &[PathD], clips: &[PathD]) -> Result<PathsD, Error> {
-    boolean_opd(BooleanRequestD::new(subjects, clips, ClipType::Union, FillRule::EvenOdd))
+    boolean_op_d(BooleanRequestD::new(subjects, clips, ClipType::Union, FillRule::EvenOdd))
 }
 
 /// Subtracts floating-point `clips` from `subjects` using
@@ -250,18 +250,18 @@ pub fn union_d(subjects: &[PathD], clips: &[PathD]) -> Result<PathsD, Error> {
 ///
 /// # Errors
 ///
-/// Propagates errors from [`boolean_opd`].
+/// Propagates errors from [`boolean_op_d`].
 pub fn difference_d(subjects: &[PathD], clips: &[PathD]) -> Result<PathsD, Error> {
-    boolean_opd(BooleanRequestD::new(subjects, clips, ClipType::Difference, FillRule::EvenOdd))
+    boolean_op_d(BooleanRequestD::new(subjects, clips, ClipType::Difference, FillRule::EvenOdd))
 }
 
 /// Computes floating-point symmetric difference using [`FillRule::EvenOdd`].
 ///
 /// # Errors
 ///
-/// Propagates errors from [`boolean_opd`].
+/// Propagates errors from [`boolean_op_d`].
 pub fn xor_d(subjects: &[PathD], clips: &[PathD]) -> Result<PathsD, Error> {
-    boolean_opd(BooleanRequestD::new(subjects, clips, ClipType::Xor, FillRule::EvenOdd))
+    boolean_op_d(BooleanRequestD::new(subjects, clips, ClipType::Xor, FillRule::EvenOdd))
 }
 
 /// Intersects two integer rings using [`FillRule::EvenOdd`].
@@ -427,15 +427,15 @@ mod tests {
             clip_type: ClipType::Union,
             fill_rule: FillRule::NonZero,
         };
-        assert!(validate_requestd(&request).is_ok());
-        assert_eq!(crate::boolean_opd(request).expect("valid request").len(), 1);
+        assert!(validate_request_d(&request).is_ok());
+        assert_eq!(crate::boolean_op_d(request).expect("valid request").len(), 1);
         let bad = BooleanRequestD {
             subjects: &[vec![crate::PointD::new(0.0, 0.0), crate::PointD::new(f64::NAN, 0.0)]],
             clips: &[],
             clip_type: ClipType::Union,
             fill_rule: FillRule::EvenOdd,
         };
-        assert!(matches!(validate_requestd(&bad), Err(Error::InvalidPath { .. })));
+        assert!(matches!(validate_request_d(&bad), Err(Error::InvalidPath { .. })));
     }
 
     #[test]

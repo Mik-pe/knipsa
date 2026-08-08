@@ -2,7 +2,7 @@
 
 use knipsa::{
     OffsetOptions, PathD, Point64, PointD, PointLocation, intersection_path_d, offset_path_d,
-    point_in_polygon, triangulate_pathd,
+    point_in_polygon, triangulate_path_d,
 };
 
 fn square(left: f64, bottom: f64, right: f64, top: f64) -> PathD {
@@ -24,7 +24,7 @@ fn main() -> Result<(), knipsa::Error> {
     let outline = offset_path_d(&subject, 1.0, OffsetOptions::default())?;
     println!("offset rings: {}", outline.len());
 
-    let triangles = triangulate_pathd(&subject)?;
+    let triangles = triangulate_path_d(&subject)?;
     println!("triangles: {}", triangles.len());
 
     let integer_square =

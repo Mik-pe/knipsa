@@ -9,13 +9,16 @@ not automatically part of this repository.
 
 The checked-in adapter commands currently fetch or use, outside the Rust
 crates, Clipper2 at the pinned revision under the Boost Software License 1.0,
+Boost 1.91.0 under the Boost Software License 1.0,
 `earcutr` 0.5.0 under ISC, `martinez-polygon-clipping` 0.8.1 under MIT, and
-Shapely 2.0.7 under BSD-3-Clause (the wheel bundles GEOS 3.11.4 under
-LGPL-2.1). These are test, triangulation, and benchmark tooling dependencies;
-the Clipper2 source is kept in an ignored build directory and is not linked
-into the Rust library. The Rust API uses `earcutr` as a declared dependency,
-so its ISC license is part of the dependency audit but no source is copied
-into this repository.
+`geo` 0.33.1 plus its locked adapter dependencies under their recorded
+Cargo-package licenses, JTS Core 1.20.0 under EPL-2.0 or EDL-1.0, and Shapely
+2.0.7 under BSD-3-Clause (the wheel bundles GEOS 3.11.4 under LGPL-2.1). These
+are test, triangulation, and benchmark tooling dependencies; downloaded
+Clipper2, Boost, and JTS artifacts stay in the ignored `target/reference` tree
+and are not linked into the Rust library. The Rust API uses `earcutr` as a
+declared dependency, so its ISC license is part of the dependency audit but no
+source is copied into this repository.
 
 ## Rules for future work
 

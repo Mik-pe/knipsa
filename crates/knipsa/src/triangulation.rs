@@ -6,7 +6,11 @@
 //! the independent ISC-licensed `earcutr` crate, while all input validation,
 //! nesting, coordinate preservation, and public result shaping live here.
 
-use crate::{Error, FillRule, Path64, PathD, Point64, PointD, normalize_pathd, validate_pathd};
+use crate::{
+    Error, FillRule, Path64, PathD, Point64, PointD,
+    geometry::{paths64_to_local_d, signed_area2_d},
+    trim_collinear_d,
+};
 
 const EPSILON: f64 = 1e-12;
 
@@ -107,29 +111,8 @@ pub fn triangulate_path64(path: &[Point64]) -> Result<Vec<Triangle64>, Error> {
 /// # Errors
 ///
 /// Propagates errors from [`triangulate_d`].
-pub fn triangulate_pathd(path: &[PointD]) -> Result<Vec<TriangleD>, Error> {
+pub fn triangulate_path_d(path: &[PointD]) -> Result<Vec<TriangleD>, Error> {
     triangulate_d(&[path.to_vec()], FillRule::NonZero)
-}
-
-/// Alias for [`triangulate64`] using the plural name used by the path APIs.
-///
-/// # Errors
-///
-/// Propagates errors from [`triangulate64`].
-pub fn triangulate_paths64(
-    paths: &[Path64],
-    fill_rule: FillRule,
-) -> Result<Vec<Triangle64>, Error> {
-    triangulate64(paths, fill_rule)
-}
-
-/// Alias for [`triangulate_d`] using the plural name used by the path APIs.
-///
-/// # Errors
-///
-/// Propagates errors from [`triangulate_d`].
-pub fn triangulate_paths_d(paths: &[PathD], fill_rule: FillRule) -> Result<Vec<TriangleD>, Error> {
-    triangulate_d(paths, fill_rule)
 }
 
 #[derive(Clone, Debug)]
@@ -138,32 +121,6 @@ struct Ring {
     area: f64,
     parent: Option<usize>,
     probe: PointD,
-}
-
-#[allow(clippy::cast_precision_loss)]
-fn paths64_to_local_d(paths: &[Path64]) -> Result<(Point64, Vec<PathD>), Error> {
-    let origin = paths.iter().find_map(|path| path.first()).copied().unwrap_or(Point64::new(0, 0));
-    let mut local = Vec::with_capacity(paths.len());
-    for path in paths {
-        let mut local_path = Vec::with_capacity(path.len());
-        for point in path {
-            local_path.push(PointD::new(
-                i128_to_exact_f64(i128::from(point.x) - i128::from(origin.x))?,
-                i128_to_exact_f64(i128::from(point.y) - i128::from(origin.y))?,
-            ));
-        }
-        local.push(local_path);
-    }
-    Ok((origin, local))
-}
-
-#[allow(clippy::cast_precision_loss)]
-fn i128_to_exact_f64(value: i128) -> Result<f64, Error> {
-    const MAX_EXACT_INTEGER: u128 = 1 << 53;
-    if value.unsigned_abs() > MAX_EXACT_INTEGER {
-        return Err(Error::ArithmeticOverflow);
-    }
-    Ok(value as f64)
 }
 
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
@@ -188,15 +145,14 @@ fn point_d_to_64(point: PointD, origin: Point64) -> Result<Point64, Error> {
 fn collect_rings(paths: &[PathD]) -> Result<Vec<Ring>, Error> {
     let mut rings = Vec::new();
     for path in paths {
-        validate_pathd(path, crate::PathKind::Closed)?;
-        let path = normalize_pathd(path, crate::PathKind::Closed);
+        let path = trim_collinear_d(path, crate::PathKind::Closed)?;
         if path.is_empty() {
             continue;
         }
         if path.len() < 3 {
             return Err(Error::TriangulationFailure);
         }
-        let area = signed_area2(&path);
+        let area = signed_area2_d(&path);
         if !area.is_finite() {
             return Err(Error::ArithmeticOverflow);
         }
@@ -356,14 +312,6 @@ fn push_oriented_triangle(result: &mut Vec<TriangleD>, vertices: &[PointD], indi
     }
 }
 
-fn signed_area2(path: &[PointD]) -> f64 {
-    path.iter()
-        .zip(path.iter().cycle().skip(1))
-        .take(path.len())
-        .map(|(first, second)| first.x * second.y - first.y * second.x)
-        .sum()
-}
-
 fn cross(first: PointD, second: PointD, third: PointD) -> f64 {
     (second.x - first.x) * (third.y - first.y) - (second.y - first.y) * (third.x - first.x)
 }
@@ -496,7 +444,7 @@ mod tests {
 
     #[test]
     fn triangulates_simple_polygon_and_preserves_ccw_winding() {
-        let triangles = triangulate_pathd(&rectangle(0.0, 0.0, 10.0, 10.0)).unwrap();
+        let triangles = triangulate_path_d(&rectangle(0.0, 0.0, 10.0, 10.0)).unwrap();
         assert_eq!(triangles.len(), 2);
         let area = triangles
             .iter()
@@ -506,6 +454,26 @@ mod tests {
         assert!(
             triangles.iter().all(|triangle| area2(triangle[0], triangle[1], triangle[2]) > 0.0)
         );
+    }
+
+    #[test]
+    fn removes_redundant_collinear_vertices_before_triangulation() {
+        let path = vec![
+            PointD::new(0.0, 0.0),
+            PointD::new(3.0, 0.0),
+            PointD::new(7.0, 0.0),
+            PointD::new(10.0, 0.0),
+            PointD::new(10.0, 8.0),
+            PointD::new(6.0, 8.0),
+            PointD::new(0.0, 8.0),
+        ];
+        let triangles = triangulate_path_d(&path).unwrap();
+        assert_eq!(triangles.len(), 2);
+        let area = triangles
+            .iter()
+            .map(|triangle| area2(triangle[0], triangle[1], triangle[2]).abs())
+            .sum::<f64>();
+        assert!((area - 160.0).abs() < EPSILON);
     }
 
     #[test]
@@ -537,7 +505,7 @@ mod tests {
     #[test]
     fn rejects_invalid_and_intersecting_paths() {
         assert!(matches!(
-            triangulate_pathd(&[PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)]),
+            triangulate_path_d(&[PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)]),
             Err(Error::InvalidPath { .. })
         ));
         let bow_tie = vec![
@@ -546,7 +514,7 @@ mod tests {
             PointD::new(0.0, 10.0),
             PointD::new(10.0, 0.0),
         ];
-        assert_eq!(triangulate_pathd(&bow_tie), Err(Error::TriangulationFailure));
+        assert_eq!(triangulate_path_d(&bow_tie), Err(Error::TriangulationFailure));
         let first = rectangle(0.0, 0.0, 10.0, 10.0);
         let second = rectangle(5.0, -1.0, 15.0, 5.0);
         assert_eq!(
@@ -565,12 +533,10 @@ mod tests {
         ];
         let triangles = triangulate64(&[path], FillRule::NonZero).unwrap();
         assert_eq!(triangles.len(), 2);
-        assert_eq!(triangles.len(), 2);
     }
 
     #[test]
-    fn covers_aliases_and_numeric_boundaries() {
-        assert_eq!(i128_to_exact_f64((1_i128 << 53) + 1), Err(Error::ArithmeticOverflow));
+    fn covers_single_paths_and_numeric_boundaries() {
         let excessive_span =
             vec![vec![Point64::new(0, 0), Point64::new((1_i64 << 53) + 1, 0), Point64::new(0, 1)]];
         assert_eq!(
@@ -584,20 +550,16 @@ mod tests {
             Point64::new(0, 10),
         ];
         assert_eq!(
-            triangulate_paths64(std::slice::from_ref(&integer_path), FillRule::NonZero)
-                .unwrap()
-                .len(),
+            triangulate64(std::slice::from_ref(&integer_path), FillRule::NonZero).unwrap().len(),
             2
         );
         assert_eq!(triangulate_path64(&integer_path).unwrap().len(), 2);
         let double_path = rectangle(0.0, 0.0, 10.0, 10.0);
         assert_eq!(
-            triangulate_paths_d(std::slice::from_ref(&double_path), FillRule::NonZero)
-                .unwrap()
-                .len(),
+            triangulate_d(std::slice::from_ref(&double_path), FillRule::NonZero).unwrap().len(),
             2
         );
-        assert_eq!(triangulate_pathd(&double_path).unwrap().len(), 2);
+        assert_eq!(triangulate_path_d(&double_path).unwrap().len(), 2);
         assert_eq!(triangulate_d(&[Vec::new()], FillRule::EvenOdd), Ok(Vec::new()));
 
         let collapsed = vec![PointD::new(0.0, 0.0), PointD::new(0.0, 0.0), PointD::new(0.0, 0.0)];

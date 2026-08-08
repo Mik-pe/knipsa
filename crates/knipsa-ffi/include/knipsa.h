@@ -8,6 +8,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/** Semantic version of the headers and matching knipsa library. */
+#define KNIPSA_VERSION_MAJOR 0
+#define KNIPSA_VERSION_MINOR 2
+#define KNIPSA_VERSION_PATCH 0
+
 #ifdef __cplusplus
 extern "C" {
 #endif

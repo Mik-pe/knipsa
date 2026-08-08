@@ -4,37 +4,35 @@
 #![doc(test(attr(deny(warnings))))]
 
 mod boolean;
+mod dispatch;
 mod error;
-// Keep the standard-case dispatcher separate from the certified general kernels.
-#[path = "standard_dispatch.rs"]
 mod fast;
 mod fast_dispatch;
 mod geometry;
 mod offset;
 mod request;
+mod standard_dispatch;
 mod triangulation;
 
 pub use error::Error;
 pub use geometry::{
     Orientation, Path64, PathD, Paths64, PathsD, Point64, PointD, PointLocation, Rect64, RectD,
-    clip_to_rect_d, clip_to_rect64, normalize_path64, normalize_pathd, orientation,
+    clip_to_rect_d, clip_to_rect64, normalize_path_d, normalize_path64, orientation,
     point_in_polygon, reverse_path_d, reverse_path64, signed_area2, simplify_paths_d,
     simplify_paths64, translate_path_d, translate_path64, trim_collinear_d, trim_collinear64,
-    validate_path64, validate_pathd, validate_paths_d, validate_paths64,
+    validate_path_d, validate_path64, validate_paths_d, validate_paths64,
 };
 pub use offset::{
-    EndType, JoinType, OffsetOptions, offset_path_d, offset_path64, offset_paths, offset_paths_d,
-    offset_paths64,
+    EndType, JoinType, OffsetOptions, offset_path_d, offset_path64, offset_paths_d, offset_paths64,
 };
 pub use request::{
-    BooleanRequest, BooleanRequestD, ClipType, FillRule, boolean_op, boolean_opd, difference,
+    BooleanRequest, BooleanRequestD, ClipType, FillRule, boolean_op, boolean_op_d, difference,
     difference_d, difference_path, difference_path_d, intersection, intersection_d,
     intersection_path, intersection_path_d, union, union_d, union_path, union_path_d,
-    validate_request, validate_requestd, xor, xor_d, xor_path, xor_path_d,
+    validate_request, validate_request_d, xor, xor_d, xor_path, xor_path_d,
 };
 pub use triangulation::{
-    Triangle64, TriangleD, triangulate_d, triangulate_path64, triangulate_pathd,
-    triangulate_paths_d, triangulate_paths64, triangulate64,
+    Triangle64, TriangleD, triangulate_d, triangulate_path_d, triangulate_path64, triangulate64,
 };
 
 /// Describes whether a path's final point connects back to its first point.

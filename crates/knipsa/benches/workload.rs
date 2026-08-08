@@ -1,27 +1,42 @@
 #![allow(missing_docs)]
 
-use std::{env, fs, hint::black_box, time::Instant};
+use std::{env, fs};
 
-use knipsa::{BooleanRequestD, ClipType, FillRule, PathD, PathsD, PointD, boolean_opd};
-use serde::{Deserialize, Serialize};
+use knipsa::{
+    BooleanRequest, BooleanRequestD, ClipType, Error, FillRule, Path64, PathD, Point64, PointD,
+    boolean_op, boolean_op_d,
+};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+#[path = "support/benchmark_protocol.rs"]
+mod benchmark_protocol;
+use benchmark_protocol::{MIN_SAMPLE_TIME_NS, SAMPLE_RUNS, WARMUP_RUNS, measure};
 
 const WORKLOAD: &str = include_str!("../../../benchmarks/workloads.json");
-const WARMUP_RUNS: usize = 3;
-const SAMPLE_RUNS: usize = 25;
 
 #[derive(Deserialize)]
-struct Workload {
+struct WorkloadMetadata {
     schema: String,
-    cases: Vec<WorkloadCase>,
+    coordinate_type: String,
 }
 
 #[derive(Deserialize)]
-struct WorkloadCase {
+#[serde(bound(deserialize = "Coordinate: Deserialize<'de>"))]
+struct Workload<Coordinate> {
+    schema: String,
+    #[serde(rename = "coordinate_type")]
+    _coordinate_type: String,
+    cases: Vec<WorkloadCase<Coordinate>>,
+}
+
+#[derive(Deserialize)]
+#[serde(bound(deserialize = "Coordinate: Deserialize<'de>"))]
+struct WorkloadCase<Coordinate> {
     id: String,
     clip_type: String,
     fill_rule: String,
-    subjects: Vec<Vec<[f64; 2]>>,
-    clips: Vec<Vec<[f64; 2]>>,
+    subjects: Vec<Vec<[Coordinate; 2]>>,
+    clips: Vec<Vec<[Coordinate; 2]>>,
 }
 
 #[derive(Serialize)]
@@ -31,15 +46,64 @@ struct BenchResult {
     error: Option<String>,
     median_ns: u128,
     p95_ns: u128,
+    iterations_per_sample: usize,
     ring_count: usize,
     signature: String,
 }
 
-#[derive(Serialize)]
-struct RingRecord {
-    depth: usize,
-    area2: f64,
-    points: Vec<[f64; 2]>,
+trait BenchmarkCoordinate: Copy + DeserializeOwned + Serialize {
+    type Point;
+
+    fn point(coordinates: [Self; 2]) -> Self::Point;
+    fn coordinates(point: &Self::Point) -> [Self; 2];
+    fn boolean_op(
+        subjects: &[Vec<Self::Point>],
+        clips: &[Vec<Self::Point>],
+        clip_type: ClipType,
+        fill_rule: FillRule,
+    ) -> Result<Vec<Vec<Self::Point>>, Error>;
+}
+
+impl BenchmarkCoordinate for f64 {
+    type Point = PointD;
+
+    fn point([x, y]: [Self; 2]) -> Self::Point {
+        PointD::new(x, y)
+    }
+
+    fn coordinates(point: &Self::Point) -> [Self; 2] {
+        [point.x, point.y]
+    }
+
+    fn boolean_op(
+        subjects: &[PathD],
+        clips: &[PathD],
+        clip_type: ClipType,
+        fill_rule: FillRule,
+    ) -> Result<Vec<PathD>, Error> {
+        boolean_op_d(BooleanRequestD::new(subjects, clips, clip_type, fill_rule))
+    }
+}
+
+impl BenchmarkCoordinate for i64 {
+    type Point = Point64;
+
+    fn point([x, y]: [Self; 2]) -> Self::Point {
+        Point64::new(x, y)
+    }
+
+    fn coordinates(point: &Self::Point) -> [Self; 2] {
+        [point.x, point.y]
+    }
+
+    fn boolean_op(
+        subjects: &[Path64],
+        clips: &[Path64],
+        clip_type: ClipType,
+        fill_rule: FillRule,
+    ) -> Result<Vec<Path64>, Error> {
+        boolean_op(BooleanRequest::new(subjects, clips, clip_type, fill_rule))
+    }
 }
 
 fn main() {
@@ -47,62 +111,55 @@ fn main() {
         || WORKLOAD.to_owned(),
         |path| fs::read_to_string(path).expect("read KNIPSA_WORKLOAD"),
     );
-    let workload: Workload = serde_json::from_str(&workload_json).expect("valid workload JSON");
-    assert_eq!(workload.schema, "knipsa-workload-v1");
+    let metadata: WorkloadMetadata =
+        serde_json::from_str(&workload_json).expect("valid workload metadata");
+    assert_eq!(metadata.schema, "knipsa-workload-v1");
     println!(
-        "{{\"implementation\":\"knipsa\",\"samples\":{SAMPLE_RUNS},\"warmups\":{WARMUP_RUNS}}}"
+        "{{\"implementation\":\"knipsa\",\"samples\":{SAMPLE_RUNS},\"warmups\":{WARMUP_RUNS},\"minimum_sample_time_ns\":{MIN_SAMPLE_TIME_NS}}}"
     );
-    for test_case in workload.cases {
-        let subjects = paths_from_json(test_case.subjects);
-        let clips = paths_from_json(test_case.clips);
-        let request = BooleanRequestD {
-            subjects: &subjects,
-            clips: &clips,
-            clip_type: clip_type(&test_case.clip_type),
-            fill_rule: fill_rule(&test_case.fill_rule),
-        };
-        if let Some(error) = (0..WARMUP_RUNS).find_map(|_| match boolean_opd(request) {
-            Ok(result) => {
-                black_box(result);
-                None
-            }
-            Err(error) => Some(error.to_string()),
-        }) {
-            print_error(test_case.id, error);
-            continue;
-        }
-        let mut timings = Vec::with_capacity(SAMPLE_RUNS);
-        let mut output = Vec::new();
-        for _ in 0..SAMPLE_RUNS {
-            let started = Instant::now();
-            match boolean_opd(request) {
-                Ok(result) => output = black_box(result),
-                Err(error) => {
-                    print_error(test_case.id.clone(), error.to_string());
-                    output.clear();
-                    timings.clear();
-                    break;
-                }
-            }
-            timings.push(started.elapsed().as_nanos());
-        }
-        if timings.is_empty() {
-            continue;
-        }
-        timings.sort_unstable();
-        let median_ns = timings[timings.len() / 2];
-        let p95_ns = timings[(timings.len() * 95).div_ceil(100) - 1];
-        let result = BenchResult {
-            id: test_case.id,
-            status: "ok".to_owned(),
-            error: None,
-            median_ns,
-            p95_ns,
-            ring_count: output.len(),
-            signature: signature(&output),
-        };
-        println!("{}", serde_json::to_string(&result).expect("serializable result"));
+    match metadata.coordinate_type.as_str() {
+        "f64" => run_workload::<f64>(&workload_json),
+        "i64" => run_workload::<i64>(&workload_json),
+        other => panic!("unsupported coordinate_type {other}"),
     }
+}
+
+fn run_workload<Coordinate: BenchmarkCoordinate>(workload_json: &str) {
+    let workload: Workload<Coordinate> =
+        serde_json::from_str(workload_json).expect("valid workload JSON");
+    assert_eq!(workload.schema, "knipsa-workload-v1");
+    for test_case in workload.cases {
+        let subjects = paths_from_json::<Coordinate>(test_case.subjects);
+        let clips = paths_from_json::<Coordinate>(test_case.clips);
+        let operation = clip_type(&test_case.clip_type);
+        let rule = fill_rule(&test_case.fill_rule);
+        let id = test_case.id;
+        if let Err(error) = benchmark_case::<Coordinate, _>(&id, || {
+            Coordinate::boolean_op(&subjects, &clips, operation, rule)
+        }) {
+            print_error(id, error);
+        }
+    }
+}
+
+fn benchmark_case<Coordinate, Run>(id: &str, mut run: Run) -> Result<(), String>
+where
+    Coordinate: BenchmarkCoordinate,
+    Run: FnMut() -> Result<Vec<Vec<Coordinate::Point>>, Error>,
+{
+    let measured = measure(|| run().map_err(|error| error.to_string()))?;
+    let result = BenchResult {
+        id: id.to_owned(),
+        status: "ok".to_owned(),
+        error: None,
+        median_ns: measured.median_ns,
+        p95_ns: measured.p95_ns,
+        iterations_per_sample: measured.iterations_per_sample,
+        ring_count: measured.output.len(),
+        signature: signature::<Coordinate>(&measured.output),
+    };
+    println!("{}", serde_json::to_string(&result).expect("serializable result"));
+    Ok(())
 }
 
 fn print_error(id: String, error: String) {
@@ -112,17 +169,17 @@ fn print_error(id: String, error: String) {
         error: Some(error),
         median_ns: 0,
         p95_ns: 0,
+        iterations_per_sample: 0,
         ring_count: 0,
         signature: "[]".to_owned(),
     };
     println!("{}", serde_json::to_string(&result).expect("serializable error result"));
 }
 
-fn paths_from_json(paths: Vec<Vec<[f64; 2]>>) -> Vec<PathD> {
-    paths
-        .into_iter()
-        .map(|path| path.into_iter().map(|[x, y]| PointD::new(x, y)).collect())
-        .collect()
+fn paths_from_json<Coordinate: BenchmarkCoordinate>(
+    paths: Vec<Vec<[Coordinate; 2]>>,
+) -> Vec<Vec<Coordinate::Point>> {
+    paths.into_iter().map(|path| path.into_iter().map(Coordinate::point).collect()).collect()
 }
 
 fn clip_type(value: &str) -> ClipType {
@@ -145,92 +202,10 @@ fn fill_rule(value: &str) -> FillRule {
     }
 }
 
-fn signature(paths: &PathsD) -> String {
-    let records = paths
+fn signature<Coordinate: BenchmarkCoordinate>(paths: &[Vec<Coordinate::Point>]) -> String {
+    let rings = paths
         .iter()
-        .enumerate()
-        .map(|(index, path)| {
-            let points = canonical_ring(path);
-            let depth = paths
-                .iter()
-                .enumerate()
-                .filter(|(other_index, other)| *other_index != index && contains(points[0], other))
-                .count();
-            RingRecord { depth, area2: quantize(area2(path).abs()), points }
-        })
+        .map(|path| path.iter().map(Coordinate::coordinates).collect::<Vec<_>>())
         .collect::<Vec<_>>();
-    let mut records = records;
-    records.sort_by_key(|record| serde_json::to_string(record).expect("serializable ring"));
-    serde_json::to_string(&records).expect("serializable signature")
-}
-
-fn canonical_ring(path: &[PointD]) -> Vec<[f64; 2]> {
-    let points = remove_collinear(
-        path.iter().map(|point| [quantize(point.x), quantize(point.y)]).collect::<Vec<_>>(),
-    );
-    let forward = rotate_to_minimum(points.clone());
-    let mut reversed = points;
-    reversed.reverse();
-    let reversed = rotate_to_minimum(reversed);
-    if forward < reversed { forward } else { reversed }
-}
-
-fn remove_collinear(mut points: Vec<[f64; 2]>) -> Vec<[f64; 2]> {
-    let mut changed = true;
-    while changed && points.len() >= 3 {
-        changed = false;
-        let mut cleaned = Vec::with_capacity(points.len());
-        for index in 0..points.len() {
-            let previous = points[(index + points.len() - 1) % points.len()];
-            let current = points[index];
-            let next = points[(index + 1) % points.len()];
-            let first = [current[0] - previous[0], current[1] - previous[1]];
-            let second = [next[0] - current[0], next[1] - current[1]];
-            let cross = first[0] * second[1] - first[1] * second[0];
-            let dot = first[0] * second[0] + first[1] * second[1];
-            if cross.abs() <= 1e-12 && dot >= -1e-12 {
-                changed = true;
-            } else {
-                cleaned.push(current);
-            }
-        }
-        points = cleaned;
-    }
-    points
-}
-
-fn rotate_to_minimum(mut points: Vec<[f64; 2]>) -> Vec<[f64; 2]> {
-    if let Some((minimum, _)) = points.iter().enumerate().min_by(|(_, left), (_, right)| {
-        left[0].total_cmp(&right[0]).then(left[1].total_cmp(&right[1]))
-    }) {
-        points.rotate_left(minimum);
-    }
-    points
-}
-
-fn quantize(value: f64) -> f64 {
-    let rounded = (value * 1e9).round() / 1e9;
-    if rounded.to_bits() == (-0.0_f64).to_bits() { 0.0 } else { rounded }
-}
-
-fn area2(path: &[PointD]) -> f64 {
-    path.iter()
-        .zip(path.iter().cycle().skip(1))
-        .take(path.len())
-        .map(|(start, end)| start.x * end.y - start.y * end.x)
-        .sum()
-}
-
-fn contains(point: [f64; 2], path: &[PointD]) -> bool {
-    let mut inside = false;
-    for (start, end) in path.iter().zip(path.iter().cycle().skip(1)).take(path.len()) {
-        if (start.y > point[1]) != (end.y > point[1]) {
-            let cross =
-                (end.x - start.x) * (point[1] - start.y) - (end.y - start.y) * (point[0] - start.x);
-            if (end.y > start.y && cross > 0.0) || (end.y < start.y && cross < 0.0) {
-                inside = !inside;
-            }
-        }
-    }
-    inside
+    serde_json::to_string(&rings).expect("serializable signature")
 }

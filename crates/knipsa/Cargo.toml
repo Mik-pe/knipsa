@@ -7,7 +7,8 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "A test-first, idiomatic Rust polygon clipping engine"
+description = "Polygon booleans, offsets, point queries, and triangulation in Rust"
+publish = ["crates-io"]
 readme = "../../README.md"
 documentation = "https://docs.rs/knipsa"
 keywords = ["geometry", "polygon", "clipping", "offsetting"]
@@ -28,6 +29,10 @@ harness = false
 
 [[bench]]
 name = "offset_workload"
+harness = false
+
+[[bench]]
+name = "triangulation_workload"
 harness = false
 
 [lints]

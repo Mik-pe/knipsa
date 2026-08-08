@@ -4,7 +4,7 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 workload=${1:-$repo_root/benchmarks/workloads.json}
 output_dir=${2:-$repo_root/target/conformance}
-references=${3:-"clipper2 geos martinez"}
+references=${3:-"boost clipper2 geo geos jts martinez"}
 
 case "$workload" in
   /*) ;;
@@ -22,7 +22,7 @@ KNIPSA_WORKLOAD="$workload" cargo bench -p knipsa --bench workload -- --nocaptur
 
 for reference in $references; do
   case "$reference" in
-    clipper2|geos|martinez) ;;
+    boost|clipper2|clipper2-integer|geo|geos|jts|martinez) ;;
     *) echo "unknown reference adapter: $reference" >&2; exit 2 ;;
   esac
   "$repo_root/benchmarks/reference/run-$reference.sh" "$workload" \

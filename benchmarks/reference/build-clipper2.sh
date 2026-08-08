@@ -19,6 +19,7 @@ clipper_cpp="$clipper_root/CPP"
 cxx=${CXX:-clang++}
 
 "$cxx" -O3 -DNDEBUG -std=c++17 -Wall -Wextra -Wpedantic \
+  -I"$repo_root/benchmarks/reference/cpp" \
   -I"$clipper_cpp/Clipper2Lib/include" \
   "$repo_root/benchmarks/reference/clipper2/adapter.cpp" \
   "$clipper_cpp/Clipper2Lib/src/clipper.engine.cpp" \

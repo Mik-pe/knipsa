@@ -8,15 +8,15 @@
 queries, and triangulation. It has a safe Rust API and a small C-compatible
 library for applications written in other languages.
 
-The Rust API is currently `0.x`, so breaking changes are still possible before
-the first stable release.
+The current release line is `0.2`. The Rust API is still `0.x`, so breaking
+changes remain possible before `1.0`; patch releases preserve the `0.2` API.
 
 ## Quick start
 
-For a checkout dependency:
+From crates.io:
 
 ```sh
-cargo add --git https://github.com/Mik-pe/knipsa knipsa
+cargo add knipsa@0.2
 ```
 
 Boolean operations work directly on ordinary Rust vectors:
@@ -54,25 +54,30 @@ cargo run -p knipsa --example quickstart
 
 ## Choosing the API
 
+Each coordinate/cardinality combination has one canonical name; the `0.x`
+API intentionally does not retain duplicate aliases. Integer helpers use the
+`64` suffix where a suffix is needed, while floating-point helpers use `_d`.
+The configurable Boolean entry points are `boolean_op` and `boolean_op_d`.
+
 | Need | Use |
 | --- | --- |
 | Two individual rings | `intersection_path`, `union_path`, `difference_path`, `xor_path` and `_d` variants |
 | Ring collections with EvenOdd | `intersection`, `union`, `difference`, `xor` and `_d` variants |
 | Exact integer polygon booleans | `boolean_op` with `Point64` |
-| Fractional coordinates | `boolean_opd` with `PointD` |
+| Fractional coordinates | `boolean_op_d` with `PointD` |
 | Clean self-intersections or internal boundaries | `simplify_paths64` or `simplify_paths_d` |
 | Clip paths to an axis-aligned rectangle | `clip_to_rect64` or `clip_to_rect_d` |
 | Remove redundant collinear vertices | `trim_collinear64` or `trim_collinear_d` |
 | One polygon or polyline offset | `offset_path64` or `offset_path_d` |
 | Polygon or polyline offset collections | `offset_paths64` or `offset_paths_d` |
-| A single polygon's triangles | `triangulate_path64` or `triangulate_pathd` |
+| A single polygon's triangles | `triangulate_path64` or `triangulate_path_d` |
 | Multiple rings, holes, or islands | `triangulate64` or `triangulate_d` |
 | Integer point-in-polygon queries | `point_in_polygon` |
 
 Integer operations preserve integer coordinates. The floating-point boolean
 API accepts finite `f64` values and computes intersections exactly before
 returning `f64` coordinates. The convenience operations use the
-orientation-independent `EvenOdd` rule; use `boolean_op`/`boolean_opd` when a
+orientation-independent `EvenOdd` rule; use `boolean_op`/`boolean_op_d` when a
 different fill rule is required.
 
 Offset options have named constructors for the common modes:
@@ -118,17 +123,20 @@ panic.
 
 ## C and other languages
 
-The `knipsa-ffi` crate exposes the same operations through a stable C ABI. The
-public header is [`crates/knipsa-ffi/include/knipsa.h`](crates/knipsa-ffi/include/knipsa.h),
+The `knipsa-ffi` crate exposes the same operations through a C ABI. The 0.2 ABI
+is preserved across 0.2.x patch releases; pre-1.0 minor releases may break it.
+The public header is
+[`crates/knipsa-ffi/include/knipsa.h`](https://github.com/Mik-pe/knipsa/blob/main/crates/knipsa-ffi/include/knipsa.h),
 and the ownership and null-pointer rules are documented in
-[`docs/ffi.md`](docs/ffi.md).
+[`docs/ffi.md`](https://github.com/Mik-pe/knipsa/blob/main/docs/ffi.md).
 
 Outputs allocated by the FFI must be released with the matching
 `knipsa_free_paths64` or `knipsa_free_paths_d` function. Input memory remains
 owned by the caller. Initialize output slots with `KNIPSA_PATHS64_INIT` or
 `KNIPSA_PATHS_D_INIT`; configure offsets with
 `KNIPSA_OFFSET_OPTIONS_INIT`. Use
-[`examples/quickstart.c`](examples/quickstart.c) as a complete C11 example.
+[`examples/quickstart.c`](https://github.com/Mik-pe/knipsa/blob/main/examples/quickstart.c)
+as a complete C11 example.
 
 ## Workspace
 
@@ -149,9 +157,24 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 ./scripts/check-c-api.sh
 ./scripts/coverage.sh
+./scripts/fuzz-replay.sh
+make conformance-integer
+make conformance-offset
+make conformance-triangulation
+make release-check
 ```
 
-The coverage command requires `cargo-llvm-cov`.
+The coverage command requires `cargo-llvm-cov`; deterministic fuzz replay
+requires `cargo-fuzz` and the nightly Rust toolchain.
+
+See [`CHANGELOG.md`](https://github.com/Mik-pe/knipsa/blob/main/CHANGELOG.md) for
+release notes,
+[`docs/migrating-0.2.md`](https://github.com/Mik-pe/knipsa/blob/main/docs/migrating-0.2.md)
+for the intentionally breaking `0.1` to `0.2` API changes,
+[`docs/release-scope-0.2.md`](https://github.com/Mik-pe/knipsa/blob/main/docs/release-scope-0.2.md)
+for the 0.2 compatibility contract and known gaps, and
+[`docs/releasing.md`](https://github.com/Mik-pe/knipsa/blob/main/docs/releasing.md)
+for the crate publication procedure.
 
 ## License
 

@@ -26,7 +26,24 @@ the shared integer closed-polygon profile; feature-specific cases are gated
 separately. Each case gets a stable identifier and an expected semantic result,
 not merely a count or an area. Run the local gate with
 `./scripts/run-conformance.sh`; it requires a complete record set from
-Clipper2, GEOS, and Martinez and fails on adapter errors or missing cases.
+Boost.Geometry, Clipper2, geo/iOverlay, GEOS, JTS, and Martinez for the shared
+OGC-valid profile and fails on adapter errors or missing cases. GEOS and JTS
+are reported separately but count as one algorithm lineage. Self-crossing
+EvenOdd fixtures run in a separate Clipper2 plus geo/iOverlay profile because
+OGC-oriented adapters do not promise those input semantics.
+
+The exact integer gate is `make conformance-integer`. It compares the public
+`boolean_op` path with Clipper2 `Paths64`, preserves JSON integers beyond
+2^53, and permits no coordinate or area tolerance. The benchmark harness,
+calibration, raw-ring protocol, and comparator are shared with the floating
+profile instead of being reimplemented for integers.
+
+Feature gates use their own semantic comparators. `make conformance-offset`
+checks region area and bidirectional boundary distance against Clipper2.
+`make conformance-triangulation` checks 12 integer cases against Clipper2 and
+accepts different internal diagonals only after proving non-degenerate,
+interior-disjoint triangles, exact total area, and complete input-boundary
+reconstruction.
 
 ### 4. Algebraic property tests
 
@@ -45,15 +62,21 @@ as:
 ### 5. Differential tests
 
 Run the same serialized cases through every required reference adapter and
-Knipsa. Compare canonicalized filled regions and topology, not raw ring order.
-Any exception, hang, overflow, non-finite result, or unexplained mismatch is a
-failing case saved as a regression fixture or a documented semantic split.
+Knipsa. Adapters report raw output rings; one fail-closed comparator validates
+ring counts and coordinates, then derives canonical filled regions and
+topology. Any exception, hang, overflow, non-finite result, malformed output,
+or unexplained mismatch is a failing case saved as a regression fixture or a
+documented semantic split.
 
 ### 6. Fuzzing and adversarial geometry
 
 Fuzz malformed inputs, repeated points, horizontal edges, touching rings,
 self-intersections, extreme coordinates, very small features, and operations
-that create nested holes. Fuzzing must have a deterministic seed replay path.
+that create nested holes. `./scripts/fuzz-replay.sh` replays every checked-in
+seed without mutating the corpus; longer exploratory campaigns are separate.
+Integer and floating-point boolean targets assert output validity,
+adjacent-vertex normalization, and operand-order invariance for commutative
+operations.
 
 ### 7. FFI tests
 
