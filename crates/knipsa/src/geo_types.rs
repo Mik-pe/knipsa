@@ -1,12 +1,13 @@
 //! Optional conversions between Knipsa paths and `geo-types` geometry.
 //!
-//! Enable the `geo-types` Cargo feature. Polygon conversions preserve the
-//! exterior-first, interiors-after ordering used by [`::geo_types::Polygon`].
-//! They do not infer nesting across multiple independent polygons.
+//! Enable the `geo-types` Cargo feature. Polygon conversions preserve explicit
+//! outer-ring and hole ownership through [`crate::Polygon64`] and
+//! [`crate::PolygonD`]. They do not infer nesting across multiple independent
+//! polygons.
 
 use ::geo_types::{Coord, CoordNum, LineString, Polygon};
 
-use crate::{Path64, PathD, Paths64, PathsD, Point64, PointD};
+use crate::{Path64, PathD, Point64, PointD, Polygon64, PolygonD};
 
 /// Converts a floating-point `geo-types` line string into a Knipsa path.
 ///
@@ -35,37 +36,49 @@ pub fn line_string_from_path64(path: &[Point64]) -> LineString<i64> {
     closed_line_string(path.iter().map(|point| Coord { x: point.x, y: point.y }).collect())
 }
 
-/// Converts one floating-point polygon into exterior-first Knipsa paths.
+/// Converts one floating-point `geo-types` polygon into Knipsa's owned polygon
+/// representation.
+///
+/// Ring winding is preserved and the result is not validated. Use
+/// [`crate::build_polygons_d`] when canonical winding or topology validation is
+/// required.
 #[must_use]
-pub fn paths_d_from_polygon(polygon: &Polygon<f64>) -> PathsD {
-    std::iter::once(path_d_from_line_string(polygon.exterior()))
-        .chain(polygon.interiors().iter().map(path_d_from_line_string))
-        .collect()
+pub fn polygon_d_from_geo(polygon: &Polygon<f64>) -> PolygonD {
+    PolygonD {
+        outer: path_d_from_line_string(polygon.exterior()),
+        holes: polygon.interiors().iter().map(path_d_from_line_string).collect(),
+    }
 }
 
-/// Converts one integer polygon into exterior-first Knipsa paths.
+/// Converts one integer `geo-types` polygon into Knipsa's owned polygon
+/// representation.
+///
+/// Ring winding is preserved and the result is not validated. Use
+/// [`crate::build_polygons64`] when canonical winding or topology validation is
+/// required.
 #[must_use]
-pub fn paths64_from_polygon(polygon: &Polygon<i64>) -> Paths64 {
-    std::iter::once(path64_from_line_string(polygon.exterior()))
-        .chain(polygon.interiors().iter().map(path64_from_line_string))
-        .collect()
+pub fn polygon64_from_geo(polygon: &Polygon<i64>) -> Polygon64 {
+    Polygon64 {
+        outer: path64_from_line_string(polygon.exterior()),
+        holes: polygon.interiors().iter().map(path64_from_line_string).collect(),
+    }
 }
 
-/// Builds a floating-point polygon from one exterior and zero or more holes.
+/// Converts Knipsa's owned floating-point polygon into a `geo-types` polygon.
 #[must_use]
-pub fn polygon_from_paths_d(exterior: &[PointD], interiors: &[PathD]) -> Polygon<f64> {
+pub fn geo_polygon_from_polygon_d(polygon: &PolygonD) -> Polygon<f64> {
     Polygon::new(
-        line_string_from_path_d(exterior),
-        interiors.iter().map(|path| line_string_from_path_d(path)).collect(),
+        line_string_from_path_d(&polygon.outer),
+        polygon.holes.iter().map(|path| line_string_from_path_d(path)).collect(),
     )
 }
 
-/// Builds an integer polygon from one exterior and zero or more holes.
+/// Converts Knipsa's owned integer polygon into a `geo-types` polygon.
 #[must_use]
-pub fn polygon_from_paths64(exterior: &[Point64], interiors: &[Path64]) -> Polygon<i64> {
+pub fn geo_polygon_from_polygon64(polygon: &Polygon64) -> Polygon<i64> {
     Polygon::new(
-        line_string_from_path64(exterior),
-        interiors.iter().map(|path| line_string_from_path64(path)).collect(),
+        line_string_from_path64(&polygon.outer),
+        polygon.holes.iter().map(|path| line_string_from_path64(path)).collect(),
     )
 }
 
@@ -101,19 +114,27 @@ mod tests {
             PointD::new(8.0, 8.0),
             PointD::new(8.0, 2.0),
         ];
-        let polygon = polygon_from_paths_d(&exterior, std::slice::from_ref(&hole));
+        let owned = PolygonD { outer: exterior.clone(), holes: vec![hole.clone()] };
+        let polygon = geo_polygon_from_polygon_d(&owned);
         assert_eq!(polygon.exterior().0.len(), exterior.len() + 1);
-        assert_eq!(paths_d_from_polygon(&polygon), vec![exterior, hole]);
+        assert_eq!(polygon_d_from_geo(&polygon), owned);
     }
 
     #[test]
-    fn integer_polygon_and_open_or_empty_lines_convert_canonically() {
+    fn integer_polygon_preserves_winding_and_lines_handle_closure() {
         let exterior =
             vec![Point64::new(0, 0), Point64::new(4, 0), Point64::new(4, 4), Point64::new(0, 4)];
         let hole =
             vec![Point64::new(1, 1), Point64::new(1, 3), Point64::new(3, 3), Point64::new(3, 1)];
-        let polygon = polygon_from_paths64(&exterior, std::slice::from_ref(&hole));
-        assert_eq!(paths64_from_polygon(&polygon), vec![exterior.clone(), hole]);
+        let owned = Polygon64 { outer: exterior, holes: vec![hole] };
+        let polygon = geo_polygon_from_polygon64(&owned);
+        assert_eq!(polygon64_from_geo(&polygon), owned);
+
+        let reversed = Polygon64 {
+            outer: owned.outer.iter().copied().rev().collect(),
+            holes: vec![owned.holes[0].iter().copied().rev().collect()],
+        };
+        assert_eq!(polygon64_from_geo(&geo_polygon_from_polygon64(&reversed)), reversed);
 
         let open = LineString::new(vec![Coord { x: 0_i64, y: 0 }, Coord { x: 1, y: 1 }]);
         assert_eq!(path64_from_line_string(&open).len(), 2);

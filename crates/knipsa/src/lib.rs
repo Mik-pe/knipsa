@@ -14,6 +14,7 @@ mod geometry;
 mod offset;
 mod request;
 mod standard_dispatch;
+mod topology;
 mod triangulation;
 
 pub use error::{Error, PathValidationError};
@@ -34,10 +35,10 @@ pub use request::{
     intersection_path, intersection_path_d, union, union_d, union_path, union_path_d,
     validate_request, validate_request_d, xor, xor_d, xor_path, xor_path_d,
 };
+pub use topology::{Polygon64, PolygonD, build_polygons_d, build_polygons64};
 pub use triangulation::{
     Triangle64, TriangleD, TriangulationError, TriangulationLimits, TriangulationResource,
-    triangulate_d, triangulate_d_with_limits, triangulate_path_d, triangulate_path64,
-    triangulate64, triangulate64_with_limits,
+    triangulate_d, triangulate_path_d, triangulate_path64, triangulate64,
 };
 
 /// Describes whether a path's final point connects back to its first point.
@@ -126,6 +127,16 @@ mod serde_tests {
         assert_eq!(round_trip(&EndType::Round), EndType::Round);
         assert_eq!(round_trip(&OffsetOptions::default()), OffsetOptions::default());
         assert_eq!(round_trip(&TriangulationLimits::DEFAULT), TriangulationLimits::DEFAULT);
+        let polygon = PolygonD {
+            outer: vec![PointD::new(0.0, 0.0), PointD::new(4.0, 0.0), PointD::new(0.0, 4.0)],
+            holes: Vec::new(),
+        };
+        assert_eq!(round_trip(&polygon), polygon);
+        let polygon64 = Polygon64 {
+            outer: vec![Point64::new(0, 0), Point64::new(4, 0), Point64::new(0, 4)],
+            holes: Vec::new(),
+        };
+        assert_eq!(round_trip(&polygon64), polygon64);
 
         let limit_error = TriangulationError::LimitExceeded {
             resource: TriangulationResource::Vertices,

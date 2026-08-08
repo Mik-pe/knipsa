@@ -2,7 +2,7 @@
 
 use std::{env, fs};
 
-use knipsa::{FillRule, PathD, PointD, triangulate_d};
+use knipsa::{FillRule, PathD, PointD, TriangulationLimits, triangulate_d};
 use serde::{Deserialize, Serialize};
 
 #[path = "support/benchmark_protocol.rs"]
@@ -54,7 +54,9 @@ fn main() {
             .into_iter()
             .map(|path| path.into_iter().map(|[x, y]| PointD::new(x, y)).collect::<PathD>())
             .collect::<Vec<_>>();
-        let result = match measure(|| triangulate_d(&paths, FillRule::NonZero)) {
+        let result = match measure(|| {
+            triangulate_d(&paths, FillRule::NonZero, TriangulationLimits::DEFAULT)
+        }) {
             Ok(measured) => {
                 let signature = measured
                     .output

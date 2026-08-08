@@ -4,7 +4,7 @@
 import json
 import math
 import sys
-from collections import Counter
+from fractions import Fraction
 
 
 def load_results(path):
@@ -40,15 +40,62 @@ def edges(ring):
     return zip(ring, ring[1:] + ring[:1])
 
 
-def undirected_edge(start, end):
-    return (tuple(start), tuple(end)) if tuple(start) < tuple(end) else (tuple(end), tuple(start))
+def point_on_segment(point, segment, tolerance):
+    start, end = segment
+    if tolerance == 0:
+        dx, dy = end[0] - start[0], end[1] - start[1]
+        point_dx, point_dy = point[0] - start[0], point[1] - start[1]
+        return (dx * point_dy - dy * point_dx == 0
+                and min(start[0], end[0]) <= point[0] <= max(start[0], end[0])
+                and min(start[1], end[1]) <= point[1] <= max(start[1], end[1]))
+    scale = max(1.0, math.hypot(end[0] - start[0], end[1] - start[1]))
+    return point_segment_distance(point, segment) <= tolerance * scale
 
 
-def triangle_boundaries(triangles):
-    counts = Counter(undirected_edge(start, end) for triangle in triangles for start, end in edges(triangle))
-    if any(count not in (1, 2) for count in counts.values()):
-        return None
-    return [edge for edge, count in counts.items() if count == 1]
+def segment_parameter(point, segment, exact):
+    start, end = segment
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    length2 = dx * dx + dy * dy
+    numerator = (point[0] - start[0]) * dx + (point[1] - start[1]) * dy
+    if not length2:
+        return Fraction(0) if exact else 0.0
+    return Fraction(numerator, length2) if exact else numerator / length2
+
+
+def triangle_boundaries(triangles, tolerance):
+    """Return the covered region boundary independent of edge subdivision."""
+    triangle_edges = [segment for triangle in triangles for segment in edges(triangle)]
+    vertices = [point for triangle in triangles for point in triangle]
+    exact = tolerance == 0
+    boundaries = []
+    for segment in triangle_edges:
+        start, end = segment
+        parameters = {
+            Fraction(0) if exact else 0.0: tuple(start),
+            Fraction(1) if exact else 1.0: tuple(end),
+        }
+        for point in vertices:
+            if point_on_segment(point, segment, tolerance):
+                amount = segment_parameter(point, segment, exact)
+                if -tolerance <= amount <= 1.0 + tolerance:
+                    parameters[max(0, min(1, amount))] = tuple(point)
+        ordered = sorted(parameters)
+        for lower, upper in zip(ordered, ordered[1:]):
+            if upper - lower <= tolerance:
+                continue
+            lower_point, upper_point = parameters[lower], parameters[upper]
+            midpoint = ((lower_point[0] + upper_point[0]) / 2,
+                        (lower_point[1] + upper_point[1]) / 2)
+            if exact:
+                midpoint = (Fraction(lower_point[0] + upper_point[0], 2),
+                            Fraction(lower_point[1] + upper_point[1], 2))
+            coverage = sum(point_on_segment(midpoint, candidate, tolerance)
+                           for candidate in triangle_edges)
+            if coverage > 2:
+                return None
+            if coverage == 1:
+                boundaries.append((lower_point, upper_point))
+    return boundaries
 
 
 def point_segment_distance(point, segment):
@@ -86,27 +133,45 @@ def interiors_overlap(left, right, tolerance=0.0):
             axis = (start[1] - end[1], end[0] - start[0])
             left_min, left_max = projection(left, axis)
             right_min, right_max = projection(right, axis)
-            projection_scale = max(1.0, abs(left_min), abs(left_max), abs(right_min), abs(right_max))
-            if min(left_max, right_max) <= max(left_min, right_min) + tolerance * projection_scale:
+            threshold = 0 if tolerance == 0 else tolerance * max(
+                1.0, abs(left_min), abs(left_max), abs(right_min), abs(right_max)
+            )
+            if min(left_max, right_max) <= max(left_min, right_min) + threshold:
                 return False
     return True
 
 
 def normalize_geometry(paths, triangles):
-    origin = paths[0][0]
-    scale = max(
-        max(abs(point[0] - origin[0]), abs(point[1] - origin[1]))
-        for path in paths for point in path
-    )
+    points = [point for path in paths for point in path]
+    min_x = min(point[0] for point in points)
+    max_x = max(point[0] for point in points)
+    min_y = min(point[1] for point in points)
+    max_y = max(point[1] for point in points)
+    origin = (min_x * 0.5, min_y * 0.5)
+    scale = max(max_x * 0.5 - origin[0], max_y * 0.5 - origin[1])
     if not math.isfinite(scale) or scale == 0.0:
         raise ValueError("invalid normalization frame")
 
     def normalize_point(point):
-        return ((point[0] - origin[0]) / scale, (point[1] - origin[1]) / scale)
+        return ((point[0] * 0.5 - origin[0]) / scale,
+                (point[1] * 0.5 - origin[1]) / scale)
 
     return (
         [[normalize_point(point) for point in path] for path in paths],
         [[normalize_point(point) for point in triangle] for triangle in triangles],
+    )
+
+
+def localize_integer_geometry(paths, triangles):
+    origin_x = min(point[0] for path in paths for point in path)
+    origin_y = min(point[1] for path in paths for point in path)
+
+    def localize_point(point):
+        return (point[0] - origin_x, point[1] - origin_y)
+
+    return (
+        [[localize_point(point) for point in path] for path in paths],
+        [[localize_point(point) for point in triangle] for triangle in triangles],
     )
 
 
@@ -128,7 +193,7 @@ def validate(case, record, coordinate_type="i64"):
         if any(not isinstance(coordinate, int) or isinstance(coordinate, bool)
                for coordinate in coordinates):
             return False, "non-integer triangulate64 output"
-        paths = case["paths"]
+        paths, triangles = localize_integer_geometry(case["paths"], triangles)
         area_tolerance = 0
         boundary_tolerance = 0.0
         overlap_tolerance = 0.0
@@ -156,7 +221,7 @@ def validate(case, record, coordinate_type="i64"):
         if any(interiors_overlap(left, right, overlap_tolerance)
                for right in triangles[index + 1:]):
             return False, "triangle interiors overlap"
-    actual_boundary = triangle_boundaries(triangles)
+    actual_boundary = triangle_boundaries(triangles, overlap_tolerance)
     if actual_boundary is None:
         return False, "non-manifold triangle edge multiplicity"
     expected_boundary = [(tuple(start), tuple(end)) for path in paths for start, end in edges(path)]

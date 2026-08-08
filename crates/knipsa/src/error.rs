@@ -5,9 +5,9 @@ use core::fmt;
 
 /// An error produced while validating or executing a geometry operation.
 ///
-/// The variants are intentionally operation-independent so callers can use a
-/// single error type across booleans, offsets, triangulation, and checked
-/// geometry helpers.
+/// The variants are intentionally operation-independent across booleans,
+/// offsets, topology building, and checked geometry helpers. Triangulation
+/// wraps this type in [`crate::TriangulationError`] to add resource failures.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -73,9 +73,9 @@ impl std::error::Error for Error {}
 
 /// A path-collection validation error with stable input coordinates.
 ///
-/// Operation entry points continue returning [`Error`] for compatibility.
-/// Call the `validate_paths*_located` helpers first when an application needs
-/// to identify the failing path and, for coordinate errors, vertex.
+/// Call the `validate_paths*_located` helpers before an operation when an
+/// application needs to identify the failing path and, for coordinate errors,
+/// vertex.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PathValidationError {

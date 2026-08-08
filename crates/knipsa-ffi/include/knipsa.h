@@ -367,7 +367,9 @@ KnipsaStatus knipsa_offset_d(const KnipsaPathD *paths,
                              KnipsaPathsD *result);
 
 /** Triangulates integer-coordinate rings and returns one three-point path per
- * counter-clockwise triangle.
+ * counter-clockwise triangle. Before topology validation, the function rejects
+ * more than 1024 paths, 1000000 vertices, or 4000000 conservative edge pairs
+ * with KNIPSA_STATUS_INVALID_ARGUMENT.
  */
 KnipsaStatus knipsa_triangulate64(const KnipsaPath64 *paths,
                                   size_t path_count,
@@ -375,7 +377,9 @@ KnipsaStatus knipsa_triangulate64(const KnipsaPath64 *paths,
                                   KnipsaPaths64 *result);
 
 /** Triangulates finite floating-point rings and returns one three-point path
- * per counter-clockwise triangle.
+ * per counter-clockwise triangle. Before topology validation, the function
+ * rejects more than 1024 paths, 1000000 vertices, or 4000000 conservative edge
+ * pairs with KNIPSA_STATUS_INVALID_ARGUMENT.
  */
 KnipsaStatus knipsa_triangulate_d(const KnipsaPathD *paths,
                                   size_t path_count,

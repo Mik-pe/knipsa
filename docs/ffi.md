@@ -31,6 +31,10 @@ languages that can consume a C-compatible shared library.
   `KNIPSA_OFFSET_OPTIONS_INIT`.
 - `knipsa_triangulate64` and `knipsa_triangulate_d` return each triangle as a
   three-point path and use the same fill-rule enum as boolean operations.
+- The C triangulation entry points apply Knipsa's fixed default path, vertex,
+  and edge-pair budgets before quadratic topology validation. Inputs over those
+  budgets return `KNIPSA_STATUS_INVALID_ARGUMENT`; the C ABI has no unbounded
+  triangulation path.
 - ABI additions are versioned. Existing fields and enum values are never
   repurposed.
 

@@ -8,33 +8,37 @@
 queries, and triangulation. It has a safe Rust API and a small C-compatible
 library for applications written in other languages.
 
-The current release line is `0.2`. The Rust API is still `0.x`, so breaking
-changes remain possible before `1.0`; patch releases preserve the `0.2` API.
+The current published release line is `0.2`; patch releases preserve its API.
+The `main` branch is preparing the intentionally breaking `0.3` API documented
+below. Knipsa remains pre-1.0, so later minor releases may also break APIs.
 
 ## Quick start
 
-From crates.io:
+For the current `main` API:
 
 ```sh
-cargo add knipsa@0.2
+cargo add knipsa --git https://github.com/Mik-pe/knipsa
 ```
 
-Projects already using `geo-types` can enable zero-policy conversion helpers:
+The published `0.2` line remains available with `cargo add knipsa@0.2`; use its
+versioned docs until `0.3` is released. Projects using current `main` with
+`geo-types` can enable zero-policy conversion helpers:
 
 ```sh
-cargo add knipsa@0.2 --features geo-types
+cargo add knipsa --git https://github.com/Mik-pe/knipsa --features geo-types
 ```
 
 The `knipsa::geo_types` module converts `LineString` and `Polygon` values while
 making ring closure explicit. It does not guess nesting across independent
-polygons.
+polygons; use `build_polygons64` or `build_polygons_d` first when starting from
+a flat collection of nested rings.
 
 Enable `serde` to serialize and deserialize points, rectangles, enums,
 options, resource limits, and structured errors. Since paths are ordinary
 vectors, `Path64`, `PathD`, and triangle collections then work automatically:
 
 ```sh
-cargo add knipsa@0.2 --features serde
+cargo add knipsa --git https://github.com/Mik-pe/knipsa --features serde
 ```
 
 Serialized enum variants use explicit `snake_case` names.
@@ -91,9 +95,9 @@ The configurable Boolean entry points are `boolean_op` and `boolean_op_d`.
 | Locate a malformed path or coordinate | `validate_paths64_located` or `validate_paths_d_located` |
 | One polygon or polyline offset | `offset_path64` or `offset_path_d` |
 | Polygon or polyline offset collections | `offset_paths64` or `offset_paths_d` |
-| A single polygon's triangles | `triangulate_path64` or `triangulate_path_d` |
-| Multiple rings, holes, or islands | `triangulate64` or `triangulate_d` |
-| Untrusted triangulation input | `triangulate64_with_limits` or `triangulate_d_with_limits` |
+| A single polygon's triangles | `triangulate_path64` or `triangulate_path_d`, with explicit limits |
+| Multiple rings, holes, or islands | `triangulate64` or `triangulate_d`, with explicit limits |
+| Explicit polygon and hole ownership | `build_polygons64` or `build_polygons_d` |
 | Integer point-in-polygon queries | `point_in_polygon` |
 
 Integer operations preserve integer coordinates. The floating-point boolean
@@ -138,13 +142,16 @@ need to choose a fast path or an epsilon policy.
   `Round` handle open polylines.
 - Triangulation returns counter-clockwise triangles and supports nested holes
   and islands.
-- `TriangulationLimits::DEFAULT` bounds path count, total vertices, and the
-  conservative edge-pair workload before quadratic validation begins. The
-  original entry points remain unlimited for backward compatibility.
+- Polygon builders turn flat ring collections into counter-clockwise outer
+  rings with owned clockwise holes; nested islands become separate polygons.
+- Every triangulation call requires `TriangulationLimits`; `DEFAULT` bounds path
+  count, total vertices, and the conservative edge-pair workload before
+  quadratic validation begins. There is no unbounded public path.
 
-Every fallible operation returns `knipsa::Error`, so callers can handle bad
-paths, non-finite coordinates, overflow, and topology failures without a
-panic. Applications that need input locations can run the `_located`
+Geometry operations return `knipsa::Error`; triangulation returns
+`knipsa::TriangulationError`, so callers can distinguish exceeded resource
+budgets from bad paths, non-finite coordinates, overflow, and topology failures
+without a panic. Applications that need input locations can run the `_located`
 collection validators first and receive `PathValidationError` with stable path
 and optional point indices.
 
@@ -198,6 +205,8 @@ See [`CHANGELOG.md`](https://github.com/Mik-pe/knipsa/blob/main/CHANGELOG.md) fo
 release notes,
 [`docs/migrating-0.2.md`](https://github.com/Mik-pe/knipsa/blob/main/docs/migrating-0.2.md)
 for the intentionally breaking `0.1` to `0.2` API changes,
+[`docs/migrating-0.3.md`](https://github.com/Mik-pe/knipsa/blob/main/docs/migrating-0.3.md)
+for the deletion-first next-minor API changes,
 [`docs/release-scope-0.2.md`](https://github.com/Mik-pe/knipsa/blob/main/docs/release-scope-0.2.md)
 for the 0.2 compatibility contract and known gaps, and
 [`docs/releasing.md`](https://github.com/Mik-pe/knipsa/blob/main/docs/releasing.md)

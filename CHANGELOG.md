@@ -6,6 +6,28 @@ minor releases before `1.0`.
 
 ## [Unreleased]
 
+### Added
+
+- `build_polygons64` and `build_polygons_d` convert flat nested rings into
+  strongly typed `Polygon64` and `PolygonD` values with canonical winding and
+  explicit hole ownership; triangulation now reuses the same topology model.
+
+### Changed
+
+- All four public Rust triangulation functions now require
+  `TriangulationLimits` and return `TriangulationError`, so resource preflight
+  cannot be bypassed accidentally.
+- The optional `geo-types` conversions now exchange `Polygon64` and `PolygonD`
+  values instead of flattening exterior and interior rings into paths.
+
+### Removed
+
+- The unbounded Rust triangulation path, `TriangulationLimits::UNLIMITED`, and
+  the duplicate `triangulate64_with_limits` and `triangulate_d_with_limits`
+  function family.
+- The flat `geo-types` polygon helper family, replaced by conversions that
+  preserve explicit hole ownership.
+
 ## [0.2.1] - 2026-08-08
 
 ### Changed

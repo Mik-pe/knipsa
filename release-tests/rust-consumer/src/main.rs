@@ -1,9 +1,9 @@
 use knipsa::{
-    BooleanRequestD, ClipType, FillRule, JoinType, OffsetOptions, PathKind, PointD, boolean_op_d,
-    normalize_path_d, offset_path_d, triangulate_path_d,
+    BooleanRequestD, ClipType, FillRule, JoinType, OffsetOptions, PathKind, PointD,
+    TriangulationLimits, boolean_op_d, normalize_path_d, offset_path_d, triangulate_path_d,
 };
 
-fn main() -> Result<(), knipsa::Error> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ring = vec![
         PointD::new(0.0, 0.0),
         PointD::new(10.0, 0.0),
@@ -20,7 +20,7 @@ fn main() -> Result<(), knipsa::Error> {
         FillRule::EvenOdd,
     ))?;
     let offset = offset_path_d(&ring, 1.0, OffsetOptions::polygon(JoinType::Miter))?;
-    let triangles = triangulate_path_d(&ring)?;
+    let triangles = triangulate_path_d(&ring, TriangulationLimits::DEFAULT)?;
 
     assert_eq!(union.len(), 1);
     assert_eq!(offset.len(), 1);

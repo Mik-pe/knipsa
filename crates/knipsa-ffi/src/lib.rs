@@ -14,10 +14,10 @@ use std::cell::Cell;
 
 use knipsa::{
     BooleanRequest, BooleanRequestD, ClipType, EndType, Error, FillRule, JoinType, OffsetOptions,
-    Path64, PathD, PathKind, Point64, PointD, PointLocation, Rect64, RectD, boolean_op,
-    boolean_op_d, clip_to_rect_d, clip_to_rect64, offset_paths_d, point_in_polygon,
-    simplify_paths_d, simplify_paths64, triangulate_d, triangulate64, validate_paths_d,
-    validate_paths64,
+    Path64, PathD, PathKind, Point64, PointD, PointLocation, Rect64, RectD, TriangulationError,
+    TriangulationLimits, boolean_op, boolean_op_d, clip_to_rect_d, clip_to_rect64, offset_paths_d,
+    point_in_polygon, simplify_paths_d, simplify_paths64, triangulate_d, triangulate64,
+    validate_paths_d, validate_paths64,
 };
 
 /// A fixed-layout integer point for FFI callers.
@@ -903,11 +903,11 @@ pub extern "C" fn knipsa_triangulate64(
         #[cfg(test)]
         test_panic_if_requested();
         let paths = copy_paths64(paths, path_count)?;
-        triangulate64(&paths, fill_rule)
+        triangulate64(&paths, fill_rule, TriangulationLimits::DEFAULT)
             .map(|triangles| {
                 triangles.into_iter().map(|triangle| triangle.into_iter().collect()).collect()
             })
-            .map_err(|error| status_from_error(&error))
+            .map_err(|error| status_from_triangulation_error(&error))
     }));
     match operation {
         Ok(Ok(paths)) => {
@@ -956,11 +956,11 @@ pub extern "C" fn knipsa_triangulate_d(
         #[cfg(test)]
         test_panic_if_requested();
         let paths = copy_paths_d(paths, path_count)?;
-        triangulate_d(&paths, fill_rule)
+        triangulate_d(&paths, fill_rule, TriangulationLimits::DEFAULT)
             .map(|triangles| {
                 triangles.into_iter().map(|triangle| triangle.into_iter().collect()).collect()
             })
-            .map_err(|error| status_from_error(&error))
+            .map_err(|error| status_from_triangulation_error(&error))
     }));
     match operation {
         Ok(Ok(paths)) => {
@@ -1100,6 +1100,13 @@ fn status_from_error(error: &Error) -> KnipsaStatus {
         Error::InvalidOffset => KnipsaStatus::InvalidOffset,
         Error::TriangulationFailure => KnipsaStatus::TriangulationFailure,
         Error::IntersectingPaths => KnipsaStatus::IntersectingPaths,
+    }
+}
+
+fn status_from_triangulation_error(error: &TriangulationError) -> KnipsaStatus {
+    match error {
+        TriangulationError::Geometry(error) => status_from_error(error),
+        TriangulationError::LimitExceeded { .. } => KnipsaStatus::InvalidArgument,
     }
 }
 
@@ -1624,6 +1631,14 @@ mod tests {
             KnipsaStatus::TriangulationFailure
         );
         assert_eq!(status_from_error(&Error::IntersectingPaths), KnipsaStatus::IntersectingPaths);
+        assert_eq!(
+            status_from_triangulation_error(&TriangulationError::LimitExceeded {
+                resource: knipsa::TriangulationResource::Paths,
+                limit: 0,
+                required: 1,
+            }),
+            KnipsaStatus::InvalidArgument
+        );
     }
 
     #[test]

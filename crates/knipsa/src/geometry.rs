@@ -72,7 +72,7 @@ pub type PathsD = Vec<PathD>;
 
 #[allow(clippy::cast_precision_loss)]
 pub(crate) fn paths64_to_local_d(paths: &[Path64]) -> Result<(Point64, PathsD), Error> {
-    let origin = paths.iter().find_map(|path| path.first()).copied().unwrap_or(Point64::new(0, 0));
+    let origin = integer_frame_origin(paths);
     let mut local = Vec::with_capacity(paths.len());
     for path in paths {
         let mut local_path = Vec::with_capacity(path.len());
@@ -85,6 +85,18 @@ pub(crate) fn paths64_to_local_d(paths: &[Path64]) -> Result<(Point64, PathsD), 
         local.push(local_path);
     }
     Ok((origin, local))
+}
+
+fn integer_frame_origin(paths: &[Path64]) -> Point64 {
+    let Some(first) = paths.iter().flatten().next().copied() else {
+        return Point64::new(0, 0);
+    };
+    let (mut min_x, mut min_y) = (first.x, first.y);
+    for point in paths.iter().flatten() {
+        min_x = min_x.min(point.x);
+        min_y = min_y.min(point.y);
+    }
+    Point64::new(min_x, min_y)
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -737,6 +749,7 @@ mod tests {
 
     #[test]
     fn converts_integer_paths_in_one_exact_local_coordinate_frame() {
+        assert_eq!(paths64_to_local_d(&[]), Ok((Point64::new(0, 0), Vec::new())));
         let origin = i64::MAX - 100;
         let paths = [vec![
             Point64::new(origin, origin),
@@ -746,6 +759,29 @@ mod tests {
         let (actual_origin, local) = paths64_to_local_d(&paths).unwrap();
         assert_eq!(actual_origin, Point64::new(origin, origin));
         assert_eq!(local[0][2], PointD::new(10.0, 20.0));
+
+        let exact_limit = 1_i64 << 53;
+        let ring = vec![
+            Point64::new(-exact_limit, 0),
+            Point64::new(0, exact_limit),
+            Point64::new(exact_limit, 0),
+        ];
+        for start in 0..ring.len() {
+            let mut rotated = ring.clone();
+            rotated.rotate_left(start);
+            assert_eq!(
+                paths64_to_local_d(&[rotated]),
+                Err(Error::ArithmeticOverflow),
+                "ring start {start}"
+            );
+        }
+
+        let within_exact_span = [vec![
+            Point64::new(-exact_limit / 2, 0),
+            Point64::new(0, exact_limit / 2),
+            Point64::new(exact_limit / 2, 0),
+        ]];
+        assert!(paths64_to_local_d(&within_exact_span).is_ok());
 
         let excessive_span =
             [vec![Point64::new(i64::MIN, 0), Point64::new(i64::MAX, 0), Point64::new(0, 1)]];
