@@ -25,6 +25,6 @@ fn main() -> Result<(), knipsa::Error> {
     assert_eq!(union.len(), 1);
     assert_eq!(offset.len(), 1);
     assert_eq!(triangles.len(), 2);
-    assert_eq!(knipsa::API_VERSION, "0.2.0");
+    assert_eq!(knipsa::API_VERSION, "0.2.1");
     Ok(())
 }

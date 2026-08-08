@@ -11,8 +11,8 @@ int main(void) {
 
   assert(KNIPSA_VERSION_MAJOR == 0);
   assert(KNIPSA_VERSION_MINOR == 2);
-  assert(KNIPSA_VERSION_PATCH == 0);
-  assert(strcmp(knipsa_version(), "0.2.0") == 0);
+  assert(KNIPSA_VERSION_PATCH == 1);
+  assert(strcmp(knipsa_version(), "0.2.1") == 0);
   assert(knipsa_validate_paths64(&path, 1, KNIPSA_PATH_CLOSED) == KNIPSA_STATUS_OK);
   assert(knipsa_point_in_polygon64(path, (KnipsaPoint64){1, 1}, &location) ==
          KNIPSA_STATUS_OK);

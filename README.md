@@ -19,6 +19,26 @@ From crates.io:
 cargo add knipsa@0.2
 ```
 
+Projects already using `geo-types` can enable zero-policy conversion helpers:
+
+```sh
+cargo add knipsa@0.2 --features geo-types
+```
+
+The `knipsa::geo_types` module converts `LineString` and `Polygon` values while
+making ring closure explicit. It does not guess nesting across independent
+polygons.
+
+Enable `serde` to serialize and deserialize points, rectangles, enums,
+options, resource limits, and structured errors. Since paths are ordinary
+vectors, `Path64`, `PathD`, and triangle collections then work automatically:
+
+```sh
+cargo add knipsa@0.2 --features serde
+```
+
+Serialized enum variants use explicit `snake_case` names.
+
 Boolean operations work directly on ordinary Rust vectors:
 
 ```rust
@@ -68,10 +88,12 @@ The configurable Boolean entry points are `boolean_op` and `boolean_op_d`.
 | Clean self-intersections or internal boundaries | `simplify_paths64` or `simplify_paths_d` |
 | Clip paths to an axis-aligned rectangle | `clip_to_rect64` or `clip_to_rect_d` |
 | Remove redundant collinear vertices | `trim_collinear64` or `trim_collinear_d` |
+| Locate a malformed path or coordinate | `validate_paths64_located` or `validate_paths_d_located` |
 | One polygon or polyline offset | `offset_path64` or `offset_path_d` |
 | Polygon or polyline offset collections | `offset_paths64` or `offset_paths_d` |
 | A single polygon's triangles | `triangulate_path64` or `triangulate_path_d` |
 | Multiple rings, holes, or islands | `triangulate64` or `triangulate_d` |
+| Untrusted triangulation input | `triangulate64_with_limits` or `triangulate_d_with_limits` |
 | Integer point-in-polygon queries | `point_in_polygon` |
 
 Integer operations preserve integer coordinates. The floating-point boolean
@@ -116,10 +138,15 @@ need to choose a fast path or an epsilon policy.
   `Round` handle open polylines.
 - Triangulation returns counter-clockwise triangles and supports nested holes
   and islands.
+- `TriangulationLimits::DEFAULT` bounds path count, total vertices, and the
+  conservative edge-pair workload before quadratic validation begins. The
+  original entry points remain unlimited for backward compatibility.
 
 Every fallible operation returns `knipsa::Error`, so callers can handle bad
 paths, non-finite coordinates, overflow, and topology failures without a
-panic.
+panic. Applications that need input locations can run the `_located`
+collection validators first and receive `PathValidationError` with stable path
+and optional point indices.
 
 ## C and other languages
 

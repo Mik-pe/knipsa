@@ -8,6 +8,8 @@ use crate::{Error, Path64, PathD, PathKind, Paths64, PathsD, validate_path_d, va
 /// collections are valid and make the operation behave like the corresponding
 /// set operation with an empty side.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[repr(u8)]
 pub enum ClipType {
     /// Keep the region present in both inputs.
@@ -25,6 +27,8 @@ pub enum ClipType {
 /// `EvenOdd` depends only on crossing parity. The other rules use the signed
 /// winding accumulated by a path, which makes ring orientation meaningful.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[repr(u8)]
 pub enum FillRule {
     /// Alternate parity at every crossing.

@@ -725,10 +725,9 @@ fn run<P: PathSlice>(
             && path_properties[0].convex
             && fill_rule_accepts_ring(subjects[0].points(), fill_rule)
             && fill_rule_accepts_ring(points, fill_rule)
+            && let Some(result) = convex_boolean(subjects[0].points(), points, clip_type, None)
         {
-            if let Some(result) = convex_boolean(subjects[0].points(), points, clip_type, None) {
-                return Ok(result);
-            }
+            return Ok(result);
         }
         append_path_edges(&mut edges, points, path_id, false);
     }
@@ -986,12 +985,11 @@ fn convex_boolean(
     } else {
         None
     };
-    if clip_type == ClipType::Intersection {
-        if let Some(walk) = linear_walk.as_ref() {
-            if !walk.degenerate || valid_convex_intersection(&walk.output, subject, clip) {
-                return Some(walk.output.clone());
-            }
-        }
+    if clip_type == ClipType::Intersection
+        && let Some(walk) = linear_walk.as_ref()
+        && (!walk.degenerate || valid_convex_intersection(&walk.output, subject, clip))
+    {
+        return Some(walk.output.clone());
     }
     // The linear split hints are not yet safe for every convex topology
     // (notably axis-aligned overlap and shared-edge cases). Keep the full
@@ -1690,23 +1688,23 @@ fn path_edges(path: &[Point]) -> Vec<Edge> {
 
 fn append_path_edges(edges: &mut Vec<Edge>, path: &[Point], path_id: usize, subject: bool) {
     path.iter().zip(path.iter().cycle().skip(1)).take(path.len()).for_each(|(start, end)| {
-        if let (Some(start_key), Some(end_key)) = (key(*start), key(*end)) {
-            if start_key != end_key {
-                edges.push(Edge {
-                    start: *start,
-                    end: *end,
-                    start_key,
-                    end_key,
-                    path_id,
-                    subject,
-                    min_x: start.x.min(end.x),
-                    min_y: start.y.min(end.y),
-                    max_x: start.x.max(end.x),
-                    max_y: start.y.max(end.y),
-                    min_x_key: total_order_key(start.x.min(end.x)),
-                    max_x_key: total_order_key(start.x.max(end.x)),
-                });
-            }
+        if let (Some(start_key), Some(end_key)) = (key(*start), key(*end))
+            && start_key != end_key
+        {
+            edges.push(Edge {
+                start: *start,
+                end: *end,
+                start_key,
+                end_key,
+                path_id,
+                subject,
+                min_x: start.x.min(end.x),
+                min_y: start.y.min(end.y),
+                max_x: start.x.max(end.x),
+                max_y: start.y.max(end.y),
+                min_x_key: total_order_key(start.x.min(end.x)),
+                max_x_key: total_order_key(start.x.max(end.x)),
+            });
         }
     });
 }

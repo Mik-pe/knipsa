@@ -81,12 +81,18 @@ The JTS adapter constructs and repairs geometries before timing, then measures
 decoding are excluded. JTS and GEOS remain one algorithm lineage.
 
 The integer triangulation comparison measures `triangulate64` against
-Clipper2's native `Paths64` Delaunay entry point. Correctness is checked from
-the emitted triangles rather than internal diagonals: both partitions must
-have exact area and boundary, no degenerate triangles, and no positive-area
-triangle overlap. Clipper2 triangulation is currently the sole external family
-in that feature profile, so the report is a pinned pairwise comparison rather
-than a broad consensus oracle.
+Clipper2's native `Paths64` Delaunay entry point and `geo` 0.33.1 backed by the
+independent Spade 2.15.1 constrained-Delaunay implementation. Correctness is
+checked from the emitted triangles rather than internal diagonals: every
+partition must have exact area and boundary, no degenerate triangles, and no
+positive-area triangle overlap. Passing both remains a bounded pinned matrix,
+not universal triangulation conformance.
+
+The floating-point triangulation profile measures `triangulate_d` against a
+scale-normalized `geo`/Spade adapter over eight cases spanning `1e-12` through
+`1e12`. Both outputs are restored to caller coordinates and then independently
+validated in a shared unit frame. Clipper2 `PathsD` is not included in this
+profile because its triangulator clamps decimal precision to eight places.
 
 ## Result policy
 

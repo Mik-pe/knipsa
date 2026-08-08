@@ -16,8 +16,15 @@ categories = ["algorithms", "graphics", "mathematics"]
 
 [dependencies]
 earcutr = "0.5.0"
+geo-types = { version = "0.7.20", optional = true, default-features = false }
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
+serde = { version = "1.0.219", optional = true, features = ["derive"] }
+
+[features]
+default = []
+geo-types = ["dep:geo-types"]
+serde = ["dep:serde"]
 
 [dev-dependencies]
 serde = { version = "1.0.219", features = ["derive"] }
@@ -33,6 +40,10 @@ harness = false
 
 [[bench]]
 name = "triangulation_workload"
+harness = false
+
+[[bench]]
+name = "triangulation_d_workload"
 harness = false
 
 [lints]

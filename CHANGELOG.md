@@ -6,6 +6,28 @@ minor releases before `1.0`.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-08
+
+### Changed
+
+- The minimum supported Rust version is now 1.97.
+- Floating-point triangulation now evaluates topology in a shared normalized
+  coordinate frame, making results invariant across practical scales and
+  translations while preserving the caller's original coordinates.
+- The triangulation conformance profile now validates every case against both
+  Clipper2 and the independent `geo`/Spade constrained-Delaunay implementation.
+- A separately gated floating-point triangulation matrix now covers scale and
+  translation from `1e-12` through `1e12` against normalized `geo`/Spade.
+- New opt-in bounded triangulation entry points preflight path, vertex, and
+  edge-pair budgets for services that accept untrusted geometry.
+- The optional `geo-types` feature provides explicit `LineString` and `Polygon`
+  conversions for integer and floating-point paths.
+- Located collection validators now return `PathValidationError` with the
+  failing path and optional vertex index without changing existing errors.
+- The optional `serde` feature supports round-trip serialization for public
+  points, rectangles, enums, options, limits, and structured errors. Enum
+  variants use explicit `snake_case` names in serialized formats.
+
 ## [0.2.0] - 2026-08-08
 
 ### Added
@@ -42,5 +64,6 @@ minor releases before `1.0`.
   scope and deferred capabilities are recorded in
   [`docs/release-scope-0.2.md`](docs/release-scope-0.2.md).
 
-[Unreleased]: https://github.com/Mik-pe/knipsa/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Mik-pe/knipsa/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Mik-pe/knipsa/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Mik-pe/knipsa/compare/v0.1.1...v0.2.0

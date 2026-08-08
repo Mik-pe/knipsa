@@ -51,6 +51,21 @@ class ValidateTriangulationTests(unittest.TestCase):
             (False, "non-integer triangulate64 output"),
         )
 
+    def test_accepts_scale_normalized_floating_partition(self):
+        case = {"paths": [[[0.0, 0.0], [1e-12, 0.0], [1e-12, 1e-12], [0.0, 1e-12]]]}
+        record = self.record([
+            [[0.0, 0.0], [1e-12, 0.0], [1e-12, 1e-12]],
+            [[0.0, 0.0], [1e-12, 1e-12], [0.0, 1e-12]],
+        ])
+        self.assertTrue(MODULE.validate(case, record, "f64")[0])
+
+    def test_rejects_non_finite_floating_output(self):
+        record = self.record([[[0.0, 0.0], [10.0, 0.0], [float("nan"), 10.0]]])
+        self.assertEqual(
+            MODULE.validate(self.case, record, "f64"),
+            (False, "non-finite triangulate_d output"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

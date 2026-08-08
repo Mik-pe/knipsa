@@ -40,10 +40,14 @@ profile instead of being reimplemented for integers.
 
 Feature gates use their own semantic comparators. `make conformance-offset`
 checks region area and bidirectional boundary distance against Clipper2.
-`make conformance-triangulation` checks 12 integer cases against Clipper2 and
-accepts different internal diagonals only after proving non-degenerate,
+`make conformance-triangulation` checks 12 integer cases against both Clipper2
+and the independent `geo`/Spade constrained-Delaunay family. It accepts
+different internal diagonals only after proving non-degenerate,
 interior-disjoint triangles, exact total area, and complete input-boundary
 reconstruction.
+`make conformance-triangulation-d` separately checks eight scale-normalized
+floating-point cases against `geo`/Spade, including tiny, huge, fractional,
+thin, holed, and translated inputs.
 
 ### 4. Algebraic property tests
 
@@ -77,6 +81,10 @@ seed without mutating the corpus; longer exploratory campaigns are separate.
 Integer and floating-point boolean targets assert output validity,
 adjacent-vertex normalization, and operand-order invariance for commutative
 operations.
+
+Budgeted triangulation tests also prove that path, vertex, and conservative
+edge-pair limits reject requests during linear preflight, before pairwise edge
+validation or backend allocation.
 
 ### 7. FFI tests
 

@@ -26,6 +26,8 @@ const ORIENTATION_ERROR_BOUND: f64 = (3.0 + 16.0 * f64::EPSILON) * f64::EPSILON;
 ///
 /// The selected join is applied to the outer side of each generated outline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[repr(u8)]
 pub enum JoinType {
     /// A square corner whose outer extent is capped at roughly two radii.
@@ -43,6 +45,8 @@ pub enum JoinType {
 /// [`EndType::Polygon`] is the only closed-path mode. The other variants
 /// create a stroked outline around an open polyline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 #[repr(u8)]
 pub enum EndType {
     /// Treat each path as a closed polygon.
@@ -62,6 +66,7 @@ pub enum EndType {
 /// `OffsetOptions::default()` produces round joins for closed polygons. For
 /// an open path, choose one of the non-`Polygon` [`EndType`] variants.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OffsetOptions {
     /// Corner style for generated outlines.
     pub join_type: JoinType,

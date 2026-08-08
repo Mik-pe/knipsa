@@ -1,13 +1,11 @@
-use std::{env, fs, hint::black_box, time::Instant};
+use std::{convert::Infallible, env, fs};
 
 use geo::algorithm::bool_ops::{FillRule, OpType};
 use geo::{BooleanOps, Coord, LineString, MultiPolygon, Polygon};
+use knipsa_geo_reference::benchmark_protocol::{
+    MIN_SAMPLE_TIME_NS, SAMPLE_RUNS, WARMUP_RUNS, measure,
+};
 use serde::{Deserialize, Serialize};
-
-const WARMUP_RUNS: usize = 3;
-const SAMPLE_RUNS: usize = 25;
-const MIN_SAMPLE_TIME_NS: u128 = 2_000_000;
-const MAX_ITERATIONS_PER_SAMPLE: usize = 1 << 20;
 
 #[derive(Deserialize)]
 struct Workload {
@@ -52,36 +50,10 @@ fn main() {
         let operation = operation(&case.clip_type);
         let fill_rule = fill_rule(&case.fill_rule);
 
-        for _ in 0..WARMUP_RUNS {
-            black_box(subjects.boolean_op_with_fill_rule(&clips, operation, fill_rule));
-        }
-
-        let mut output = MultiPolygon::empty();
-        let mut iterations_per_sample = 1;
-        loop {
-            let started = Instant::now();
-            for _ in 0..iterations_per_sample {
-                output =
-                    black_box(subjects.boolean_op_with_fill_rule(&clips, operation, fill_rule));
-            }
-            if started.elapsed().as_nanos() >= MIN_SAMPLE_TIME_NS
-                || iterations_per_sample == MAX_ITERATIONS_PER_SAMPLE
-            {
-                break;
-            }
-            iterations_per_sample = (iterations_per_sample * 2).min(MAX_ITERATIONS_PER_SAMPLE);
-        }
-
-        let mut timings = Vec::with_capacity(SAMPLE_RUNS);
-        for _ in 0..SAMPLE_RUNS {
-            let started = Instant::now();
-            for _ in 0..iterations_per_sample {
-                output =
-                    black_box(subjects.boolean_op_with_fill_rule(&clips, operation, fill_rule));
-            }
-            timings.push(started.elapsed().as_nanos() / iterations_per_sample as u128);
-        }
-        timings.sort_unstable();
+        let measured = measure(|| {
+            Ok::<_, Infallible>(subjects.boolean_op_with_fill_rule(&clips, operation, fill_rule))
+        })
+        .expect("the geo Boolean operation is infallible");
 
         println!(
             "{}",
@@ -89,11 +61,11 @@ fn main() {
                 id: case.id,
                 status: "ok",
                 error: None,
-                median_ns: timings[timings.len() / 2],
-                p95_ns: timings[(timings.len() * 95).div_ceil(100) - 1],
-                iterations_per_sample,
-                ring_count: ring_count(&output),
-                signature: signature(&output),
+                median_ns: measured.median_ns,
+                p95_ns: measured.p95_ns,
+                iterations_per_sample: measured.iterations_per_sample,
+                ring_count: ring_count(&measured.output),
+                signature: signature(&measured.output),
             })
             .expect("serializable benchmark result")
         );

@@ -26,11 +26,14 @@ crate can be verified or published.
 Create and push the annotated tag only after the release commit is green:
 
 ```sh
-git tag -a v0.2.0 -m "knipsa 0.2.0"
-git push origin v0.2.0
+release_version=$(cargo metadata --no-deps --format-version 1 \
+  | jq -r '.packages[] | select(.name == "knipsa") | .version')
+git tag -a "v$release_version" -m "knipsa $release_version"
+git push origin "v$release_version"
 ```
 
-Dispatch the `Publish crates.io` workflow from that exact tag, enter `0.2.0`,
+Dispatch the `Publish crates.io` workflow from that exact tag, enter the exact
+workspace version,
 and confirm `publish`. The protected `crates-io` environment must contain a
 `CARGO_REGISTRY_TOKEN` secret and should require approval.
 
@@ -38,14 +41,14 @@ The workflow publishes `knipsa`, waits until crates.io reports the exact
 version, performs a real FFI dry-run against the registry dependency, and then
 publishes `knipsa-ffi`. Cargo does not permit overwriting a published version;
 if the second publish fails, fix the release workflow or registry state without
-re-tagging different source as `v0.2.0`.
+re-tagging different source as the same version.
 
 The same ordered release can be performed locally when Cargo is already logged
 in:
 
 ```sh
 cargo publish --locked -p knipsa
-cargo info knipsa@0.2.0
+cargo info "knipsa@$release_version"
 cargo publish --dry-run --locked -p knipsa-ffi
 cargo publish --locked -p knipsa-ffi
 ```
@@ -56,6 +59,6 @@ version.
 ## Verify
 
 After publication, create a new empty project with no workspace patches, add
-`knipsa@0.2.0`, run the README example, and check the generated docs on
+the exact released `knipsa` version, run the README example, and check the generated docs on
 docs.rs. Repeat for `knipsa-ffi` and verify that its packaged header reports the
 same version as `knipsa_version()`.

@@ -11,6 +11,7 @@ use crate::{
     geometry::{paths64_to_local_d, signed_area2_d},
     trim_collinear_d,
 };
+use core::fmt;
 
 const EPSILON: f64 = 1e-12;
 
@@ -25,6 +26,115 @@ pub type Triangle64 = [Point64; 3];
 /// Returned triangles are oriented counter-clockwise and can be consumed as
 /// three-point closed paths.
 pub type TriangleD = [PointD; 3];
+
+/// Resources that can be bounded before triangulation begins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
+pub enum TriangulationResource {
+    /// Number of input paths.
+    Paths,
+    /// Total number of input vertices.
+    Vertices,
+    /// Conservative number of non-adjacent edge pairs examined for intersections.
+    EdgePairs,
+}
+
+/// Explicit input-complexity limits for untrusted triangulation requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TriangulationLimits {
+    paths: usize,
+    vertices: usize,
+    edge_pairs: usize,
+}
+
+impl TriangulationLimits {
+    /// A production-oriented starting point for untrusted requests.
+    pub const DEFAULT: Self = Self::new(1_024, 1_000_000, 4_000_000);
+
+    /// No preflight resource limits, matching the original triangulation API.
+    pub const UNLIMITED: Self = Self::new(usize::MAX, usize::MAX, usize::MAX);
+
+    /// Creates a limit set. A zero limit rejects any use of that resource.
+    #[must_use]
+    pub const fn new(max_paths: usize, max_vertices: usize, max_edge_pairs: usize) -> Self {
+        Self { paths: max_paths, vertices: max_vertices, edge_pairs: max_edge_pairs }
+    }
+
+    /// Maximum number of input paths.
+    #[must_use]
+    pub const fn max_paths(self) -> usize {
+        self.paths
+    }
+
+    /// Maximum total number of input vertices.
+    #[must_use]
+    pub const fn max_vertices(self) -> usize {
+        self.vertices
+    }
+
+    /// Maximum conservative number of non-adjacent edge pairs.
+    #[must_use]
+    pub const fn max_edge_pairs(self) -> usize {
+        self.edge_pairs
+    }
+}
+
+impl Default for TriangulationLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Error from a triangulation request with explicit resource limits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
+pub enum TriangulationError {
+    /// Normal geometry validation or execution failed.
+    Geometry(Error),
+    /// Preflight rejected the request before quadratic intersection work began.
+    LimitExceeded {
+        /// Resource whose required amount exceeded the configured limit.
+        resource: TriangulationResource,
+        /// Configured maximum.
+        limit: usize,
+        /// Conservative required amount, saturated at [`usize::MAX`].
+        required: usize,
+    },
+}
+
+impl fmt::Display for TriangulationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Geometry(error) => error.fmt(formatter),
+            Self::LimitExceeded { resource, limit, required } => {
+                write!(
+                    formatter,
+                    "triangulation requires {required} {resource:?}; limit is {limit}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for TriangulationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Geometry(error) => Some(error),
+            Self::LimitExceeded { .. } => None,
+        }
+    }
+}
+
+impl From<Error> for TriangulationError {
+    fn from(error: Error) -> Self {
+        Self::Geometry(error)
+    }
+}
 
 /// Triangulates a collection of integer-coordinate rings using a fill rule.
 ///
@@ -42,7 +152,36 @@ pub type TriangleD = [PointD; 3];
 /// cannot be triangulated.
 pub fn triangulate64(paths: &[Path64], fill_rule: FillRule) -> Result<Vec<Triangle64>, Error> {
     let (origin, paths_d) = paths64_to_local_d(paths)?;
-    let triangles = triangulate_d(&paths_d, fill_rule)?;
+    let triangles = triangulate_d_impl(&paths_d, fill_rule)?;
+    triangles64_from_d(triangles, origin)
+}
+
+/// Triangulates integer-coordinate rings after enforcing explicit input limits.
+///
+/// The preflight runs before integer-to-floating conversion or quadratic edge
+/// intersection checks. [`TriangulationLimits::DEFAULT`] is a conservative
+/// starting point; callers should tune it for their latency and memory budget.
+///
+/// # Errors
+///
+/// Returns [`TriangulationError::LimitExceeded`] when a configured resource
+/// budget is insufficient, otherwise wraps the same geometry errors as
+/// [`triangulate64`].
+pub fn triangulate64_with_limits(
+    paths: &[Path64],
+    fill_rule: FillRule,
+    limits: TriangulationLimits,
+) -> Result<Vec<Triangle64>, TriangulationError> {
+    check_limits(paths.iter().map(Vec::len), limits)?;
+    let (origin, paths_d) = paths64_to_local_d(paths)?;
+    let triangles = triangulate_d_impl(&paths_d, fill_rule)?;
+    Ok(triangles64_from_d(triangles, origin)?)
+}
+
+fn triangles64_from_d(
+    triangles: Vec<TriangleD>,
+    origin: Point64,
+) -> Result<Vec<Triangle64>, Error> {
     triangles
         .into_iter()
         .map(|triangle| {
@@ -67,6 +206,30 @@ pub fn triangulate64(paths: &[Path64], fill_rule: FillRule) -> Result<Vec<Triang
 /// for crossing rings, and [`Error::TriangulationFailure`] when the topology
 /// cannot be triangulated.
 pub fn triangulate_d(paths: &[PathD], fill_rule: FillRule) -> Result<Vec<TriangleD>, Error> {
+    triangulate_d_impl(paths, fill_rule)
+}
+
+/// Triangulates floating-point rings after enforcing explicit input limits.
+///
+/// This is intended for services processing untrusted or adversarially large
+/// geometry. Preflight is linear in the number of paths and rejects requests
+/// before any quadratic edge-pair work or backend allocation.
+///
+/// # Errors
+///
+/// Returns [`TriangulationError::LimitExceeded`] when a configured resource
+/// budget is insufficient, otherwise wraps the same geometry errors as
+/// [`triangulate_d`].
+pub fn triangulate_d_with_limits(
+    paths: &[PathD],
+    fill_rule: FillRule,
+    limits: TriangulationLimits,
+) -> Result<Vec<TriangleD>, TriangulationError> {
+    check_limits(paths.iter().map(Vec::len), limits)?;
+    Ok(triangulate_d_impl(paths, fill_rule)?)
+}
+
+fn triangulate_d_impl(paths: &[PathD], fill_rule: FillRule) -> Result<Vec<TriangleD>, Error> {
     let rings = collect_rings(paths)?;
     let groups = filled_groups(&rings, fill_rule);
     let mut result = Vec::new();
@@ -75,16 +238,29 @@ pub fn triangulate_d(paths: &[PathD], fill_rule: FillRule) -> Result<Vec<Triangl
         let mut coordinates = Vec::new();
         let mut vertices = Vec::new();
         let mut hole_indices = Vec::new();
-        append_ring(&rings[outer].path, &mut coordinates, &mut vertices);
+        let mut predicate_vertices = Vec::new();
+        append_ring(
+            &rings[outer].path,
+            &rings[outer].vertices,
+            &mut coordinates,
+            &mut predicate_vertices,
+            &mut vertices,
+        );
         for hole in holes {
             hole_indices.push(vertices.len());
-            append_ring(&rings[hole].path, &mut coordinates, &mut vertices);
+            append_ring(
+                &rings[hole].path,
+                &rings[hole].vertices,
+                &mut coordinates,
+                &mut predicate_vertices,
+                &mut vertices,
+            );
         }
         let indices = earcutr::earcut(&coordinates, &hole_indices, 2)
             .map_err(|_| Error::TriangulationFailure)?;
         validate_triangle_indices(&indices)?;
         for indices in indices.chunks_exact(3) {
-            push_oriented_triangle(&mut result, &vertices, indices);
+            push_oriented_triangle(&mut result, &vertices, &predicate_vertices, indices);
         }
         ensure_group_result(group_start, result.len(), !rings[outer].path.is_empty())?;
     }
@@ -117,10 +293,52 @@ pub fn triangulate_path_d(path: &[PointD]) -> Result<Vec<TriangleD>, Error> {
 
 #[derive(Clone, Debug)]
 struct Ring {
+    /// Coordinates in the shared, translation-free unit frame used by every
+    /// topology predicate and by earcut.
     path: PathD,
+    /// Original caller coordinates returned through the public API.
+    vertices: PathD,
     area: f64,
     parent: Option<usize>,
     probe: PointD,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CoordinateFrame {
+    origin: PointD,
+    scale: f64,
+}
+
+fn check_limits(
+    path_lengths: impl Iterator<Item = usize>,
+    limits: TriangulationLimits,
+) -> Result<(), TriangulationError> {
+    let mut paths = 0_usize;
+    let mut vertices = 0_usize;
+    let mut edge_pairs = 0_usize;
+    for length in path_lengths {
+        paths = paths.saturating_add(1);
+        edge_pairs = edge_pairs.saturating_add(vertices.saturating_mul(length));
+        if length >= 3 {
+            edge_pairs = edge_pairs.saturating_add(length.saturating_mul(length - 3) / 2);
+        }
+        vertices = vertices.saturating_add(length);
+    }
+    check_limit(TriangulationResource::Paths, paths, limits.paths)?;
+    check_limit(TriangulationResource::Vertices, vertices, limits.vertices)?;
+    check_limit(TriangulationResource::EdgePairs, edge_pairs, limits.edge_pairs)
+}
+
+fn check_limit(
+    resource: TriangulationResource,
+    required: usize,
+    limit: usize,
+) -> Result<(), TriangulationError> {
+    if required > limit {
+        Err(TriangulationError::LimitExceeded { resource, limit, required })
+    } else {
+        Ok(())
+    }
 }
 
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
@@ -143,7 +361,7 @@ fn point_d_to_64(point: PointD, origin: Point64) -> Result<Point64, Error> {
 }
 
 fn collect_rings(paths: &[PathD]) -> Result<Vec<Ring>, Error> {
-    let mut rings = Vec::new();
+    let mut cleaned_paths = Vec::new();
     for path in paths {
         let path = trim_collinear_d(path, crate::PathKind::Closed)?;
         if path.is_empty() {
@@ -152,26 +370,32 @@ fn collect_rings(paths: &[PathD]) -> Result<Vec<Ring>, Error> {
         if path.len() < 3 {
             return Err(Error::TriangulationFailure);
         }
+        cleaned_paths.push(path);
+    }
+    if cleaned_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let frame = CoordinateFrame::from_paths(&cleaned_paths)?;
+    let mut rings = Vec::with_capacity(cleaned_paths.len());
+    for vertices in cleaned_paths {
+        let path = frame.normalize_path(&vertices);
         let area = signed_area2_d(&path);
-        if !area.is_finite() {
-            return Err(Error::ArithmeticOverflow);
-        }
         if area.abs() <= EPSILON || self_intersects(&path) {
             return Err(Error::TriangulationFailure);
         }
         let probe = interior_probe(&path, area).ok_or(Error::TriangulationFailure)?;
-        rings.push(Ring { path, area, parent: None, probe });
+        rings.push(Ring { path, vertices, area, parent: None, probe });
     }
 
     for index in 0..rings.len() {
-        for other in 0..rings.len() {
-            if index == other {
-                continue;
-            }
+        for other in (index + 1)..rings.len() {
             if rings_intersect(&rings[index].path, &rings[other].path) {
                 return Err(Error::IntersectingPaths);
             }
         }
+    }
+    for index in 0..rings.len() {
         let mut parent: Option<usize> = None;
         for other in 0..rings.len() {
             if index == other || rings[other].area.abs() <= rings[index].area.abs() {
@@ -186,6 +410,39 @@ fn collect_rings(paths: &[PathD]) -> Result<Vec<Ring>, Error> {
         rings[index].parent = parent;
     }
     Ok(rings)
+}
+
+impl CoordinateFrame {
+    fn from_paths(paths: &[PathD]) -> Result<Self, Error> {
+        let origin = paths
+            .iter()
+            .find_map(|path| path.first().copied())
+            .ok_or(Error::TriangulationFailure)?;
+        let mut scale = 0.0_f64;
+        for point in paths.iter().flatten() {
+            let x = point.x - origin.x;
+            let y = point.y - origin.y;
+            if !x.is_finite() || !y.is_finite() {
+                return Err(Error::ArithmeticOverflow);
+            }
+            scale = scale.max(x.abs()).max(y.abs());
+        }
+        if scale == 0.0 {
+            return Err(Error::TriangulationFailure);
+        }
+        Ok(Self { origin, scale })
+    }
+
+    fn normalize_path(self, path: &[PointD]) -> PathD {
+        path.iter()
+            .map(|point| {
+                PointD::new(
+                    (point.x - self.origin.x) / self.scale,
+                    (point.y - self.origin.y) / self.scale,
+                )
+            })
+            .collect()
+    }
 }
 
 fn filled_groups(rings: &[Ring], fill_rule: FillRule) -> Vec<(usize, Vec<usize>)> {
@@ -237,7 +494,7 @@ fn nearest_outer_ancestor(ring: usize, rings: &[Ring], outer_rings: &[usize]) ->
 
 fn winding_value(ancestors: &[usize], rings: &[Ring], fill_rule: FillRule) -> i32 {
     match fill_rule {
-        FillRule::EvenOdd => i32::from(ancestors.len() % 2 != 0),
+        FillRule::EvenOdd => i32::from(!ancestors.len().is_multiple_of(2)),
         FillRule::NonZero | FillRule::Positive | FillRule::Negative => {
             ancestors.iter().map(|index| sign(rings[*index].area)).sum()
         }
@@ -251,7 +508,7 @@ fn winding_value_with_current(
     fill_rule: FillRule,
 ) -> i32 {
     match fill_rule {
-        FillRule::EvenOdd => i32::from(ancestors.len() % 2 == 0),
+        FillRule::EvenOdd => i32::from(ancestors.len().is_multiple_of(2)),
         FillRule::NonZero | FillRule::Positive | FillRule::Negative => {
             winding_value(ancestors, rings, fill_rule) + sign(rings[current].area)
         }
@@ -270,16 +527,26 @@ fn sign(value: f64) -> i32 {
     if value.is_sign_positive() { 1 } else { -1 }
 }
 
-fn append_ring(path: &[PointD], coordinates: &mut Vec<f64>, vertices: &mut Vec<PointD>) {
+fn append_ring(
+    path: &[PointD],
+    original: &[PointD],
+    coordinates: &mut Vec<f64>,
+    predicate_vertices: &mut Vec<PointD>,
+    vertices: &mut Vec<PointD>,
+) {
+    debug_assert_eq!(path.len(), original.len());
     coordinates.reserve(path.len() * 2);
-    for &point in path {
+    predicate_vertices.reserve(path.len());
+    vertices.reserve(original.len());
+    for (&point, &original_point) in path.iter().zip(original) {
         coordinates.extend([point.x, point.y]);
-        vertices.push(point);
+        predicate_vertices.push(point);
+        vertices.push(original_point);
     }
 }
 
 fn validate_triangle_indices(indices: &[usize]) -> Result<(), Error> {
-    if indices.len() % 3 != 0 { Err(Error::TriangulationFailure) } else { Ok(()) }
+    if indices.len().is_multiple_of(3) { Ok(()) } else { Err(Error::TriangulationFailure) }
 }
 
 fn ensure_group_result(
@@ -294,9 +561,17 @@ fn ensure_group_result(
     }
 }
 
-fn orient_triangle(vertices: &[PointD], indices: &[usize]) -> Option<TriangleD> {
+fn orient_triangle(
+    vertices: &[PointD],
+    predicate_vertices: &[PointD],
+    indices: &[usize],
+) -> Option<TriangleD> {
     let mut triangle = [vertices[indices[0]], vertices[indices[1]], vertices[indices[2]]];
-    let area = cross(triangle[1], triangle[2], triangle[0]);
+    let area = cross(
+        predicate_vertices[indices[1]],
+        predicate_vertices[indices[2]],
+        predicate_vertices[indices[0]],
+    );
     if area.abs() <= EPSILON {
         return None;
     }
@@ -306,8 +581,13 @@ fn orient_triangle(vertices: &[PointD], indices: &[usize]) -> Option<TriangleD> 
     Some(triangle)
 }
 
-fn push_oriented_triangle(result: &mut Vec<TriangleD>, vertices: &[PointD], indices: &[usize]) {
-    if let Some(triangle) = orient_triangle(vertices, indices) {
+fn push_oriented_triangle(
+    result: &mut Vec<TriangleD>,
+    vertices: &[PointD],
+    predicate_vertices: &[PointD],
+    indices: &[usize],
+) {
+    if let Some(triangle) = orient_triangle(vertices, predicate_vertices, indices) {
         result.push(triangle);
     }
 }
@@ -442,6 +722,10 @@ mod tests {
         cross(first, second, third)
     }
 
+    fn ring(area: f64, parent: Option<usize>) -> Ring {
+        Ring { path: Vec::new(), vertices: Vec::new(), area, parent, probe: PointD::new(0.0, 0.0) }
+    }
+
     #[test]
     fn triangulates_simple_polygon_and_preserves_ccw_winding() {
         let triangles = triangulate_path_d(&rectangle(0.0, 0.0, 10.0, 10.0)).unwrap();
@@ -454,6 +738,113 @@ mod tests {
         assert!(
             triangles.iter().all(|triangle| area2(triangle[0], triangle[1], triangle[2]) > 0.0)
         );
+    }
+
+    #[test]
+    fn floating_triangulation_is_scale_and_translation_invariant() {
+        for exponent in -12..=12 {
+            let scale = 10_f64.powi(exponent);
+            let triangles = triangulate_path_d(&rectangle(0.0, 0.0, scale, scale))
+                .expect("a uniformly scaled square should triangulate");
+            assert_eq!(triangles.len(), 2, "scale exponent {exponent}");
+            let normalized_area = triangles
+                .iter()
+                .map(|triangle| area2(triangle[0], triangle[1], triangle[2]).abs())
+                .sum::<f64>()
+                / scale.powi(2);
+            assert!((normalized_area - 2.0).abs() < 1e-12, "scale exponent {exponent}");
+        }
+
+        let origin = 1e12;
+        let translated =
+            triangulate_path_d(&rectangle(origin, origin, origin + 10.0, origin + 10.0))
+                .expect("translation should not alter triangulation topology");
+        assert_eq!(translated.len(), 2);
+        assert!(translated.iter().flatten().all(|point| point.x >= origin));
+        assert!(translated.iter().flatten().all(|point| point.y >= origin));
+    }
+
+    #[test]
+    fn bounded_triangulation_rejects_work_before_quadratic_checks() {
+        let rectangle_d = rectangle(0.0, 0.0, 10.0, 10.0);
+        let rectangle64 = vec![
+            Point64::new(0, 0),
+            Point64::new(10, 0),
+            Point64::new(10, 10),
+            Point64::new(0, 10),
+        ];
+        let exact = TriangulationLimits::new(1, 4, 2);
+        assert_eq!(exact.max_paths(), 1);
+        assert_eq!(exact.max_vertices(), 4);
+        assert_eq!(exact.max_edge_pairs(), 2);
+        assert_eq!(TriangulationLimits::default(), TriangulationLimits::DEFAULT);
+        assert_eq!(
+            triangulate_d_with_limits(std::slice::from_ref(&rectangle_d), FillRule::NonZero, exact)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            triangulate64_with_limits(std::slice::from_ref(&rectangle64), FillRule::NonZero, exact)
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let path_error = triangulate_d_with_limits(
+            &[rectangle_d.clone(), rectangle_d.clone()],
+            FillRule::NonZero,
+            TriangulationLimits::new(1, usize::MAX, usize::MAX),
+        )
+        .unwrap_err();
+        assert_eq!(
+            path_error,
+            TriangulationError::LimitExceeded {
+                resource: TriangulationResource::Paths,
+                limit: 1,
+                required: 2,
+            }
+        );
+        assert!(path_error.to_string().contains("Paths"));
+        assert!(std::error::Error::source(&path_error).is_none());
+
+        assert_eq!(
+            check_limits([4].into_iter(), TriangulationLimits::new(1, 3, usize::MAX)),
+            Err(TriangulationError::LimitExceeded {
+                resource: TriangulationResource::Vertices,
+                limit: 3,
+                required: 4,
+            })
+        );
+        assert_eq!(
+            check_limits([4].into_iter(), TriangulationLimits::new(1, 4, 1)),
+            Err(TriangulationError::LimitExceeded {
+                resource: TriangulationResource::EdgePairs,
+                limit: 1,
+                required: 2,
+            })
+        );
+        assert_eq!(
+            check_limits(
+                [usize::MAX, usize::MAX].into_iter(),
+                TriangulationLimits::new(2, usize::MAX, usize::MAX - 1)
+            ),
+            Err(TriangulationError::LimitExceeded {
+                resource: TriangulationResource::EdgePairs,
+                limit: usize::MAX - 1,
+                required: usize::MAX,
+            })
+        );
+
+        let geometry_error = triangulate_d_with_limits(
+            &[vec![PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)]],
+            FillRule::NonZero,
+            TriangulationLimits::UNLIMITED,
+        )
+        .unwrap_err();
+        assert!(matches!(geometry_error, TriangulationError::Geometry(_)));
+        assert!(geometry_error.to_string().contains("vertices"));
+        assert!(std::error::Error::source(&geometry_error).is_some());
     }
 
     #[test]
@@ -647,19 +1038,12 @@ mod tests {
         assert!(point_in_path(PointD::new(0.5, 0.5), &rectangle(0.0, 0.0, 1.0, 1.0)));
         assert!(!point_in_path(PointD::new(2.0, 0.5), &rectangle(0.0, 0.0, 1.0, 1.0)));
 
-        let rings = vec![
-            Ring { path: Vec::new(), area: 100.0, parent: None, probe: PointD::new(0.0, 0.0) },
-            Ring { path: Vec::new(), area: -25.0, parent: Some(0), probe: PointD::new(0.0, 0.0) },
-            Ring { path: Vec::new(), area: 4.0, parent: Some(1), probe: PointD::new(0.0, 0.0) },
-        ];
+        let rings = vec![ring(100.0, None), ring(-25.0, Some(0)), ring(4.0, Some(1))];
         assert_eq!(nearest_outer_ancestor(1, &rings, &[0]), Some(0));
         assert_eq!(nearest_outer_ancestor(2, &rings, &[0]), Some(0));
         assert_eq!(nearest_outer_ancestor(1, &rings, &[]), None);
         assert_eq!(filled_groups(&rings, FillRule::EvenOdd).len(), 2);
-        let same_winding = vec![
-            Ring { path: Vec::new(), area: 100.0, parent: None, probe: PointD::new(0.0, 0.0) },
-            Ring { path: Vec::new(), area: 25.0, parent: Some(0), probe: PointD::new(0.0, 0.0) },
-        ];
+        let same_winding = vec![ring(100.0, None), ring(25.0, Some(0))];
         assert_eq!(filled_groups(&same_winding, FillRule::NonZero).len(), 1);
 
         let ancestors = [0_usize, 1];
@@ -686,13 +1070,37 @@ mod tests {
         assert!(ensure_group_result(0, 0, false).is_ok());
         assert_eq!(ensure_group_result(0, 0, true), Err(Error::TriangulationFailure));
 
+        let degenerate = vec![vec![PointD::new(1.0, 1.0); 3]];
+        assert_eq!(
+            CoordinateFrame::from_paths(&degenerate).unwrap_err(),
+            Error::TriangulationFailure
+        );
+        let overflowing = vec![vec![
+            PointD::new(f64::MAX, 0.0),
+            PointD::new(-f64::MAX, 0.0),
+            PointD::new(0.0, 1.0),
+        ]];
+        assert_eq!(
+            CoordinateFrame::from_paths(&overflowing).unwrap_err(),
+            Error::ArithmeticOverflow
+        );
+        let overflowing_y = vec![vec![
+            PointD::new(0.0, f64::MAX),
+            PointD::new(0.0, -f64::MAX),
+            PointD::new(1.0, 0.0),
+        ]];
+        assert_eq!(
+            CoordinateFrame::from_paths(&overflowing_y).unwrap_err(),
+            Error::ArithmeticOverflow
+        );
+
         let vertices = [PointD::new(0.0, 0.0), PointD::new(1.0, 0.0), PointD::new(0.0, 1.0)];
-        assert!(orient_triangle(&vertices, &[0, 1, 2]).is_some());
-        assert!(orient_triangle(&vertices, &[0, 2, 1]).is_some());
-        assert!(orient_triangle(&vertices, &[0, 1, 1]).is_none());
+        assert!(orient_triangle(&vertices, &vertices, &[0, 1, 2]).is_some());
+        assert!(orient_triangle(&vertices, &vertices, &[0, 2, 1]).is_some());
+        assert!(orient_triangle(&vertices, &vertices, &[0, 1, 1]).is_none());
         let mut oriented = Vec::new();
-        push_oriented_triangle(&mut oriented, &vertices, &[0, 1, 2]);
-        push_oriented_triangle(&mut oriented, &vertices, &[0, 1, 1]);
+        push_oriented_triangle(&mut oriented, &vertices, &vertices, &[0, 1, 2]);
+        push_oriented_triangle(&mut oriented, &vertices, &vertices, &[0, 1, 1]);
         assert_eq!(oriented.len(), 1);
     }
 

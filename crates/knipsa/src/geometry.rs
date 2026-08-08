@@ -4,7 +4,8 @@ use core::cmp::Ordering;
 use num_bigint::BigInt;
 
 use crate::{
-    BooleanRequest, BooleanRequestD, ClipType, Error, FillRule, PathKind, boolean_op, boolean_op_d,
+    BooleanRequest, BooleanRequestD, ClipType, Error, FillRule, PathKind, PathValidationError,
+    boolean_op, boolean_op_d,
 };
 
 /// An integer point used by the exact-coordinate API.
@@ -12,6 +13,7 @@ use crate::{
 /// Integer operations preserve these coordinates exactly. Paths are ordinary
 /// Rust vectors, so they can be built with `vec![]` and passed by slice.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Point64 {
     /// Horizontal coordinate.
@@ -34,6 +36,7 @@ impl Point64 {
 /// kernel keeps the input values exact while it computes intersections, then
 /// converts the result back to `f64`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct PointD {
     /// Horizontal coordinate.
@@ -98,6 +101,8 @@ fn i128_to_exact_f64(value: i128) -> Result<f64, Error> {
 /// For points `a`, `b`, and `c`, the result describes the turn from `a -> b`
 /// to `b -> c`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Orientation {
     /// The points turn clockwise.
     Clockwise,
@@ -111,6 +116,8 @@ pub enum Orientation {
 ///
 /// [`point_in_polygon`] uses the even-odd rule for this classification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum PointLocation {
     /// The point is outside the filled path.
     Outside,
@@ -122,6 +129,7 @@ pub enum PointLocation {
 
 /// An axis-aligned integer rectangle.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Rect64 {
     /// Inclusive lower horizontal bound.
@@ -159,6 +167,7 @@ impl Rect64 {
 
 /// An axis-aligned floating-point rectangle.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct RectD {
     /// Inclusive lower horizontal bound.
@@ -227,6 +236,22 @@ pub fn validate_paths64(paths: &[Path64], kind: PathKind) -> Result<(), Error> {
     Ok(())
 }
 
+/// Validates integer paths and reports the index of the first failing path.
+///
+/// # Errors
+///
+/// Returns [`PathValidationError`] with the zero-based path index and original
+/// [`Error`]. Integer shape errors do not carry a point index.
+pub fn validate_paths64_located(
+    paths: &[Path64],
+    kind: PathKind,
+) -> Result<(), PathValidationError> {
+    for (path_index, path) in paths.iter().enumerate() {
+        validate_path64(path, kind).map_err(|error| PathValidationError::new(path_index, error))?;
+    }
+    Ok(())
+}
+
 /// Validates a floating-point path's shape and finiteness.
 ///
 /// Empty paths are valid. Closed paths require three points and open paths
@@ -264,6 +289,22 @@ pub fn validate_path_d(path: &[PointD], kind: PathKind) -> Result<(), Error> {
 pub fn validate_paths_d(paths: &[PathD], kind: PathKind) -> Result<(), Error> {
     for path in paths {
         validate_path_d(path, kind)?;
+    }
+    Ok(())
+}
+
+/// Validates floating-point paths with stable path and vertex locations.
+///
+/// # Errors
+///
+/// Returns [`PathValidationError`] with the zero-based failing path. A
+/// non-finite coordinate also records its zero-based point index.
+pub fn validate_paths_d_located(
+    paths: &[PathD],
+    kind: PathKind,
+) -> Result<(), PathValidationError> {
+    for (path_index, path) in paths.iter().enumerate() {
+        validate_path_d(path, kind).map_err(|error| PathValidationError::new(path_index, error))?;
     }
     Ok(())
 }
@@ -739,6 +780,32 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn located_validation_reports_path_and_point_indices() {
+        let integer_error =
+            validate_paths64_located(&[vec![A, B, C], vec![A]], PathKind::Closed).unwrap_err();
+        assert_eq!(integer_error.path_index(), 1);
+        assert_eq!(integer_error.point_index(), None);
+        assert!(integer_error.to_string().starts_with("path 1:"));
+        assert!(std::error::Error::source(&integer_error).is_some());
+        assert!(matches!(integer_error.error(), Error::InvalidPath { .. }));
+        assert!(matches!(integer_error.into_error(), Error::InvalidPath { .. }));
+
+        let floating_error = validate_paths_d_located(
+            &[
+                vec![PointD::new(0.0, 0.0), PointD::new(1.0, 0.0), PointD::new(0.0, 1.0)],
+                vec![PointD::new(0.0, 0.0), PointD::new(1.0, 0.0), PointD::new(f64::NAN, 1.0)],
+            ],
+            PathKind::Closed,
+        )
+        .unwrap_err();
+        assert_eq!(floating_error.path_index(), 1);
+        assert_eq!(floating_error.point_index(), Some(2));
+        assert!(floating_error.to_string().starts_with("path 1, point 2:"));
+        assert!(validate_paths64_located(&[], PathKind::Closed).is_ok());
+        assert!(validate_paths_d_located(&[], PathKind::Closed).is_ok());
     }
 
     #[test]

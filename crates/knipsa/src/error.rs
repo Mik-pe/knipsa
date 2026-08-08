@@ -9,6 +9,8 @@ use core::fmt;
 /// single error type across booleans, offsets, triangulation, and checked
 /// geometry helpers.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Error {
     /// A path does not contain enough vertices for its declared kind.
     InvalidPath {
@@ -68,3 +70,66 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// A path-collection validation error with stable input coordinates.
+///
+/// Operation entry points continue returning [`Error`] for compatibility.
+/// Call the `validate_paths*_located` helpers first when an application needs
+/// to identify the failing path and, for coordinate errors, vertex.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PathValidationError {
+    path_index: usize,
+    point_index: Option<usize>,
+    error: Error,
+}
+
+impl PathValidationError {
+    pub(crate) fn new(path_index: usize, error: Error) -> Self {
+        let point_index = match &error {
+            Error::NonFiniteCoordinate { point_index } => Some(*point_index),
+            _ => None,
+        };
+        Self { path_index, point_index, error }
+    }
+
+    /// Zero-based index of the failing path.
+    #[must_use]
+    pub const fn path_index(&self) -> usize {
+        self.path_index
+    }
+
+    /// Zero-based vertex index when the underlying error identifies one.
+    #[must_use]
+    pub const fn point_index(&self) -> Option<usize> {
+        self.point_index
+    }
+
+    /// Original operation-independent geometry error.
+    #[must_use]
+    pub const fn error(&self) -> &Error {
+        &self.error
+    }
+
+    /// Consumes this value and returns the original geometry error.
+    #[must_use]
+    pub fn into_error(self) -> Error {
+        self.error
+    }
+}
+
+impl fmt::Display for PathValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(point_index) = self.point_index {
+            write!(formatter, "path {}, point {point_index}: {}", self.path_index, self.error)
+        } else {
+            write!(formatter, "path {}: {}", self.path_index, self.error)
+        }
+    }
+}
+
+impl std::error::Error for PathValidationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}

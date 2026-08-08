@@ -10,11 +10,11 @@ permissions:
 
 jobs:
   msrv:
-    name: Rust 1.85 compatibility
+    name: Rust 1.97 compatibility
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
 
@@ -28,6 +28,9 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
+      - run: cargo check -p knipsa --no-default-features
+      - run: cargo check -p knipsa --no-default-features --features geo-types
+      - run: cargo check -p knipsa --no-default-features --features serde
       - run: cargo test --workspace --all-features
       - run: python3 -m unittest discover -s scripts -p 'test_*.py'
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -54,6 +57,7 @@ jobs:
       - run: make conformance-integer
       - run: make conformance-offset
       - run: make conformance-triangulation
+      - run: make conformance-triangulation-d
 
   c-api:
     name: C-compatible FFI

@@ -173,13 +173,12 @@ impl Rational {
             Self::Small { numerator: left_numerator, denominator: left_denominator },
             Self::Small { numerator: right_numerator, denominator: right_denominator },
         ) = (self, other)
-        {
-            if let (Some(numerator), Some(denominator)) = (
+            && let (Some(numerator), Some(denominator)) = (
                 left_numerator.checked_mul(*right_numerator),
                 left_denominator.checked_mul(*right_denominator),
-            ) {
-                return Self::from_i128(numerator, denominator);
-            }
+            )
+        {
+            return Self::from_i128(numerator, denominator);
         }
         let (left_numerator, left_denominator) = self.big_parts();
         let (right_numerator, right_denominator) = other.big_parts();
@@ -192,13 +191,12 @@ impl Rational {
             Self::Small { numerator: left_numerator, denominator: left_denominator },
             Self::Small { numerator: right_numerator, denominator: right_denominator },
         ) = (self, other)
-        {
-            if let (Some(numerator), Some(denominator)) = (
+            && let (Some(numerator), Some(denominator)) = (
                 left_numerator.checked_mul(*right_denominator),
                 left_denominator.checked_mul(*right_numerator),
-            ) {
-                return Self::from_i128(numerator, denominator);
-            }
+            )
+        {
+            return Self::from_i128(numerator, denominator);
         }
         let (left_numerator, left_denominator) = self.big_parts();
         let (right_numerator, right_denominator) = other.big_parts();
@@ -254,13 +252,12 @@ impl Ord for Rational {
             Self::Small { numerator: left_numerator, denominator: left_denominator },
             Self::Small { numerator: right_numerator, denominator: right_denominator },
         ) = (self, other)
-        {
-            if let (Some(left), Some(right)) = (
+            && let (Some(left), Some(right)) = (
                 left_numerator.checked_mul(*right_denominator),
                 right_numerator.checked_mul(*left_denominator),
-            ) {
-                return left.cmp(&right);
-            }
+            )
+        {
+            return left.cmp(&right);
         }
         let (left_numerator, left_denominator) = self.big_parts();
         let (right_numerator, right_denominator) = other.big_parts();
@@ -1032,21 +1029,20 @@ fn sample_face_pair(
             midpoint.x.add(&vector.y.mul(&epsilon)),
             midpoint.y.sub(&vector.x.mul(&epsilon)),
         );
-        if probe_is_clear(&left, &right, skipped_edge, arrangement) {
-            if let (Some(left_subject), Some(left_clip), Some(right_subject), Some(right_clip)) = (
+        if probe_is_clear(&left, &right, skipped_edge, arrangement)
+            && let (Some(left_subject), Some(left_clip), Some(right_subject), Some(right_clip)) = (
                 paths_winding_at(&left, subjects),
                 paths_winding_at(&left, clips),
                 paths_winding_at(&right, subjects),
                 paths_winding_at(&right, clips),
-            ) {
-                let left_winding = WindingPair { subject: left_subject, clip: left_clip };
-                let right_winding = WindingPair { subject: right_subject, clip: right_clip };
-                if left_winding.subject.checked_sub(right_winding.subject)?
-                    == expected_delta.subject
-                    && left_winding.clip.checked_sub(right_winding.clip)? == expected_delta.clip
-                {
-                    return Some((left_winding, right_winding));
-                }
+            )
+        {
+            let left_winding = WindingPair { subject: left_subject, clip: left_clip };
+            let right_winding = WindingPair { subject: right_subject, clip: right_clip };
+            if left_winding.subject.checked_sub(right_winding.subject)? == expected_delta.subject
+                && left_winding.clip.checked_sub(right_winding.clip)? == expected_delta.clip
+            {
+                return Some((left_winding, right_winding));
             }
         }
         epsilon = epsilon.div(&Rational::from_i64(2));

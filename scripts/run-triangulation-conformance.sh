@@ -20,5 +20,8 @@ KNIPSA_TRIANGULATION_WORKLOAD="$workload" \
   >"$output_dir/knipsa.jsonl"
 "$repo_root/benchmarks/reference/run-clipper2-triangulation.sh" "$workload" \
   >"$output_dir/clipper2.jsonl"
+"$repo_root/benchmarks/reference/run-geo-triangulation.sh" "$workload" \
+  >"$output_dir/geo-spade.jsonl"
 python3 "$repo_root/scripts/compare-triangulation-results.py" \
-  "$workload" "$output_dir/knipsa.jsonl" "$output_dir/clipper2.jsonl"
+  "$workload" "$output_dir/knipsa.jsonl" \
+  "$output_dir/clipper2.jsonl" "$output_dir/geo-spade.jsonl"

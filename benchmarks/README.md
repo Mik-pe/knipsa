@@ -48,7 +48,7 @@ The native Rust comparison uses `geo` 0.33.1 with default features disabled.
 Its current BooleanOps implementation delegates to `i_overlay`; the adapter is
 therefore identified as `geo-i-overlay`, not as an independent Geo kernel. Its
 isolated Cargo project has a checked-in lockfile and does not affect Knipsa's
-dependencies or Rust 1.85 MSRV:
+dependencies or Rust 1.97 MSRV:
 
 ```sh
 benchmarks/reference/run-geo.sh benchmarks/workloads.json
@@ -160,8 +160,10 @@ make conformance-offset
 
 ## Triangulation matrix
 
-The integer triangulation profile compares `triangulate64` with Clipper2's
-native `Paths64` Delaunay triangulator at the pinned revision. Its 12 cases
+The integer triangulation profile compares `triangulate64` with both Clipper2's
+native `Paths64` Delaunay triangulator at the pinned revision and `geo` 0.33.1's
+Spade 2.15.1 constrained-Delaunay implementation. The latter is an independent
+Rust algorithm family rather than another Clipper-derived vote. Its 12 cases
 cover convex and concave rings, holes, multiple holes, nested islands,
 disconnected components, redundant collinear vertices, thin corridors,
 negative coordinates, and a translated large-coordinate polygon:
@@ -170,13 +172,28 @@ negative coordinates, and a translated large-coordinate polygon:
 make conformance-triangulation
 ```
 
+The separate `triangulate_d` profile covers eight fractional, holed, thin,
+translated, and uniformly scaled cases from `1e-12` through `1e12`:
+
+```sh
+make conformance-triangulation-d
+```
+
+It compares against a scale-normalized `geo`/Spade adapter because Clipper2's
+`PathsD` triangulator clamps decimal precision to eight places and therefore
+cannot represent the smallest cases. The adapter restores caller coordinates
+inside each timed operation. The comparator evaluates area, overlap, and
+boundary reconstruction in a shared unit frame with fixed normalized budgets.
+
 Triangulations are not compared by internal diagonals. The fail-closed
-comparator independently validates each result against the input region: all
+comparator independently validates every result against the input region: all
 triangles must be non-degenerate, calibrated, interior-disjoint, preserve the
 exact doubled area, and reconstruct every outer and hole boundary. This lets
 different valid triangulations match without reducing correctness to an area
 or triangle-count check.
 
-The three native Rust workload binaries share one benchmark module for warm-up,
+The four native Rust workload binaries share one benchmark module for warm-up,
 power-of-two batch calibration, sampling, and percentile selection. Boolean,
 offset, and triangulation timing therefore use identical measurement logic.
+The three isolated `geo` reference binaries likewise share one reference-side
+calibration module.

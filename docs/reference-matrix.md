@@ -71,12 +71,20 @@ requires all cases to match their per-case boundary and area budgets.
 
 `benchmarks/triangulation-workloads.json` is the executable integer
 triangulation profile. `make conformance-triangulation` compares the public
-`triangulate64` path with Clipper2's native `Paths64` triangulator. The
-comparator permits different internal diagonals but requires both outputs to
-be calibrated, non-degenerate, interior-disjoint exact-area partitions that
-reconstruct every input boundary, including holes and nested islands. CI
-requires all 12 cases to match. Floating-point triangulation and additional
-independent triangulation families remain separate future evidence profiles.
+`triangulate64` path with Clipper2's native `Paths64` triangulator and `geo`
+0.33.1's independent Spade 2.15.1 constrained-Delaunay implementation. The
+comparator permits different internal diagonals but requires every output to
+be a calibrated, non-degenerate, interior-disjoint exact-area partition that
+reconstructs every input boundary, including holes and nested islands. CI
+requires all 12 cases to match both references.
+
+`benchmarks/triangulation-d-workloads.json` is the separately gated floating
+profile. `make conformance-triangulation-d` exercises the public
+`triangulate_d` path on eight cases from `1e-12` through `1e12` and compares it
+with a normalized `geo`/Spade reference. The comparator applies fixed budgets
+only after both outputs and the input have been mapped into the same unit
+frame. Clipper2 is excluded from this scale profile because `PathsD`
+triangulation clamps decimal precision to eight places.
 
 ## What 100% means
 
@@ -95,8 +103,8 @@ case passed.
 The checked-in `benchmarks/workloads.json` is the shared OGC-valid
 floating-point smoke corpus required by Boost.Geometry, Clipper2, geo/iOverlay,
 GEOS, JTS, and Martinez. It is useful for the common overlay path, but it is
-not the complete open-path, offset, or floating-point triangulation matrix.
-Those profiles are gated separately or remain explicitly outstanding before
+not the complete open-path, offset, or triangulation matrix.
+Those profiles are gated separately before
 claiming complete Clipper2 feature conformance. The exact integer and
 all-fill-rule slice is the separately gated `integer-closed-v1` profile above.
 Self-crossing EvenOdd cases live in

@@ -44,15 +44,21 @@ of the 0.2.0 contract:
 - Boolean clipping of open paths;
 - explicit polygon-tree output with parent and hole relationships;
 - caller-configurable floating-point scale or tolerance policies;
-- documented resource budgets for untrusted, adversarially large inputs;
-- structured errors carrying path and vertex locations;
-- first-party `geo-types`, Serde, WKT, or similar ecosystem adapters;
+- located execution/topology errors beyond the new structured collection
+  validation diagnostics;
+- first-party WKT or similar text-format adapters beyond the new optional
+  `geo-types` and Serde integrations;
 - broader real-world GIS and CAM corpora across multiple architectures.
 
 These omissions are documented so applications can evaluate Knipsa without
 assuming capabilities that the current API does not promise. Compatible
 additions may land in 0.2.x; changes to existing contracts require a later
 pre-1.0 minor release.
+
+The Rust API now provides opt-in `TriangulationLimits` for untrusted
+triangulation requests. Boolean and offset operations still need a unified
+public request-budget API before resource limits are complete across the whole
+crate.
 
 ## Evidence boundary
 

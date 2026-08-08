@@ -18,7 +18,7 @@ categories = ["api-bindings", "graphics", "mathematics"]
 crate-type = ["cdylib", "rlib", "staticlib"]
 
 [dependencies]
-knipsa = { path = "../knipsa", version = "0.2.0" }
+knipsa = { path = "../knipsa", version = "0.2.1" }
 
 [lints]
 workspace = true

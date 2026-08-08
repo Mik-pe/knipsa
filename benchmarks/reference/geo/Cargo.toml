@@ -6,8 +6,16 @@ rust-version = "1.88"
 publish = false
 
 [dependencies]
-geo = { version = "=0.33.1", default-features = false }
+geo = { version = "=0.33.1", default-features = false, features = ["spade"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [workspace]
+
+[[bin]]
+name = "knipsa-geo-triangulation"
+path = "src/bin/triangulation.rs"
+
+[[bin]]
+name = "knipsa-geo-triangulation-d"
+path = "src/bin/triangulation_d.rs"

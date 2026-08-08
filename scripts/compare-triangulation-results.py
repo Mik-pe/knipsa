@@ -80,18 +80,37 @@ def projection(triangle, axis):
     return min(values), max(values)
 
 
-def interiors_overlap(left, right):
+def interiors_overlap(left, right, tolerance=0.0):
     for triangle in (left, right):
         for start, end in edges(triangle):
             axis = (start[1] - end[1], end[0] - start[0])
             left_min, left_max = projection(left, axis)
             right_min, right_max = projection(right, axis)
-            if min(left_max, right_max) <= max(left_min, right_min):
+            projection_scale = max(1.0, abs(left_min), abs(left_max), abs(right_min), abs(right_max))
+            if min(left_max, right_max) <= max(left_min, right_min) + tolerance * projection_scale:
                 return False
     return True
 
 
-def validate(case, record):
+def normalize_geometry(paths, triangles):
+    origin = paths[0][0]
+    scale = max(
+        max(abs(point[0] - origin[0]), abs(point[1] - origin[1]))
+        for path in paths for point in path
+    )
+    if not math.isfinite(scale) or scale == 0.0:
+        raise ValueError("invalid normalization frame")
+
+    def normalize_point(point):
+        return ((point[0] - origin[0]) / scale, (point[1] - origin[1]) / scale)
+
+    return (
+        [[normalize_point(point) for point in path] for path in paths],
+        [[normalize_point(point) for point in triangle] for triangle in triangles],
+    )
+
+
+def validate(case, record, coordinate_type="i64"):
     if not record or record.get("status") != "ok":
         return False, "missing or errored result"
     if not isinstance(record.get("iterations_per_sample"), int) or record["iterations_per_sample"] < 1:
@@ -104,27 +123,48 @@ def validate(case, record):
         return False, "invalid triangle count"
     if any(len(triangle) != 3 or any(len(point) != 2 for point in triangle) for triangle in triangles):
         return False, "non-triangle output"
-    if any(not isinstance(coordinate, int) or isinstance(coordinate, bool)
-           for triangle in triangles for point in triangle for coordinate in point):
-        return False, "non-integer triangulate64 output"
+    coordinates = [coordinate for triangle in triangles for point in triangle for coordinate in point]
+    if coordinate_type == "i64":
+        if any(not isinstance(coordinate, int) or isinstance(coordinate, bool)
+               for coordinate in coordinates):
+            return False, "non-integer triangulate64 output"
+        paths = case["paths"]
+        area_tolerance = 0
+        boundary_tolerance = 0.0
+        overlap_tolerance = 0.0
+    elif coordinate_type == "f64":
+        if any(isinstance(coordinate, bool) or not isinstance(coordinate, (int, float))
+               or not math.isfinite(coordinate) for coordinate in coordinates):
+            return False, "non-finite triangulate_d output"
+        try:
+            paths, triangles = normalize_geometry(case["paths"], triangles)
+        except (IndexError, ValueError) as error:
+            return False, str(error)
+        area_tolerance = 1e-10
+        boundary_tolerance = 1e-9
+        overlap_tolerance = 1e-12
+    else:
+        return False, "unsupported coordinate type"
     triangle_areas = [abs(area2(triangle)) for triangle in triangles]
-    if any(area == 0 for area in triangle_areas):
+    if any(area <= area_tolerance for area in triangle_areas):
         return False, "degenerate triangle"
-    expected_area2 = abs(sum(area2(path) for path in case["paths"]))
-    if sum(triangle_areas) != expected_area2:
+    expected_area2 = abs(sum(area2(path) for path in paths))
+    actual_area2 = sum(triangle_areas)
+    if abs(actual_area2 - expected_area2) > max(area_tolerance, expected_area2 * area_tolerance):
         return False, f"area2={sum(triangle_areas)} expected={expected_area2}"
     for index, left in enumerate(triangles):
-        if any(interiors_overlap(left, right) for right in triangles[index + 1:]):
+        if any(interiors_overlap(left, right, overlap_tolerance)
+               for right in triangles[index + 1:]):
             return False, "triangle interiors overlap"
     actual_boundary = triangle_boundaries(triangles)
     if actual_boundary is None:
         return False, "non-manifold triangle edge multiplicity"
-    expected_boundary = [(tuple(start), tuple(end)) for path in case["paths"] for start, end in edges(path)]
+    expected_boundary = [(tuple(start), tuple(end)) for path in paths for start, end in edges(path)]
     distance = max(boundary_distance(actual_boundary, expected_boundary),
                    boundary_distance(expected_boundary, actual_boundary))
     perimeter_error = abs(boundary_length(actual_boundary) - boundary_length(expected_boundary))
-    perimeter_tolerance = max(1e-9, boundary_length(expected_boundary) * 1e-12)
-    if distance != 0.0 or perimeter_error > perimeter_tolerance:
+    perimeter_tolerance = max(boundary_tolerance, boundary_length(expected_boundary) * 1e-12)
+    if distance > boundary_tolerance or perimeter_error > perimeter_tolerance:
         return False, f"boundary_distance={distance:.6g} perimeter_error={perimeter_error:.6g}"
     return True, f"triangles={len(triangles)} area2={expected_area2}"
 
@@ -132,10 +172,16 @@ def validate(case, record):
 def compare(workload_path, knipsa_path, reference_path):
     with open(workload_path, encoding="utf-8") as stream:
         workload = json.load(stream)
-    if workload.get("schema") != "knipsa-triangulation-workload-v1":
+    coordinate_type = workload.get("coordinate_type")
+    schemas = {
+        "knipsa-triangulation-workload-v1": "i64",
+        "knipsa-triangulation-d-workload-v1": "f64",
+    }
+    if schemas.get(workload.get("schema")) != coordinate_type:
         raise ValueError("unsupported triangulation workload schema")
     knipsa = load_results(knipsa_path)
     reference = load_results(reference_path)
+    print(f"reference={reference_path}")
     expected_ids = {case["id"] for case in workload["cases"]}
     if set(knipsa) != expected_ids or set(reference) != expected_ids:
         raise ValueError("result case IDs do not exactly match the triangulation workload")
@@ -143,8 +189,8 @@ def compare(workload_path, knipsa_path, reference_path):
     for case in workload["cases"]:
         case_id = case["id"]
         left, right = knipsa.get(case_id), reference.get(case_id)
-        left_ok, left_detail = validate(case, left)
-        right_ok, right_detail = validate(case, right)
+        left_ok, left_detail = validate(case, left, coordinate_type)
+        right_ok, right_detail = validate(case, right, coordinate_type)
         same = left_ok and right_ok
         if same:
             matches += 1
@@ -158,9 +204,12 @@ def compare(workload_path, knipsa_path, reference_path):
 
 
 def main(argv):
-    if len(argv) != 4:
-        raise SystemExit("usage: compare-triangulation-results.py <workload.json> <knipsa.jsonl> <reference.jsonl>")
-    if not compare(argv[1], argv[2], argv[3]):
+    if len(argv) < 4:
+        raise SystemExit(
+            "usage: compare-triangulation-results.py "
+            "<workload.json> <knipsa.jsonl> <reference.jsonl> [reference.jsonl ...]"
+        )
+    if not all(compare(argv[1], argv[2], reference) for reference in argv[3:]):
         raise SystemExit(1)
 
 

@@ -18,7 +18,10 @@ are test, triangulation, and benchmark tooling dependencies; downloaded
 Clipper2, Boost, and JTS artifacts stay in the ignored `target/reference` tree
 and are not linked into the Rust library. The Rust API uses `earcutr` as a
 declared dependency, so its ISC license is part of the dependency audit but no
-source is copied into this repository.
+source is copied into this repository. When the `geo-types` feature is enabled,
+`geo-types` is also linked under MIT OR Apache-2.0; it remains absent from the
+default feature set. The optional Serde integration likewise uses Serde under
+MIT OR Apache-2.0 and remains absent from the default feature set.
 
 ## Rules for future work
 
