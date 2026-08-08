@@ -7,9 +7,9 @@
 //! nesting, coordinate preservation, and public result shaping live here.
 
 use crate::{
-    ComplexityLimits, Error, FillRule, Path64, PathD, Point64, PointD,
-    geometry::paths64_to_local_d,
-    topology::{EPSILON, collect_rings, cross, filled_groups, point_d_to_64},
+    ComplexityLimits, Error, FillRule, Orientation, Path64, PathD, Point64, PointD,
+    geometry::{orientation, paths64_to_local_d},
+    topology::{EPSILON, collect_rings_d, collect_rings64, cross, filled_groups},
 };
 
 /// A triangle with integer vertices.
@@ -30,10 +30,10 @@ pub type TriangleD = [PointD; 3];
 /// rings are rejected because their filled meaning is ambiguous for
 /// triangulation.
 /// The returned triangles are counter-clockwise and preserve the integer
-/// coordinate type. Computation uses a shared local origin, so absolute
-/// coordinates may span the full `i64` range when their deltas from the shared
-/// lower-left bounding-box origin are within the exact integer range of `f64`
-/// (2^53).
+/// coordinate type. Ring validation and nesting are exact across the complete
+/// `i64` domain. After grouping, each polygon is translated to a local frame
+/// for the floating-point triangulation backend, which requires group spans to
+/// fit the exact integer range of `f64` (2^53).
 ///
 /// The preflight runs before integer-to-floating conversion or quadratic edge
 /// intersection checks. [`ComplexityLimits::DEFAULT`] is a conservative
@@ -45,8 +45,8 @@ pub type TriangleD = [PointD; 3];
 /// budget is insufficient, or
 /// [`Error::InvalidPath`] for malformed rings, [`Error::IntersectingPaths`] for
 /// touching or crossing rings, [`Error::TopologyFailure`] for degenerate ring topology,
-/// [`Error::ArithmeticOverflow`] when the integer geometry cannot be converted
-/// exactly, or [`Error::TriangulationFailure`] when valid topology cannot be
+/// [`Error::ArithmeticOverflow`] when a grouped polygon cannot be converted
+/// exactly for the backend, or [`Error::TriangulationFailure`] when valid topology cannot be
 /// triangulated.
 pub fn triangulate64(
     paths: &[Path64],
@@ -54,25 +54,49 @@ pub fn triangulate64(
     limits: ComplexityLimits,
 ) -> Result<Vec<Triangle64>, Error> {
     limits.check(paths.iter().map(Vec::len))?;
-    let (origin, paths_d) = paths64_to_local_d(paths)?;
-    let triangles = triangulate_d_impl(&paths_d, fill_rule)?;
-    triangles64_from_d(triangles, origin)
+    let rings = collect_rings64(paths)?;
+    let groups = filled_groups(&rings, fill_rule);
+    let mut result = Vec::new();
+    for (outer, holes) in groups {
+        let group_start = result.len();
+        let mut originals = vec![rings[outer].vertices.clone()];
+        originals.extend(holes.iter().map(|hole| rings[*hole].vertices.clone()));
+        let (_, local) = paths64_to_local_d(&originals)?;
+        let mut coordinates = Vec::new();
+        let mut vertices = Vec::new();
+        let mut hole_indices = Vec::new();
+        for (index, (predicate, original)) in local.iter().zip(&originals).enumerate() {
+            if index > 0 {
+                hole_indices.push(vertices.len());
+            }
+            coordinates.extend(predicate.iter().flat_map(|point| [point.x, point.y]));
+            vertices.extend_from_slice(original);
+        }
+        let indices = earcutr::earcut(&coordinates, &hole_indices, 2)
+            .map_err(|_| Error::TriangulationFailure)?;
+        validate_triangle_indices(&indices)?;
+        for indices in indices.chunks_exact(3) {
+            push_oriented_triangle64(&mut result, &vertices, indices);
+        }
+        ensure_group_result(group_start, result.len(), !rings[outer].vertices.is_empty())?;
+    }
+    Ok(result)
 }
 
-fn triangles64_from_d(
-    triangles: Vec<TriangleD>,
-    origin: Point64,
-) -> Result<Vec<Triangle64>, Error> {
-    triangles
-        .into_iter()
-        .map(|triangle| {
-            triangle
-                .into_iter()
-                .map(|point| point_d_to_64(point, origin))
-                .collect::<Result<Vec<_>, _>>()
-                .and_then(|points| points.try_into().map_err(|_| Error::TriangulationFailure))
-        })
-        .collect()
+fn orient_triangle64(vertices: &[Point64], indices: &[usize]) -> Option<Triangle64> {
+    let mut triangle = [vertices[indices[0]], vertices[indices[1]], vertices[indices[2]]];
+    match orientation(triangle[0], triangle[1], triangle[2]) {
+        Orientation::Clockwise => triangle.swap(1, 2),
+        Orientation::CounterClockwise => {}
+        Orientation::Collinear => return None,
+    }
+    Some(triangle)
+}
+
+fn push_oriented_triangle64(result: &mut Vec<Triangle64>, vertices: &[Point64], indices: &[usize]) {
+    if let Some(triangle) = orient_triangle64(vertices, indices) {
+        result.push(triangle);
+    }
 }
 
 /// Triangulates a collection of floating-point rings using a fill rule.
@@ -103,7 +127,7 @@ pub fn triangulate_d(
 }
 
 fn triangulate_d_impl(paths: &[PathD], fill_rule: FillRule) -> Result<Vec<TriangleD>, Error> {
-    let rings = collect_rings(paths)?;
+    let rings = collect_rings_d(paths)?;
     let groups = filled_groups(&rings, fill_rule);
     let mut result = Vec::new();
     for (outer, holes) in groups {
@@ -545,18 +569,79 @@ mod tests {
                 .expect("small integer geometry should triangulate independently of its origin");
         assert_eq!(translated_triangles.len(), 2);
         assert!(translated_triangles.iter().flatten().all(|point| point.x >= translated_origin));
+    }
 
-        for bad in [
-            PointD::new(f64::NAN, 0.0),
-            PointD::new(0.0, f64::NAN),
-            PointD::new(f64::INFINITY, 0.0),
-            PointD::new(-2_f64.powi(63) - 4096.0, 0.0),
-            PointD::new(2_f64.powi(63), 0.0),
-            PointD::new(0.0, -2_f64.powi(63) - 4096.0),
-            PointD::new(0.0, 2_f64.powi(63)),
-        ] {
-            assert_eq!(point_d_to_64(bad, Point64::new(0, 0)), Err(Error::ArithmeticOverflow));
-        }
+    #[test]
+    fn integer_nesting_precedes_per_group_backend_adaptation() {
+        let full_domain = vec![
+            Point64::new(i64::MIN, i64::MIN),
+            Point64::new(i64::MAX, i64::MIN),
+            Point64::new(i64::MAX, i64::MAX),
+            Point64::new(i64::MIN, i64::MAX),
+        ];
+        let touching = vec![
+            Point64::new(i64::MIN, 0),
+            Point64::new(0, 0),
+            Point64::new(0, 1),
+            Point64::new(i64::MIN, 1),
+        ];
+        assert_eq!(
+            triangulate64(
+                &[full_domain.clone(), touching],
+                FillRule::EvenOdd,
+                ComplexityLimits::DEFAULT,
+            ),
+            Err(Error::IntersectingPaths)
+        );
+
+        let far_apart = vec![
+            vec![
+                Point64::new(i64::MIN, i64::MIN),
+                Point64::new(i64::MIN + 2, i64::MIN),
+                Point64::new(i64::MIN + 2, i64::MIN + 2),
+                Point64::new(i64::MIN, i64::MIN + 2),
+            ],
+            vec![
+                Point64::new(i64::MAX - 2, i64::MAX - 2),
+                Point64::new(i64::MAX, i64::MAX - 2),
+                Point64::new(i64::MAX, i64::MAX),
+                Point64::new(i64::MAX - 2, i64::MAX),
+            ],
+        ];
+        assert_eq!(
+            triangulate64(&far_apart, FillRule::EvenOdd, ComplexityLimits::DEFAULT).unwrap().len(),
+            4
+        );
+
+        let donut = vec![
+            vec![
+                Point64::new(0, 0),
+                Point64::new(10, 0),
+                Point64::new(10, 10),
+                Point64::new(0, 10),
+            ],
+            vec![Point64::new(2, 2), Point64::new(2, 8), Point64::new(8, 8), Point64::new(8, 2)],
+        ];
+        assert!(
+            !triangulate64(&donut, FillRule::EvenOdd, ComplexityLimits::DEFAULT)
+                .unwrap()
+                .is_empty()
+        );
+
+        let interior_hole = vec![
+            Point64::new(-1, -1),
+            Point64::new(-1, 1),
+            Point64::new(1, 1),
+            Point64::new(1, -1),
+        ];
+        assert_eq!(
+            triangulate64(
+                &[full_domain, interior_hole],
+                FillRule::EvenOdd,
+                ComplexityLimits::DEFAULT,
+            ),
+            Err(Error::ArithmeticOverflow)
+        );
     }
 
     #[test]
@@ -603,5 +688,13 @@ mod tests {
         push_oriented_triangle(&mut oriented, &vertices, &vertices, &[0, 1, 2]);
         push_oriented_triangle(&mut oriented, &vertices, &vertices, &[0, 1, 1]);
         assert_eq!(oriented.len(), 1);
+
+        let integer_vertices = [Point64::new(0, 0), Point64::new(1, 0), Point64::new(0, 1)];
+        assert!(orient_triangle64(&integer_vertices, &[0, 2, 1]).is_some());
+        assert!(orient_triangle64(&integer_vertices, &[0, 1, 1]).is_none());
+        let mut integer_oriented = Vec::new();
+        push_oriented_triangle64(&mut integer_oriented, &integer_vertices, &[0, 2, 1]);
+        push_oriented_triangle64(&mut integer_oriented, &integer_vertices, &[0, 1, 1]);
+        assert_eq!(integer_oriented.len(), 1);
     }
 }

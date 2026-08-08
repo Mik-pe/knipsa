@@ -40,6 +40,8 @@ Use [`crate::build_polygons64`] or [`crate::build_polygons_d`] when flat ring
 output must retain explicit hole ownership. The same validated nesting model is
 shared with triangulation; outer rings are counter-clockwise, holes are
 clockwise, and nested islands become separate polygons.
+Integer topology classification is exact across the complete `i64` coordinate
+domain and does not round-trip through floating point.
 
 Every polygon-builder and triangulation call requires
 [`crate::ComplexityLimits`]. Start with [`crate::ComplexityLimits::DEFAULT`]

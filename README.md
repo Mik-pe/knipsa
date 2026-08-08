@@ -31,7 +31,8 @@ cargo add knipsa --git https://github.com/Mik-pe/knipsa --features geo-types
 The `knipsa::geo_types` module converts `LineString` and `Polygon` values while
 making ring closure explicit. It does not guess nesting across independent
 polygons; use `build_polygons64` or `build_polygons_d` first when starting from
-a flat collection of nested rings.
+a flat collection of nested rings. `build_polygons64` classifies topology
+exactly across the complete `i64` coordinate domain.
 
 Enable `serde` to serialize and deserialize points, rectangles, enums,
 options, resource limits, and structured errors. Since paths are ordinary

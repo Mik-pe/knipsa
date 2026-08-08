@@ -10,7 +10,9 @@ minor releases before `1.0`.
 
 - `build_polygons64` and `build_polygons_d` convert flat nested rings into
   strongly typed `Polygon64` and `PolygonD` values with canonical winding and
-  explicit hole ownership; triangulation now reuses the same topology model.
+  explicit hole ownership. Integer nesting predicates are exact across the
+  complete `i64` domain, and integer triangulation reuses them before adapting
+  grouped vertices to the backend.
 
 ### Changed
 
@@ -19,6 +21,8 @@ minor releases before `1.0`.
   preflight cannot be bypassed accidentally.
 - The optional `geo-types` conversions now exchange `Polygon64` and `PolygonD`
   values instead of flattening exterior and interior rings into paths.
+- `orientation` now returns `Orientation` directly because its checked `i128`
+  path and `BigInt` fallback make every `Point64` input total.
 
 ### Removed
 

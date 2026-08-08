@@ -399,17 +399,16 @@ pub(crate) fn signed_area2_d(path: &[PointD]) -> f64 {
 
 /// Returns the orientation of three integer points.
 ///
-/// # Errors
-///
 /// The common path uses checked `i128` arithmetic. Coordinates spanning more
 /// than that representation can hold are compared with arbitrary-precision
 /// integers, so every `i64` input has an exact answer.
-pub fn orientation(a: Point64, b: Point64, c: Point64) -> Result<Orientation, Error> {
-    Ok(match cross_ordering(a, b, c) {
+#[must_use]
+pub fn orientation(a: Point64, b: Point64, c: Point64) -> Orientation {
+    match cross_ordering(a, b, c) {
         Ordering::Less => Orientation::Clockwise,
         Ordering::Equal => Orientation::Collinear,
         Ordering::Greater => Orientation::CounterClockwise,
-    })
+    }
 }
 
 /// Classifies an integer point against a closed path using the even-odd rule.
@@ -509,8 +508,7 @@ pub fn translate_path_d(path: &[PointD], dx: f64, dy: f64) -> Result<PathD, Erro
 /// # Errors
 ///
 /// Returns [`Error::InvalidPath`] for a non-empty path shorter than the
-/// minimum for `kind`, or [`Error::ArithmeticOverflow`] for a checked cross or
-/// dot product that does not fit in `i128`.
+/// minimum for `kind`. Collinearity is exact across the complete `i64` domain.
 pub fn trim_collinear64(path: &[Point64], kind: PathKind) -> Result<Path64, Error> {
     validate_path64(path, kind)?;
     let mut points = normalize_path64(path, kind);
@@ -526,10 +524,10 @@ pub fn trim_collinear64(path: &[Point64], kind: PathKind) -> Result<Path64, Erro
                     let previous = points[(index + points.len() - 1) % points.len()];
                     let current = points[index];
                     let next = points[(index + 1) % points.len()];
-                    collinear_between64(previous, current, next)?
+                    collinear_between64(previous, current, next)
                 }
                 PathKind::Open if index > 0 && index + 1 < points.len() => {
-                    collinear_between64(points[index - 1], points[index], points[index + 1])?
+                    collinear_between64(points[index - 1], points[index], points[index + 1])
                 }
                 PathKind::Open => false,
             };
@@ -661,19 +659,14 @@ pub fn clip_to_rect_d(
     ))
 }
 
-fn collinear_between64(previous: Point64, current: Point64, next: Point64) -> Result<bool, Error> {
-    if checked_cross(previous, current, next)? != 0 {
-        return Ok(false);
+fn collinear_between64(previous: Point64, current: Point64, next: Point64) -> bool {
+    if cross_ordering(previous, current, next) != Ordering::Equal {
+        return false;
     }
-    let first_x = i128::from(current.x) - i128::from(previous.x);
-    let first_y = i128::from(current.y) - i128::from(previous.y);
-    let second_x = i128::from(next.x) - i128::from(current.x);
-    let second_y = i128::from(next.y) - i128::from(current.y);
-    let dot = first_x
-        .checked_mul(second_x)
-        .and_then(|left| first_y.checked_mul(second_y).and_then(|right| left.checked_add(right)))
-        .ok_or(Error::ArithmeticOverflow)?;
-    Ok(dot >= 0)
+    current.x >= previous.x.min(next.x)
+        && current.x <= previous.x.max(next.x)
+        && current.y >= previous.y.min(next.y)
+        && current.y <= previous.y.max(next.y)
 }
 
 fn collinear_between_d(previous: PointD, current: PointD, next: PointD) -> bool {
@@ -697,7 +690,7 @@ fn checked_cross(a: Point64, b: Point64, c: Point64) -> Result<i128, Error> {
         .ok_or(Error::ArithmeticOverflow)
 }
 
-fn cross_ordering(a: Point64, b: Point64, c: Point64) -> Ordering {
+pub(crate) fn cross_ordering(a: Point64, b: Point64, c: Point64) -> Ordering {
     if let Ok(cross) = checked_cross(a, b, c) {
         return cross.cmp(&0);
     }
@@ -887,9 +880,9 @@ mod tests {
         ];
         assert!((signed_area2_d(&square_d) - 200.0).abs() < f64::EPSILON);
         assert_eq!(signed_area2(&[A, B]), Ok(0));
-        assert_eq!(orientation(A, B, C), Ok(Orientation::CounterClockwise));
-        assert_eq!(orientation(C, B, A), Ok(Orientation::Clockwise));
-        assert_eq!(orientation(A, B, Point64::new(20, 0)), Ok(Orientation::Collinear));
+        assert_eq!(orientation(A, B, C), Orientation::CounterClockwise);
+        assert_eq!(orientation(C, B, A), Orientation::Clockwise);
+        assert_eq!(orientation(A, B, Point64::new(20, 0)), Orientation::Collinear);
     }
 
     #[test]
@@ -915,7 +908,7 @@ mod tests {
                 Point64::new(i64::MAX, i64::MAX),
                 Point64::new(i64::MIN, i64::MAX)
             ),
-            Ok(Orientation::CounterClockwise)
+            Orientation::CounterClockwise
         );
         assert_eq!(
             checked_cross(
@@ -963,6 +956,8 @@ mod tests {
 
     #[test]
     fn transforms_and_trims_paths() {
+        assert!(!collinear_between64(Point64::new(0, 0), Point64::new(0, 2), Point64::new(0, 1),));
+        assert!(!collinear_between64(Point64::new(0, 0), Point64::new(0, -1), Point64::new(0, 1),));
         let square = vec![A, B, C, Point64::new(0, 10)];
         let with_collinear = vec![A, Point64::new(5, 0), B, C, Point64::new(0, 10), A];
         assert_eq!(trim_collinear64(&with_collinear, PathKind::Closed), Ok(square.clone()));

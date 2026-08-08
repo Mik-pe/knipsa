@@ -2,10 +2,12 @@
 
 use crate::{
     ComplexityLimits, Error, FillRule, Path64, PathD, Paths64, PathsD, Point64, PointD,
-    geometry::{paths64_to_local_d, signed_area2_d},
-    trim_collinear_d,
+    geometry::{cross_ordering, signed_area2_d},
+    trim_collinear_d, trim_collinear64,
 };
 use core::cmp::Ordering;
+use num_bigint::BigInt;
+use num_traits::Signed;
 
 pub(crate) const EPSILON: f64 = 1e-12;
 
@@ -50,23 +52,20 @@ pub struct PolygonD {
 ///
 /// # Errors
 ///
-/// Returns [`Error::LimitExceeded`] before conversion or quadratic topology
+/// Returns [`Error::LimitExceeded`] before quadratic topology
 /// work when the configured budget is insufficient,
 /// [`Error::InvalidPath`] for malformed rings,
 /// [`Error::IntersectingPaths`] for touching or crossing rings,
-/// [`Error::ArithmeticOverflow`] when coordinates do not fit the shared exact
-/// integer-to-floating conversion frame, and [`Error::TopologyFailure`] for
-/// degenerate topology. Integer coordinates are converted exactly before the
-/// shared normalized floating-point topology predicates run.
+/// and [`Error::TopologyFailure`] for degenerate topology. All topology
+/// decisions are exact across the complete `i64` coordinate domain.
 pub fn build_polygons64(
     paths: &[Path64],
     fill_rule: FillRule,
     limits: ComplexityLimits,
 ) -> Result<Vec<Polygon64>, Error> {
     limits.check(paths.iter().map(Vec::len))?;
-    let (origin, paths_d) = paths64_to_local_d(paths)?;
-    let rings = collect_rings(&paths_d)?;
-    polygons64_from_d(polygons_from_rings(&rings, fill_rule), origin)
+    let rings = collect_rings64(paths)?;
+    Ok(polygons64_from_rings(&rings, fill_rule))
 }
 
 /// Builds polygons with explicit hole ownership from floating-point rings.
@@ -90,7 +89,7 @@ pub fn build_polygons_d(
     limits: ComplexityLimits,
 ) -> Result<Vec<PolygonD>, Error> {
     limits.check(paths.iter().map(Vec::len))?;
-    let rings = collect_rings(paths)?;
+    let rings = collect_rings_d(paths)?;
     Ok(polygons_from_rings(&rings, fill_rule))
 }
 
@@ -112,25 +111,6 @@ struct CoordinateFrame {
     origin: PointD,
     /// Half of the longest bounding-box span.
     scale: f64,
-}
-
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-pub(crate) fn point_d_to_64(point: PointD, origin: Point64) -> Result<Point64, Error> {
-    if !point.x.is_finite()
-        || !point.y.is_finite()
-        || point.x < -2_f64.powi(63)
-        || point.x >= 2_f64.powi(63)
-        || point.y < -2_f64.powi(63)
-        || point.y >= 2_f64.powi(63)
-    {
-        return Err(Error::ArithmeticOverflow);
-    }
-    let x = i128::from(point.x as i64) + i128::from(origin.x);
-    let y = i128::from(point.y as i64) + i128::from(origin.y);
-    Ok(Point64::new(
-        i64::try_from(x).map_err(|_| Error::ArithmeticOverflow)?,
-        i64::try_from(y).map_err(|_| Error::ArithmeticOverflow)?,
-    ))
 }
 
 fn polygons_from_rings(rings: &[Ring], fill_rule: FillRule) -> Vec<PolygonD> {
@@ -180,27 +160,88 @@ fn compare_points(left: PointD, right: PointD) -> Ordering {
         .then_with(|| left.y.partial_cmp(&right.y).expect("validated coordinates are finite"))
 }
 
-fn polygons64_from_d(polygons: Vec<PolygonD>, origin: Point64) -> Result<Vec<Polygon64>, Error> {
-    polygons
+#[derive(Clone, Debug)]
+pub(crate) struct Ring64 {
+    pub(crate) vertices: Path64,
+    area: ExactArea,
+    sign: i32,
+    parent: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+enum ExactArea {
+    Small(i128),
+    Big(BigInt),
+}
+
+fn polygons64_from_rings(rings: &[Ring64], fill_rule: FillRule) -> Vec<Polygon64> {
+    let mut polygons = filled_groups(rings, fill_rule)
         .into_iter()
-        .map(|polygon| {
-            Ok(Polygon64 {
-                outer: path64_from_d(polygon.outer, origin)?,
-                holes: polygon
-                    .holes
-                    .into_iter()
-                    .map(|path| path64_from_d(path, origin))
-                    .collect::<Result<_, _>>()?,
-            })
+        .map(|(outer, holes)| {
+            let mut holes = holes
+                .into_iter()
+                .map(|hole| canonical_ring64(&rings[hole].vertices, rings[hole].sign, false))
+                .collect::<Paths64>();
+            holes.sort_by(|left, right| compare_paths64(left, right));
+            Polygon64 {
+                outer: canonical_ring64(&rings[outer].vertices, rings[outer].sign, true),
+                holes,
+            }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    polygons.sort_by(|left, right| compare_paths64(&left.outer, &right.outer));
+    polygons
 }
 
-fn path64_from_d(path: PathD, origin: Point64) -> Result<Path64, Error> {
-    path.into_iter().map(|point| point_d_to_64(point, origin)).collect()
+fn compare_paths64(left: &[Point64], right: &[Point64]) -> Ordering {
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| left.x.cmp(&right.x).then_with(|| left.y.cmp(&right.y)))
+        .find(|ordering| *ordering != Ordering::Equal)
+        .unwrap_or_else(|| left.len().cmp(&right.len()))
 }
 
-pub(crate) fn collect_rings(paths: &[PathD]) -> Result<Vec<Ring>, Error> {
+fn canonical_ring64(path: &[Point64], sign: i32, outer: bool) -> Path64 {
+    let mut canonical = if (outer && sign > 0) || (!outer && sign < 0) {
+        path.to_vec()
+    } else {
+        path.iter().rev().copied().collect()
+    };
+    let start = canonical
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, point)| (point.x, point.y))
+        .map_or(0, |(index, _)| index);
+    canonical.rotate_left(start);
+    canonical
+}
+
+pub(crate) fn collect_rings64(paths: &[Path64]) -> Result<Vec<Ring64>, Error> {
+    let mut rings = Vec::new();
+    for path in paths {
+        let vertices = trim_collinear64(path, crate::PathKind::Closed)?;
+        if vertices.is_empty() {
+            continue;
+        }
+        if vertices.len() < 3 {
+            return Err(Error::TopologyFailure);
+        }
+        let (area, sign) = exact_area(&vertices);
+        if sign == 0 || self_intersects_by(&vertices, segments_intersect64) {
+            return Err(Error::TopologyFailure);
+        }
+        rings.push(Ring64 { vertices, area, sign, parent: None });
+    }
+    assign_parents(
+        &mut rings,
+        |left, right| compare_exact_area(&left.area, &right.area),
+        |child, parent| point_in_path64(child.vertices[0], &parent.vertices),
+        |left, right| rings_intersect_by(&left.vertices, &right.vertices, segments_intersect64),
+    )?;
+    Ok(rings)
+}
+
+pub(crate) fn collect_rings_d(paths: &[PathD]) -> Result<Vec<Ring>, Error> {
     let mut cleaned_paths = Vec::new();
     for path in paths {
         let path = trim_collinear_d(path, crate::PathKind::Closed)?;
@@ -218,39 +259,86 @@ pub(crate) fn collect_rings(paths: &[PathD]) -> Result<Vec<Ring>, Error> {
 
     let frame = CoordinateFrame::from_paths(&cleaned_paths)?;
     let mut rings = Vec::with_capacity(cleaned_paths.len());
-    let mut probes = Vec::with_capacity(cleaned_paths.len());
     for vertices in cleaned_paths {
         let path = frame.normalize_path(&vertices);
         let area = signed_area2_d(&path);
-        if area.abs() <= EPSILON || self_intersects(&path) {
+        if area.abs() <= EPSILON || self_intersects_by(&path, segments_intersect) {
             return Err(Error::TopologyFailure);
         }
-        probes.push(interior_probe(&path, area).ok_or(Error::TopologyFailure)?);
         rings.push(Ring { path, vertices, area, parent: None });
     }
+    assign_parents(
+        &mut rings,
+        |left, right| left.area.abs().partial_cmp(&right.area.abs()).expect("finite area"),
+        |child, parent| point_in_path(child.path[0], &parent.path),
+        |left, right| rings_intersect_by(&left.path, &right.path, segments_intersect),
+    )?;
+    Ok(rings)
+}
 
+pub(crate) trait NestedRing {
+    fn parent(&self) -> Option<usize>;
+    fn set_parent(&mut self, parent: Option<usize>);
+    fn sign(&self) -> i32;
+}
+
+impl NestedRing for Ring {
+    fn parent(&self) -> Option<usize> {
+        self.parent
+    }
+    fn set_parent(&mut self, parent: Option<usize>) {
+        self.parent = parent;
+    }
+    fn sign(&self) -> i32 {
+        if self.area > 0.0 { 1 } else { -1 }
+    }
+}
+
+impl NestedRing for Ring64 {
+    fn parent(&self) -> Option<usize> {
+        self.parent
+    }
+    fn set_parent(&mut self, parent: Option<usize>) {
+        self.parent = parent;
+    }
+    fn sign(&self) -> i32 {
+        self.sign
+    }
+}
+
+fn assign_parents<R>(
+    rings: &mut [R],
+    compare_area: impl Fn(&R, &R) -> Ordering,
+    contains: impl Fn(&R, &R) -> bool,
+    intersects: impl Fn(&R, &R) -> bool,
+) -> Result<(), Error>
+where
+    R: NestedRing,
+{
     for index in 0..rings.len() {
         for other in (index + 1)..rings.len() {
-            if rings_intersect(&rings[index].path, &rings[other].path) {
+            if intersects(&rings[index], &rings[other]) {
                 return Err(Error::IntersectingPaths);
             }
         }
     }
     for index in 0..rings.len() {
-        let mut parent: Option<usize> = None;
+        let mut parent = None;
         for other in 0..rings.len() {
-            if index == other || rings[other].area.abs() <= rings[index].area.abs() {
+            if index == other || compare_area(&rings[other], &rings[index]) != Ordering::Greater {
                 continue;
             }
-            if point_in_path(probes[index], &rings[other].path)
-                && parent.is_none_or(|current| rings[other].area.abs() < rings[current].area.abs())
+            if contains(&rings[index], &rings[other])
+                && parent.is_none_or(|current| {
+                    compare_area(&rings[other], &rings[current]) == Ordering::Less
+                })
             {
                 parent = Some(other);
             }
         }
-        rings[index].parent = parent;
+        rings[index].set_parent(parent);
     }
-    Ok(rings)
+    Ok(())
 }
 
 impl CoordinateFrame {
@@ -284,15 +372,18 @@ impl CoordinateFrame {
     }
 }
 
-pub(crate) fn filled_groups(rings: &[Ring], fill_rule: FillRule) -> Vec<(usize, Vec<usize>)> {
+pub(crate) fn filled_groups<R: NestedRing>(
+    rings: &[R],
+    fill_rule: FillRule,
+) -> Vec<(usize, Vec<usize>)> {
     let mut outer_rings = Vec::new();
     let mut hole_rings = Vec::new();
     for index in 0..rings.len() {
         let mut ancestors = Vec::new();
-        let mut current = rings[index].parent;
+        let mut current = rings[index].parent();
         while let Some(parent) = current {
             ancestors.push(parent);
-            current = rings[parent].parent;
+            current = rings[parent].parent();
         }
         ancestors.reverse();
         let before = winding_value(&ancestors, rings, fill_rule);
@@ -320,36 +411,40 @@ pub(crate) fn filled_groups(rings: &[Ring], fill_rule: FillRule) -> Vec<(usize, 
         .collect()
 }
 
-fn nearest_outer_ancestor(ring: usize, rings: &[Ring], outer_rings: &[usize]) -> Option<usize> {
-    let mut current = rings[ring].parent;
+fn nearest_outer_ancestor<R: NestedRing>(
+    ring: usize,
+    rings: &[R],
+    outer_rings: &[usize],
+) -> Option<usize> {
+    let mut current = rings[ring].parent();
     while let Some(index) = current {
         if outer_rings.contains(&index) {
             return Some(index);
         }
-        current = rings[index].parent;
+        current = rings[index].parent();
     }
     None
 }
 
-fn winding_value(ancestors: &[usize], rings: &[Ring], fill_rule: FillRule) -> i32 {
+fn winding_value<R: NestedRing>(ancestors: &[usize], rings: &[R], fill_rule: FillRule) -> i32 {
     match fill_rule {
         FillRule::EvenOdd => i32::from(!ancestors.len().is_multiple_of(2)),
         FillRule::NonZero | FillRule::Positive | FillRule::Negative => {
-            ancestors.iter().map(|index| sign(rings[*index].area)).sum()
+            ancestors.iter().map(|index| rings[*index].sign()).sum()
         }
     }
 }
 
-fn winding_value_with_current(
+fn winding_value_with_current<R: NestedRing>(
     ancestors: &[usize],
     current: usize,
-    rings: &[Ring],
+    rings: &[R],
     fill_rule: FillRule,
 ) -> i32 {
     match fill_rule {
         FillRule::EvenOdd => i32::from(ancestors.len().is_multiple_of(2)),
         FillRule::NonZero | FillRule::Positive | FillRule::Negative => {
-            winding_value(ancestors, rings, fill_rule) + sign(rings[current].area)
+            winding_value(ancestors, rings, fill_rule) + rings[current].sign()
         }
     }
 }
@@ -362,37 +457,8 @@ fn is_filled(value: i32, fill_rule: FillRule) -> bool {
     }
 }
 
-fn sign(value: f64) -> i32 {
-    if value.is_sign_positive() { 1 } else { -1 }
-}
-
 pub(crate) fn cross(first: PointD, second: PointD, third: PointD) -> f64 {
     (second.x - first.x) * (third.y - first.y) - (second.y - first.y) * (third.x - first.x)
-}
-
-fn interior_probe(path: &[PointD], area: f64) -> Option<PointD> {
-    let scale =
-        path.iter().flat_map(|point| [point.x.abs(), point.y.abs()]).fold(1.0_f64, f64::max);
-    let inward_sign = if area > 0.0 { 1.0 } else { -1.0 };
-    for pair in path.windows(2).chain(std::iter::once(&[path[path.len() - 1], path[0]][..])) {
-        let direction = PointD::new(pair[1].x - pair[0].x, pair[1].y - pair[0].y);
-        let length = direction.x.hypot(direction.y);
-        if length <= EPSILON {
-            continue;
-        }
-        let normal =
-            PointD::new(-direction.y / length * inward_sign, direction.x / length * inward_sign);
-        let midpoint = PointD::new((pair[0].x + pair[1].x) * 0.5, (pair[0].y + pair[1].y) * 0.5);
-        for exponent in [7_i32, 9, 11, 13] {
-            let distance = scale * 10_f64.powi(-exponent);
-            let candidate =
-                PointD::new(midpoint.x + normal.x * distance, midpoint.y + normal.y * distance);
-            if point_in_path(candidate, path) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
 }
 
 fn point_in_path(point: PointD, path: &[PointD]) -> bool {
@@ -413,7 +479,10 @@ fn point_in_path(point: PointD, path: &[PointD]) -> bool {
     inside
 }
 
-fn self_intersects(path: &[PointD]) -> bool {
+fn self_intersects_by<P: Copy, F>(path: &[P], intersects: F) -> bool
+where
+    F: Fn(P, P, P, P) -> bool + Copy,
+{
     let edge_count = path.len();
     for first in 0..edge_count {
         let first_end = (first + 1) % edge_count;
@@ -422,7 +491,7 @@ fn self_intersects(path: &[PointD]) -> bool {
             if first_end == second || second_end == first {
                 continue;
             }
-            if segments_intersect(path[first], path[first_end], path[second], path[second_end]) {
+            if intersects(path[first], path[first_end], path[second], path[second_end]) {
                 return true;
             }
         }
@@ -430,12 +499,15 @@ fn self_intersects(path: &[PointD]) -> bool {
     false
 }
 
-fn rings_intersect(first: &[PointD], second: &[PointD]) -> bool {
+fn rings_intersect_by<P: Copy, F>(first: &[P], second: &[P], intersects: F) -> bool
+where
+    F: Fn(P, P, P, P) -> bool + Copy,
+{
     for first_index in 0..first.len() {
         let first_end = (first_index + 1) % first.len();
         for second_index in 0..second.len() {
             let second_end = (second_index + 1) % second.len();
-            if segments_intersect(
+            if intersects(
                 first[first_index],
                 first[first_end],
                 second[second_index],
@@ -474,6 +546,99 @@ fn on_segment(point: PointD, first: PointD, second: PointD) -> bool {
         && point.x <= first.x.max(second.x) + EPSILON
         && point.y >= first.y.min(second.y) - EPSILON
         && point.y <= first.y.max(second.y) + EPSILON
+}
+
+fn exact_area(path: &[Point64]) -> (ExactArea, i32) {
+    let mut area = 0_i128;
+    let small = path
+        .iter()
+        .copied()
+        .zip(path.iter().copied().cycle().skip(1))
+        .take(path.len())
+        .try_for_each(|(a, b)| {
+            let term = i128::from(a.x)
+                .checked_mul(i128::from(b.y))?
+                .checked_sub(i128::from(a.y).checked_mul(i128::from(b.x))?)?;
+            area = area.checked_add(term)?;
+            Some(())
+        });
+    if small.is_some() {
+        let sign = match area.cmp(&0) {
+            Ordering::Less => -1,
+            Ordering::Equal => 0,
+            Ordering::Greater => 1,
+        };
+        return (ExactArea::Small(area), sign);
+    }
+    let area =
+        path.iter().copied().zip(path.iter().copied().cycle().skip(1)).take(path.len()).fold(
+            BigInt::from(0),
+            |sum, (a, b)| {
+                sum + BigInt::from(a.x) * BigInt::from(b.y) - BigInt::from(a.y) * BigInt::from(b.x)
+            },
+        );
+    let sign = match area.cmp(&BigInt::from(0)) {
+        Ordering::Less => -1,
+        Ordering::Equal => 0,
+        Ordering::Greater => 1,
+    };
+    (ExactArea::Big(area), sign)
+}
+
+fn compare_exact_area(left: &ExactArea, right: &ExactArea) -> Ordering {
+    match (left, right) {
+        (ExactArea::Small(left), ExactArea::Small(right)) => {
+            left.unsigned_abs().cmp(&right.unsigned_abs())
+        }
+        _ => exact_area_big(left).abs().cmp(&exact_area_big(right).abs()),
+    }
+}
+
+fn exact_area_big(area: &ExactArea) -> BigInt {
+    match area {
+        ExactArea::Small(value) => BigInt::from(*value),
+        ExactArea::Big(value) => value.clone(),
+    }
+}
+
+fn on_segment64(point: Point64, a: Point64, b: Point64) -> bool {
+    point.x >= a.x.min(b.x)
+        && point.x <= a.x.max(b.x)
+        && point.y >= a.y.min(b.y)
+        && point.y <= a.y.max(b.y)
+}
+
+fn segments_intersect64(a: Point64, b: Point64, c: Point64, d: Point64) -> bool {
+    let ab_c = cross_ordering(a, b, c);
+    let ab_d = cross_ordering(a, b, d);
+    let cd_a = cross_ordering(c, d, a);
+    let cd_b = cross_ordering(c, d, b);
+    if ab_c == Ordering::Equal && on_segment64(c, a, b)
+        || ab_d == Ordering::Equal && on_segment64(d, a, b)
+        || cd_a == Ordering::Equal && on_segment64(a, c, d)
+        || cd_b == Ordering::Equal && on_segment64(b, c, d)
+    {
+        return true;
+    }
+    ((ab_c == Ordering::Less && ab_d == Ordering::Greater)
+        || (ab_c == Ordering::Greater && ab_d == Ordering::Less))
+        && ((cd_a == Ordering::Less && cd_b == Ordering::Greater)
+            || (cd_a == Ordering::Greater && cd_b == Ordering::Less))
+}
+
+fn point_in_path64(point: Point64, path: &[Point64]) -> bool {
+    let mut inside = false;
+    for (a, b) in path.iter().copied().zip(path.iter().copied().cycle().skip(1)).take(path.len()) {
+        if (a.y > point.y) != (b.y > point.y) {
+            let orientation = cross_ordering(a, b, point);
+            if (b.y > a.y && orientation == Ordering::Greater)
+                || (b.y < a.y && orientation == Ordering::Less)
+            {
+                inside = !inside;
+            }
+        }
+    }
+    inside
 }
 
 #[cfg(test)]
@@ -708,15 +873,173 @@ mod tests {
             Point64::new(0, exact_limit),
             Point64::new(exact_limit, 0),
         ];
+        let expected =
+            build_polygons64(std::slice::from_ref(&integer_ring), FillRule::EvenOdd).unwrap();
         for start in 0..integer_ring.len() {
             let mut rotated = integer_ring.clone();
             rotated.rotate_left(start);
             assert_eq!(
-                build_polygons64(&[rotated], FillRule::EvenOdd),
-                Err(Error::ArithmeticOverflow),
+                build_polygons64(&[rotated], FillRule::EvenOdd).unwrap(),
+                expected,
                 "ring start {start}"
             );
         }
+    }
+
+    fn rectangle64(left: i64, bottom: i64, right: i64, top: i64) -> Path64 {
+        vec![
+            Point64::new(left, bottom),
+            Point64::new(right, bottom),
+            Point64::new(right, top),
+            Point64::new(left, top),
+        ]
+    }
+
+    #[test]
+    fn integer_topology_is_exact_across_full_domain() {
+        let outer = rectangle64(i64::MIN, i64::MIN, i64::MAX, i64::MAX);
+        let hole = rectangle64(-1, -1, 1, 1);
+        let expected = build_polygons64(&[outer.clone(), hole.clone()], FillRule::EvenOdd).unwrap();
+        assert_eq!(expected.len(), 1);
+        assert_eq!(expected[0].outer, outer);
+        assert_eq!(
+            expected[0].holes,
+            vec![vec![
+                Point64::new(-1, -1),
+                Point64::new(-1, 1),
+                Point64::new(1, 1),
+                Point64::new(1, -1),
+            ]]
+        );
+
+        for reverse_mask in 0..4 {
+            let mut paths = vec![outer.clone(), hole.clone()];
+            if reverse_mask & 1 != 0 {
+                paths[0].reverse();
+            }
+            if reverse_mask & 2 != 0 {
+                paths[1].reverse();
+            }
+            paths.reverse();
+            for path in &mut paths {
+                path.rotate_left(1);
+            }
+            assert_eq!(build_polygons64(&paths, FillRule::EvenOdd).unwrap(), expected);
+        }
+
+        let thin =
+            vec![Point64::new(i64::MIN, 0), Point64::new(i64::MAX, 0), Point64::new(i64::MAX, 1)];
+        assert_eq!(build_polygons64(&[thin], FillRule::EvenOdd).unwrap().len(), 1);
+
+        let local = vec![rectangle64(0, 0, 100, 100), rectangle64(20, 20, 80, 80)];
+        let translated = vec![
+            rectangle64(i64::MAX - 100, i64::MAX - 100, i64::MAX, i64::MAX),
+            rectangle64(i64::MAX - 80, i64::MAX - 80, i64::MAX - 20, i64::MAX - 20),
+        ];
+        let local_result = build_polygons64(&local, FillRule::EvenOdd).unwrap();
+        let translated_result = build_polygons64(&translated, FillRule::EvenOdd).unwrap();
+        assert_eq!(local_result.len(), translated_result.len());
+        assert_eq!(local_result[0].holes.len(), translated_result[0].holes.len());
+
+        assert_eq!(
+            build_polygons64(std::slice::from_ref(&outer), FillRule::Positive).unwrap().len(),
+            1
+        );
+        let mut clockwise = outer;
+        clockwise.reverse();
+        assert_eq!(
+            build_polygons64(std::slice::from_ref(&clockwise), FillRule::Negative).unwrap().len(),
+            1
+        );
+
+        let sorted = build_polygons64(
+            &[
+                rectangle64(0, 0, 100, 100),
+                rectangle64(60, 20, 80, 40),
+                rectangle64(20, 20, 40, 40),
+                rectangle64(200, 0, 210, 10),
+            ],
+            FillRule::EvenOdd,
+        )
+        .unwrap();
+        assert_eq!(sorted.len(), 2);
+        assert_eq!(sorted[0].holes.len(), 2);
+        assert_eq!(compare_paths64(&sorted[0].outer, &sorted[0].outer), Ordering::Equal);
+    }
+
+    #[test]
+    fn integer_topology_distinguishes_gaps_contacts_and_crossings() {
+        assert!(build_polygons64(&[Vec::new()], FillRule::EvenOdd).unwrap().is_empty());
+        assert_eq!(
+            build_polygons64(
+                &[vec![Point64::new(0, 0), Point64::new(1, 0), Point64::new(2, 0)]],
+                FillRule::EvenOdd,
+            ),
+            Err(Error::TopologyFailure)
+        );
+        let left = rectangle64(0, 0, 10, 10);
+        assert_eq!(
+            build_polygons64(&[left.clone(), rectangle64(11, 0, 20, 10)], FillRule::EvenOdd)
+                .unwrap()
+                .len(),
+            2
+        );
+        for invalid in [rectangle64(10, 0, 20, 10), rectangle64(5, -1, 15, 5), left.clone()] {
+            assert_eq!(
+                build_polygons64(&[left.clone(), invalid], FillRule::EvenOdd),
+                Err(Error::IntersectingPaths)
+            );
+        }
+        let bow_tie = vec![
+            Point64::new(i64::MIN, i64::MIN),
+            Point64::new(i64::MAX, i64::MAX),
+            Point64::new(i64::MIN, i64::MAX),
+            Point64::new(i64::MAX, i64::MIN),
+        ];
+        assert_eq!(build_polygons64(&[bow_tie], FillRule::EvenOdd), Err(Error::TopologyFailure));
+        let nonzero_crossing = vec![
+            Point64::new(0, 0),
+            Point64::new(10, 0),
+            Point64::new(10, -10),
+            Point64::new(5, -5),
+            Point64::new(5, 5),
+        ];
+        assert_eq!(
+            build_polygons64(&[nonzero_crossing], FillRule::EvenOdd),
+            Err(Error::TopologyFailure)
+        );
+        let (area, sign) = exact_area(&[
+            Point64::new(i64::MIN, i64::MIN),
+            Point64::new(i64::MAX, i64::MIN),
+            Point64::new(i64::MAX, i64::MAX),
+            Point64::new(i64::MIN, i64::MAX),
+            Point64::new(i64::MIN, i64::MIN),
+            Point64::new(i64::MIN, i64::MAX),
+            Point64::new(i64::MAX, i64::MAX),
+            Point64::new(i64::MAX, i64::MIN),
+        ]);
+        assert!(matches!(area, ExactArea::Big(_)));
+        assert_eq!(sign, 0);
+    }
+
+    #[test]
+    fn integer_limits_precede_exact_topology_work() {
+        let invalid = vec![
+            vec![Point64::new(i64::MIN, i64::MIN); 4],
+            rectangle64(i64::MIN, i64::MIN, i64::MAX, i64::MAX),
+        ];
+        assert_eq!(
+            super::build_polygons64(
+                &invalid,
+                FillRule::EvenOdd,
+                ComplexityLimits::new(1, usize::MAX, usize::MAX),
+            ),
+            Err(Error::LimitExceeded {
+                resource: ComplexityResource::Paths,
+                limit: 1,
+                required: 2,
+            })
+        );
     }
 
     fn ring(area: f64, parent: Option<usize>) -> Ring {
@@ -725,8 +1048,6 @@ mod tests {
 
     #[test]
     fn covers_nesting_predicates_and_coordinate_frames() {
-        assert!(interior_probe(&[PointD::new(0.0, 0.0), PointD::new(0.0, 0.0)], 1.0).is_none());
-        assert!(interior_probe(&rectangle(0.0, 0.0, 100.0, 100.0), -1.0).is_none());
         assert!(point_in_path(PointD::new(0.0, 0.0), &rectangle(0.0, 0.0, 1.0, 1.0)));
         assert!(point_in_path(PointD::new(0.5, 0.5), &rectangle(0.0, 0.0, 1.0, 1.0)));
         assert!(!point_in_path(PointD::new(2.0, 0.5), &rectangle(0.0, 0.0, 1.0, 1.0)));
@@ -752,8 +1073,6 @@ mod tests {
         assert!(!is_filled(1, FillRule::Negative));
         assert!(!is_filled(-1, FillRule::Positive));
         assert!(is_filled(-1, FillRule::Negative));
-        assert_eq!(sign(1.0), 1);
-        assert_eq!(sign(-1.0), -1);
 
         let degenerate = vec![vec![PointD::new(1.0, 1.0); 3]];
         assert_eq!(CoordinateFrame::from_paths(&degenerate).unwrap_err(), Error::TopologyFailure);
@@ -785,6 +1104,16 @@ mod tests {
         ] {
             assert!(segments_intersect(first, first_end, second, second_end));
         }
+        let horizontal_start64 = Point64::new(0, 0);
+        let horizontal_end64 = Point64::new(10, 0);
+        for (first, first_end, second, second_end) in [
+            (horizontal_start64, horizontal_end64, Point64::new(2, 0), Point64::new(2, 1)),
+            (horizontal_start64, horizontal_end64, Point64::new(2, 1), Point64::new(2, 0)),
+            (Point64::new(2, 0), Point64::new(2, 1), horizontal_start64, horizontal_end64),
+            (Point64::new(2, 1), Point64::new(2, 0), horizontal_start64, horizontal_end64),
+        ] {
+            assert!(segments_intersect64(first, first_end, second, second_end));
+        }
         assert!(!segments_intersect(
             PointD::new(0.0, 0.0),
             PointD::new(1.0, 0.0),
@@ -812,14 +1141,21 @@ mod tests {
         ] {
             assert!(!segments_intersect(first, first_end, second, second_end));
         }
-        assert!(!rings_intersect(&rectangle(0.0, 0.0, 1.0, 1.0), &rectangle(2.0, 2.0, 3.0, 3.0)));
-        assert!(!self_intersects(&rectangle(0.0, 0.0, 1.0, 1.0)));
-        assert!(self_intersects(&[
-            PointD::new(0.0, 0.0),
-            PointD::new(10.0, 10.0),
-            PointD::new(0.0, 8.0),
-            PointD::new(10.0, 0.0),
-            PointD::new(5.0, 2.0),
-        ]));
+        assert!(!rings_intersect_by(
+            &rectangle(0.0, 0.0, 1.0, 1.0),
+            &rectangle(2.0, 2.0, 3.0, 3.0),
+            segments_intersect,
+        ));
+        assert!(!self_intersects_by(&rectangle(0.0, 0.0, 1.0, 1.0), segments_intersect,));
+        assert!(self_intersects_by(
+            &[
+                PointD::new(0.0, 0.0),
+                PointD::new(10.0, 10.0),
+                PointD::new(0.0, 8.0),
+                PointD::new(10.0, 0.0),
+                PointD::new(5.0, 2.0),
+            ],
+            segments_intersect
+        ));
     }
 }
