@@ -1,5 +1,5 @@
 use knipsa::{
-    BooleanRequestD, ClipType, FillRule, JoinType, OffsetOptions, PathKind, PointD,
+    BooleanRequest, ClipType, FillRule, JoinType, OffsetOptions, PathKind, PointD,
     ComplexityLimits, boolean_op_d, normalize_path_d, offset_path_d, triangulate_path_d,
 };
 
@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let ring = normalize_path_d(&ring, PathKind::Closed);
     let subjects = vec![ring.clone()];
-    let union = boolean_op_d(BooleanRequestD::new(
+    let union = boolean_op_d(BooleanRequest::new(
         &subjects,
         &[],
         ClipType::Union,
@@ -22,7 +22,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let offset = offset_path_d(&ring, 1.0, OffsetOptions::polygon(JoinType::Miter))?;
     let triangles = triangulate_path_d(&ring, ComplexityLimits::DEFAULT)?;
 
-    assert_eq!(union.len(), 1);
+    assert_eq!(union.closed.len(), 1);
+    assert!(union.open.is_empty());
     assert_eq!(offset.len(), 1);
     assert_eq!(triangles.len(), 2);
     Ok(())

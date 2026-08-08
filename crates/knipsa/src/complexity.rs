@@ -79,6 +79,67 @@ impl ComplexityLimits {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct BooleanComplexity {
+    paths: usize,
+    vertices: usize,
+    filled_vertices: usize,
+    subject_edges: usize,
+    clip_edges: usize,
+    open_edges: usize,
+    filled_edge_pairs: usize,
+}
+
+impl BooleanComplexity {
+    pub(crate) fn add_closed_subject(&mut self, vertices: usize) {
+        self.add_filled(vertices);
+        self.subject_edges = self.subject_edges.saturating_add(vertices);
+    }
+
+    pub(crate) fn add_open_subject(&mut self, vertices: usize) {
+        self.add_path(vertices);
+        self.open_edges = self.open_edges.saturating_add(vertices.saturating_sub(1));
+    }
+
+    pub(crate) fn add_clip(&mut self, vertices: usize) {
+        self.add_filled(vertices);
+        self.clip_edges = self.clip_edges.saturating_add(vertices);
+    }
+
+    pub(crate) fn check(
+        self,
+        limits: ComplexityLimits,
+        open_against_closed_subjects: bool,
+    ) -> Result<(), Error> {
+        let open_boundaries = if open_against_closed_subjects {
+            self.clip_edges.saturating_add(self.subject_edges)
+        } else {
+            self.clip_edges
+        };
+        let edge_pairs =
+            self.filled_edge_pairs.saturating_add(self.open_edges.saturating_mul(open_boundaries));
+        check_limit(ComplexityResource::Paths, self.paths, limits.paths)?;
+        check_limit(ComplexityResource::Vertices, self.vertices, limits.vertices)?;
+        check_limit(ComplexityResource::EdgePairs, edge_pairs, limits.edge_pairs)
+    }
+
+    fn add_filled(&mut self, vertices: usize) {
+        self.add_path(vertices);
+        self.filled_edge_pairs =
+            self.filled_edge_pairs.saturating_add(self.filled_vertices.saturating_mul(vertices));
+        if vertices >= 3 {
+            self.filled_edge_pairs =
+                self.filled_edge_pairs.saturating_add(vertices.saturating_mul(vertices - 3) / 2);
+        }
+        self.filled_vertices = self.filled_vertices.saturating_add(vertices);
+    }
+
+    fn add_path(&mut self, vertices: usize) {
+        self.paths = self.paths.saturating_add(1);
+        self.vertices = self.vertices.saturating_add(vertices);
+    }
+}
+
 impl Default for ComplexityLimits {
     fn default() -> Self {
         Self::DEFAULT

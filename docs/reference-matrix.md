@@ -63,8 +63,20 @@ Open paths, offsets, floating-point coordinates, and exact-rational outputs are
 separate profiles. A library that does not implement a feature cannot silently
 turn a missing result into a pass.
 
+`benchmarks/open-workloads.json` is the executable `integer-open-v1` Boolean
+profile. Its 22 generated cases cover all four operations, all fill rules,
+inside/outside clipping, direction preservation, boundary-collinear runs,
+vertex tangency, multiple open subjects and clip components, holes, combined
+closed/open output, and coordinates beyond exact `f64` representation.
+`make conformance-open` compares separate `closed` and `open` outputs with
+Clipper2's native `Paths64` open-subject API. Closed boundaries use exact
+undirected atomic edges; open polylines use exact directed atomic edges, so
+path order and harmless collinear subdivision may differ but direction,
+multiplicity, and every segment must agree. Adapter errors, missing records,
+non-integer output, or uncalibrated timings fail the gate.
+
 `benchmarks/offset-workloads.json` is the executable floating-point offset and
-open-path profile. `make conformance-offset` compares polygon expansion and
+open-stroke profile. `make conformance-offset` compares polygon expansion and
 contraction, all join families, open caps, holes, overlap cleanup, collapse,
 rounding tolerance, and translated coordinates against pinned Clipper2. CI
 requires all cases to match their per-case boundary and area budgets.

@@ -39,10 +39,10 @@ as `iterations_per_sample`; single-call timings are not accepted for these
 comparisons because timer resolution and CPU frequency ramp-up can dominate
 the smallest workloads.
 
-Knipsa's Boolean, offset, and triangulation workload binaries call the same
-Rust measurement module. Warm-up count, calibration ceiling, minimum sample
-duration, sampling, and percentile selection therefore have one implementation
-instead of three independently drifting loops.
+Knipsa's closed Boolean, open Boolean, offset, and triangulation workload
+binaries call the same Rust measurement module. Warm-up count, calibration
+ceiling, minimum sample duration, sampling, and percentile selection therefore
+have one implementation instead of independently drifting loops.
 
 ## Reproducibility
 
@@ -66,7 +66,12 @@ floating profile and `Paths64` for `benchmarks/integer-workloads.json`; the
 latter preserves decimal JSON integers exactly and compares with zero
 tolerance. Knipsa's workload binary likewise dispatches the same calibration
 loop to `boolean_op_d` or `boolean_op`, so coordinate profiles cannot drift in
-timing methodology.
+timing methodology. The separate open-path binary measures the generic
+`BooleanRequest` with both closed and open subjects and records the two output
+collections separately. Its Clipper2 adapter constructs a native `Clipper64`
+request inside every timed operation, matching the public-call boundary
+measured by Knipsa. The exact directed-edge comparator remains outside both
+timed regions.
 The Boost adapter is also native C++ and measures only its public overlay call
 for single-ring inputs; input validation and output serialization remain
 outside the timed region. When multiple contours must first be resolved under

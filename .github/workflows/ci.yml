@@ -55,6 +55,7 @@ jobs:
       - run: ./benchmarks/reference/build-clipper2.sh
       - run: ./benchmarks/reference/build-jts.sh
       - run: make conformance-integer
+      - run: make conformance-open
       - run: make conformance-offset
       - run: make conformance-triangulation
       - run: make conformance-triangulation-d

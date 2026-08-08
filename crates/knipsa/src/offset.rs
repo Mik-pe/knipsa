@@ -7,7 +7,7 @@
 //! Boolean union, which removes negative slivers and merges overlapping lobes.
 
 use crate::{
-    BooleanRequestD, ClipType, Error, FillRule, Path64, PathD, PathKind, Paths64, PathsD, Point64,
+    BooleanRequest, ClipType, Error, FillRule, Path64, PathD, PathKind, Paths64, PathsD, Point64,
     PointD, boolean_op_d,
     geometry::{paths64_to_local_d, signed_area2_d},
     normalize_path_d, validate_path_d,
@@ -246,13 +246,15 @@ fn merge_generated_contours(
     // overlapping offsets from multiple input paths. The boolean kernel only
     // emits non-degenerate rings, so cleaning cannot collapse a result below
     // the closed-path minimum.
-    let result = boolean_op_d(BooleanRequestD {
-        subjects: generated,
+    let result = boolean_op_d(BooleanRequest {
+        closed_subjects: generated,
+        open_subjects: &[],
         clips: &[],
         clip_type: ClipType::Union,
         fill_rule: FillRule::NonZero,
+        limits: crate::ComplexityLimits::DEFAULT,
     })?;
-    Ok(result.into_iter().map(|path| clean_ring(path, preserve_collinear)).collect())
+    Ok(result.closed.into_iter().map(|path| clean_ring(path, preserve_collinear)).collect())
 }
 
 /// Offsets one floating-point path.

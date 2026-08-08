@@ -40,6 +40,11 @@ profile instead of being reimplemented for integers.
 
 Feature gates use their own semantic comparators. `make conformance-offset`
 checks region area and bidirectional boundary distance against Clipper2.
+`make conformance-open` checks 22 exact integer Boolean cases against
+Clipper2's native open-subject API. It validates the separate closed and open
+outputs with atomic edges: closed boundary direction is irrelevant, while
+open direction and edge multiplicity are part of the contract. Collinear
+subdivision alone is not a mismatch.
 `make conformance-triangulation` checks 12 integer cases against both Clipper2
 and the independent `geo`/Spade constrained-Delaunay family. It accepts
 different internal diagonals only after proving non-degenerate,

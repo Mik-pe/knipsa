@@ -14,8 +14,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use num_bigint::{BigInt, Sign};
 use num_traits::{One, Signed, ToPrimitive, Zero};
 
+use crate::dispatch::{cross64, ratio_in_unit_interval, vector64};
 use crate::{
-    BooleanRequest, BooleanRequestD, ClipType, Error, FillRule, Path64, PathD, Paths64, PathsD,
+    BooleanOutput, BooleanRequest, ClipType, Error, FillRule, Path64, PathD, Paths64, PathsD,
     Point64, PointD, normalize_path_d, normalize_path64,
 };
 
@@ -361,30 +362,388 @@ struct FaceLink {
     clip_delta: i128,
 }
 
-pub(crate) fn boolean_op64(request: BooleanRequest<'_>) -> Result<Paths64, Error> {
-    if let Some(result) = crate::dispatch::try_boolean_op64(request) {
-        return Ok(result);
+pub(crate) fn boolean_op64(
+    request: &BooleanRequest<'_, Path64>,
+) -> Result<BooleanOutput<Path64>, Error> {
+    let closed: Result<Paths64, Error> = if request.closed_subjects.is_empty()
+        && matches!(request.clip_type, ClipType::Intersection | ClipType::Difference)
+    {
+        Ok(Vec::new())
+    } else if let Some(result) = crate::dispatch::try_boolean_op64(request) {
+        Ok(result)
+    } else {
+        let subjects = exact_paths64(request.closed_subjects);
+        let clips = exact_paths64(request.clips);
+        let result = run_boolean(
+            &subjects,
+            &clips,
+            request.clip_type,
+            request.fill_rule,
+            INTEGER_SAMPLE_BITS,
+        );
+        finish_exact_boolean(result)
+    };
+    if request.open_subjects.is_empty() {
+        return closed.map(|closed| BooleanOutput { closed, open: Vec::new() });
     }
-    let subjects = exact_paths64(request.subjects);
-    let clips = exact_paths64(request.clips);
-    let result =
-        run_boolean(&subjects, &clips, request.clip_type, request.fill_rule, INTEGER_SAMPLE_BITS)?;
-    exact_paths_to_i64(&result)
+    closed.and_then(|closed| {
+        let open = if let Some(open) = try_clip_open_paths64(
+            request.open_subjects,
+            request.closed_subjects,
+            request.clips,
+            request.clip_type,
+            request.fill_rule,
+        ) {
+            Ok(open)
+        } else {
+            let closed_subjects = exact_paths64(request.closed_subjects);
+            let clips = exact_paths64(request.clips);
+            let open_subjects = exact_open_paths64(request.open_subjects);
+            let open = clip_open_paths(
+                &open_subjects,
+                &closed_subjects,
+                &clips,
+                request.clip_type,
+                request.fill_rule,
+            );
+            exact_paths_to_i64(&open)
+        };
+        open.map(|open| BooleanOutput { closed, open })
+    })
 }
 
-pub(crate) fn boolean_op_d(request: BooleanRequestD<'_>) -> Result<PathsD, Error> {
-    if let Some(result) = crate::dispatch::try_boolean_op_d(request) {
-        return Ok(result);
+pub(crate) fn boolean_op_d(
+    request: &BooleanRequest<'_, PathD>,
+) -> Result<BooleanOutput<PathD>, Error> {
+    let closed = if request.closed_subjects.is_empty()
+        && matches!(request.clip_type, ClipType::Intersection | ClipType::Difference)
+    {
+        Vec::new()
+    } else if let Some(result) = crate::dispatch::try_boolean_op_d(request) {
+        result
+    } else {
+        boolean_op_d_exact(request)?
+    };
+    if request.open_subjects.is_empty() {
+        return Ok(BooleanOutput { closed, open: Vec::new() });
     }
-    boolean_op_d_exact(request)
+    let closed_subjects = exact_paths_d(request.closed_subjects)?;
+    let clips = exact_paths_d(request.clips)?;
+    let open_subjects = exact_open_paths_d(request.open_subjects)?;
+    let open = clip_open_paths(
+        &open_subjects,
+        &closed_subjects,
+        &clips,
+        request.clip_type,
+        request.fill_rule,
+    );
+    Ok(BooleanOutput { closed, open: exact_paths_to_f64(&open)? })
 }
 
-pub(crate) fn boolean_op_d_exact(request: BooleanRequestD<'_>) -> Result<PathsD, Error> {
-    let subjects = exact_paths_d(request.subjects)?;
+pub(crate) fn boolean_op_d_exact(request: &BooleanRequest<'_, PathD>) -> Result<PathsD, Error> {
+    let subjects = exact_paths_d(request.closed_subjects)?;
     let clips = exact_paths_d(request.clips)?;
     let result =
         run_boolean(&subjects, &clips, request.clip_type, request.fill_rule, DOUBLE_SAMPLE_BITS)?;
     exact_paths_to_f64(&result)
+}
+
+fn exact_open_paths64(paths: &[Path64]) -> Vec<ExactPath> {
+    let mut exact = Vec::with_capacity(paths.len());
+    for path in paths {
+        let normalized = normalize_path64(path, crate::PathKind::Open);
+        if normalized.len() < 2 {
+            continue;
+        }
+        let mut converted = Vec::with_capacity(normalized.len());
+        for point in normalized {
+            converted
+                .push(ExactPoint::new(Rational::from_i64(point.x), Rational::from_i64(point.y)));
+        }
+        exact.push(converted);
+    }
+    exact
+}
+
+fn exact_open_paths_d(paths: &[PathD]) -> Result<Vec<ExactPath>, Error> {
+    let mut exact = Vec::with_capacity(paths.len());
+    for path in paths {
+        let normalized = normalize_path_d(path, crate::PathKind::Open);
+        if normalized.len() < 2 {
+            continue;
+        }
+        let mut converted = Vec::with_capacity(normalized.len());
+        for point in normalized {
+            converted
+                .push(ExactPoint::new(Rational::from_f64(point.x)?, Rational::from_f64(point.y)?));
+        }
+        exact.push(converted);
+    }
+    Ok(exact)
+}
+
+#[derive(Clone, Copy)]
+struct OpenFragment64 {
+    start: Point64,
+    end: Point64,
+    keep: Option<bool>,
+}
+
+enum MidpointWinding64 {
+    Boundary,
+    Winding(i128),
+}
+
+enum OpenKeep64 {
+    Boundary,
+    Keep(bool),
+}
+
+fn try_clip_open_paths64(
+    open_paths: &[Path64],
+    closed_subjects: &[Path64],
+    clips: &[Path64],
+    clip_type: ClipType,
+    fill_rule: FillRule,
+) -> Option<Paths64> {
+    let boundary_paths = if clip_type == ClipType::Union {
+        closed_subjects.iter().chain(clips).collect::<Vec<_>>()
+    } else {
+        clips.iter().collect::<Vec<_>>()
+    };
+    let boundary_edges = boundary_paths
+        .iter()
+        .flat_map(|path| {
+            path.iter().copied().zip(path.iter().copied().cycle().skip(1)).take(path.len())
+        })
+        .collect::<Vec<_>>();
+    let mut output = Vec::new();
+    for input in open_paths {
+        let normalized;
+        let path = if input.windows(2).all(|pair| pair[0] != pair[1]) {
+            input.as_slice()
+        } else {
+            normalized = normalize_path64(input, crate::PathKind::Open);
+            normalized.as_slice()
+        };
+        if path.len() < 2 {
+            continue;
+        }
+        let mut fragments = Vec::new();
+        let mut points = Vec::with_capacity(boundary_edges.len().saturating_add(2));
+        for pair in path.windows(2) {
+            points.clear();
+            points.extend_from_slice(pair);
+            for &(start, end) in &boundary_edges {
+                split_edge_pair64(pair[0], pair[1], start, end, &mut points)?;
+            }
+            sort_points_on_segment64(&mut points, pair[0], pair[1]);
+            for atomic in points.windows(2) {
+                let keep = match open_fragment_keep64(
+                    atomic[0],
+                    atomic[1],
+                    closed_subjects,
+                    clips,
+                    clip_type,
+                    fill_rule,
+                )? {
+                    OpenKeep64::Boundary => None,
+                    OpenKeep64::Keep(keep) => Some(keep),
+                };
+                fragments.push(OpenFragment64 { start: atomic[0], end: atomic[1], keep });
+            }
+        }
+        resolve_boundary_fragments64(&mut fragments);
+        append_open_fragments64(&fragments, &mut output);
+    }
+    Some(output)
+}
+
+fn split_edge_pair64(
+    first_start: Point64,
+    first_end: Point64,
+    second_start: Point64,
+    second_end: Point64,
+    points: &mut Vec<Point64>,
+) -> Option<()> {
+    let first = vector64(first_start, first_end);
+    let second = vector64(second_start, second_end);
+    let between = vector64(first_start, second_start);
+    let denominator = cross64(first, second)?;
+    if denominator == 0 {
+        if cross64(between, first)? != 0 {
+            return Some(());
+        }
+        for point in [second_start, second_end] {
+            if point_on_segment64(point, first_start, first_end)? && !points.contains(&point) {
+                points.push(point);
+            }
+        }
+        return Some(());
+    }
+    let first_numerator = cross64(between, second)?;
+    let second_numerator = cross64(between, first)?;
+    if !ratio_in_unit_interval(first_numerator, denominator)
+        || !ratio_in_unit_interval(second_numerator, denominator)
+    {
+        return Some(());
+    }
+    let x_delta = first.0.checked_mul(first_numerator)?;
+    let y_delta = first.1.checked_mul(first_numerator)?;
+    if x_delta % denominator != 0 || y_delta % denominator != 0 {
+        return None;
+    }
+    let x = i128::from(first_start.x).checked_add(x_delta / denominator)?;
+    let y = i128::from(first_start.y).checked_add(y_delta / denominator)?;
+    let point = Point64::new(i64::try_from(x).ok()?, i64::try_from(y).ok()?);
+    if !points.contains(&point) {
+        points.push(point);
+    }
+    Some(())
+}
+
+fn point_on_segment64(point: Point64, start: Point64, end: Point64) -> Option<bool> {
+    if cross64(vector64(start, point), vector64(start, end))? != 0 {
+        return Some(false);
+    }
+    Some(
+        point.x >= start.x.min(end.x)
+            && point.x <= start.x.max(end.x)
+            && point.y >= start.y.min(end.y)
+            && point.y <= start.y.max(end.y),
+    )
+}
+
+fn sort_points_on_segment64(points: &mut Vec<Point64>, start: Point64, end: Point64) {
+    let use_x = (i128::from(end.x) - i128::from(start.x)).abs()
+        >= (i128::from(end.y) - i128::from(start.y)).abs();
+    points.sort_unstable_by(|left, right| {
+        // Every point lies on this non-zero segment, so its dominant
+        // coordinate uniquely determines its position. Intersections are
+        // deduplicated before sorting; no secondary tie-breaker is needed.
+        let order = if use_x { left.x.cmp(&right.x) } else { left.y.cmp(&right.y) };
+        if (use_x && end.x < start.x) || (!use_x && end.y < start.y) {
+            order.reverse()
+        } else {
+            order
+        }
+    });
+    points.dedup();
+}
+
+fn open_fragment_keep64(
+    start: Point64,
+    end: Point64,
+    closed_subjects: &[Path64],
+    clips: &[Path64],
+    clip_type: ClipType,
+    fill_rule: FillRule,
+) -> Option<OpenKeep64> {
+    let clip_winding = paths_winding_at64_midpoint(start, end, clips)?;
+    let MidpointWinding64::Winding(clip_winding) = clip_winding else {
+        return Some(OpenKeep64::Boundary);
+    };
+    let in_clip = winding_contains(clip_winding, fill_rule);
+    if clip_type != ClipType::Union {
+        return Some(OpenKeep64::Keep(if clip_type == ClipType::Intersection {
+            in_clip
+        } else {
+            !in_clip
+        }));
+    }
+    let subject_winding = paths_winding_at64_midpoint(start, end, closed_subjects)?;
+    let MidpointWinding64::Winding(subject_winding) = subject_winding else {
+        return Some(OpenKeep64::Boundary);
+    };
+    Some(OpenKeep64::Keep(!in_clip && !winding_contains(subject_winding, fill_rule)))
+}
+
+fn paths_winding_at64_midpoint(
+    first: Point64,
+    second: Point64,
+    paths: &[Path64],
+) -> Option<MidpointWinding64> {
+    let midpoint2 = (
+        i128::from(first.x).checked_add(i128::from(second.x))?,
+        i128::from(first.y).checked_add(i128::from(second.y))?,
+    );
+    let mut winding = 0_i128;
+    for path in paths {
+        for (start, end) in
+            path.iter().copied().zip(path.iter().copied().cycle().skip(1)).take(path.len())
+        {
+            let start2 = (i128::from(start.x).checked_mul(2)?, i128::from(start.y).checked_mul(2)?);
+            let end2 = (i128::from(end.x).checked_mul(2)?, i128::from(end.y).checked_mul(2)?);
+            let cross = cross64(
+                vector64(start, end),
+                (midpoint2.0.checked_sub(start2.0)?, midpoint2.1.checked_sub(start2.1)?),
+            )?;
+            if cross == 0
+                && midpoint2.0 >= start2.0.min(end2.0)
+                && midpoint2.0 <= start2.0.max(end2.0)
+                && midpoint2.1 >= start2.1.min(end2.1)
+                && midpoint2.1 <= start2.1.max(end2.1)
+            {
+                return Some(MidpointWinding64::Boundary);
+            }
+            if (start2.1 > midpoint2.1) != (end2.1 > midpoint2.1) {
+                if end.y > start.y {
+                    if cross > 0 {
+                        winding = winding.checked_add(1)?;
+                    }
+                } else if cross < 0 {
+                    winding = winding.checked_sub(1)?;
+                }
+            }
+        }
+    }
+    Some(MidpointWinding64::Winding(winding))
+}
+
+fn resolve_boundary_fragments64(fragments: &mut [OpenFragment64]) {
+    let mut index = 0;
+    while index < fragments.len() {
+        if fragments[index].keep.is_some() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < fragments.len() && fragments[index].keep.is_none() {
+            index += 1;
+        }
+        let previous = if start == 0 { None } else { Some(&fragments[start - 1]) };
+        let next = fragments.get(index);
+        let keep = boundary_run_keep(
+            previous.and_then(|fragment| fragment.keep),
+            next.and_then(|fragment| fragment.keep),
+            previous.map(|fragment| &fragment.start.y),
+            next.map(|fragment| &fragment.end.y),
+        );
+        for fragment in &mut fragments[start..index] {
+            fragment.keep = Some(keep);
+        }
+    }
+}
+
+fn append_open_fragments64(fragments: &[OpenFragment64], output: &mut Paths64) {
+    let mut current = Path64::new();
+    for fragment in fragments {
+        if fragment.keep == Some(true) {
+            // Fragments come from consecutive windows of one normalized path;
+            // every kept run is contiguous by construction.
+            if current.is_empty() {
+                current.push(fragment.start);
+            }
+            current.push(fragment.end);
+        } else if current.len() >= 2 {
+            output.push(std::mem::take(&mut current));
+        } else {
+            current.clear();
+        }
+    }
+    if current.len() >= 2 {
+        output.push(current);
+    }
 }
 
 fn exact_paths64(paths: &[Path64]) -> Vec<ExactPath> {
@@ -421,6 +780,146 @@ fn exact_paths_d(paths: &[PathD]) -> Result<Vec<ExactPath>, Error> {
             Err(error) => Some(Err(error)),
         })
         .collect()
+}
+
+#[derive(Clone)]
+struct OpenFragment {
+    start: ExactPoint,
+    end: ExactPoint,
+    keep: Option<bool>,
+}
+
+fn clip_open_paths(
+    open_paths: &[ExactPath],
+    closed_subjects: &[ExactPath],
+    clips: &[ExactPath],
+    clip_type: ClipType,
+    fill_rule: FillRule,
+) -> Vec<ExactPath> {
+    let boundary_paths = if clip_type == ClipType::Union {
+        closed_subjects.iter().chain(clips).collect::<Vec<_>>()
+    } else {
+        clips.iter().collect::<Vec<_>>()
+    };
+    let boundary_edges =
+        boundary_paths.iter().flat_map(|path| path_edges(path)).collect::<Vec<_>>();
+    let mut output = Vec::new();
+    for path in open_paths {
+        let mut fragments = Vec::new();
+        for pair in path.windows(2) {
+            let edge = Edge::new(pair[0].clone(), pair[1].clone());
+            let mut parameters = vec![Rational::zero(), Rational::one()];
+            for boundary in &boundary_edges {
+                let mut ignored = vec![Rational::zero(), Rational::one()];
+                split_edge_pair(&edge, boundary, &mut parameters, &mut ignored);
+            }
+            parameters.sort();
+            parameters.dedup();
+            for interval in parameters.windows(2) {
+                let start = point_at(&edge.start, &edge.end, &interval[0]);
+                let end = point_at(&edge.start, &edge.end, &interval[1]);
+                let midpoint =
+                    point_at(&start, &end, &Rational::new(BigInt::from(1), BigInt::from(2)));
+                let keep =
+                    open_fragment_keep(&midpoint, closed_subjects, clips, clip_type, fill_rule);
+                fragments.push(OpenFragment { start, end, keep });
+            }
+        }
+        resolve_boundary_fragments(&mut fragments);
+        append_open_fragments(&fragments, &mut output);
+    }
+    output
+}
+
+fn open_fragment_keep(
+    point: &ExactPoint,
+    closed_subjects: &[ExactPath],
+    clips: &[ExactPath],
+    clip_type: ClipType,
+    fill_rule: FillRule,
+) -> Option<bool> {
+    let clip_winding = paths_winding_at(point, clips)?;
+    let in_clip = winding_contains(clip_winding, fill_rule);
+    Some(match clip_type {
+        ClipType::Intersection => in_clip,
+        ClipType::Difference | ClipType::Xor => !in_clip,
+        ClipType::Union => {
+            let subject_winding = paths_winding_at(point, closed_subjects)?;
+            !in_clip && !winding_contains(subject_winding, fill_rule)
+        }
+    })
+}
+
+fn resolve_boundary_fragments(fragments: &mut [OpenFragment]) {
+    let mut index = 0;
+    while index < fragments.len() {
+        if fragments[index].keep.is_some() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < fragments.len() && fragments[index].keep.is_none() {
+            index += 1;
+        }
+        let previous = if start == 0 { None } else { Some(&fragments[start - 1]) };
+        let next = fragments.get(index);
+        let previous_keep = previous.and_then(|fragment| fragment.keep);
+        let next_keep = next.and_then(|fragment| fragment.keep);
+        let previous_y = previous.map(|fragment| &fragment.start.y);
+        let next_y = next.map(|fragment| &fragment.end.y);
+        let keep = boundary_run_keep(previous_keep, next_keep, previous_y, next_y);
+        for fragment in &mut fragments[start..index] {
+            fragment.keep = Some(keep);
+        }
+    }
+}
+
+fn boundary_run_keep<Y: Ord>(
+    previous_keep: Option<bool>,
+    next_keep: Option<bool>,
+    previous_y: Option<&Y>,
+    next_y: Option<&Y>,
+) -> bool {
+    let (previous_keep, next_keep) = match (previous_keep, next_keep) {
+        (Some(previous), Some(next)) => (previous, next),
+        (Some(previous), None) => return previous,
+        (None, Some(next)) => return next,
+        (None, None) => return false,
+    };
+    if previous_keep == next_keep {
+        return previous_keep;
+    }
+    match (previous_y, next_y) {
+        (Some(left), Some(right)) if left != right => {
+            if left > right {
+                previous_keep
+            } else {
+                next_keep
+            }
+        }
+        _ => next_keep,
+    }
+}
+
+fn append_open_fragments(fragments: &[OpenFragment], output: &mut Vec<ExactPath>) {
+    let mut current = ExactPath::new();
+    for fragment in fragments {
+        if fragment.keep == Some(true) {
+            // Fragments come from consecutive windows of one normalized path;
+            // every kept run is contiguous by construction.
+            if current.is_empty() {
+                current.push(fragment.start.clone());
+            }
+            current.push(fragment.end.clone());
+        } else if current.len() >= 2 {
+            output.push(std::mem::take(&mut current));
+        } else {
+            current.clear();
+        }
+    }
+    if current.len() >= 2 {
+        output.push(current);
+    }
 }
 
 fn run_boolean(
@@ -1276,6 +1775,10 @@ fn exact_paths_to_i64(paths: &[ExactPath]) -> Result<Paths64, Error> {
         .collect()
 }
 
+fn finish_exact_boolean(result: Result<Vec<ExactPath>, Error>) -> Result<Paths64, Error> {
+    result.and_then(|paths| exact_paths_to_i64(&paths))
+}
+
 fn exact_paths_to_f64(paths: &[ExactPath]) -> Result<PathsD, Error> {
     paths
         .iter()
@@ -1295,7 +1798,15 @@ fn exact_paths_to_f64(paths: &[ExactPath]) -> Result<PathsD, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PointLocation, boolean_op, point_in_polygon, signed_area2};
+    use crate::{PointLocation, point_in_polygon, signed_area2};
+
+    fn boolean_op(request: BooleanRequest<'_, Path64>) -> Result<Paths64, Error> {
+        super::boolean_op64(&request).map(|output| output.closed)
+    }
+
+    fn boolean_op_d(request: BooleanRequest<'_, PathD>) -> Result<PathsD, Error> {
+        super::boolean_op_d(&request).map(|output| output.closed)
+    }
 
     fn rectangle(left: i64, bottom: i64, right: i64, top: i64) -> Path64 {
         vec![
@@ -1310,8 +1821,8 @@ mod tests {
         subjects: &'a [Path64],
         clips: &'a [Path64],
         clip_type: ClipType,
-    ) -> BooleanRequest<'a> {
-        BooleanRequest { subjects, clips, clip_type, fill_rule: FillRule::EvenOdd }
+    ) -> BooleanRequest<'a, Path64> {
+        BooleanRequest::new(subjects, clips, clip_type, FillRule::EvenOdd)
     }
 
     fn area_sum(paths: &[Path64]) -> i128 {
@@ -1333,6 +1844,387 @@ mod tests {
             .collect::<Vec<_>>();
         summary.sort();
         summary
+    }
+
+    fn open_request<'a>(
+        open_subjects: &'a [Path64],
+        closed_subjects: &'a [Path64],
+        clips: &'a [Path64],
+        clip_type: ClipType,
+    ) -> BooleanRequest<'a, Path64> {
+        BooleanRequest {
+            closed_subjects,
+            open_subjects,
+            clips,
+            clip_type,
+            fill_rule: FillRule::EvenOdd,
+            limits: crate::ComplexityLimits::DEFAULT,
+        }
+    }
+
+    #[test]
+    fn clips_open_subjects_and_keeps_outputs_separate() {
+        let line = vec![Point64::new(-5, 5), Point64::new(15, 5)];
+        let clip = rectangle(0, 0, 10, 10);
+        let open = [line];
+        let clips = [clip];
+
+        let intersection =
+            super::boolean_op64(&open_request(&open, &[], &clips, ClipType::Intersection)).unwrap();
+        assert!(intersection.closed.is_empty());
+        assert_eq!(intersection.open, vec![vec![Point64::new(0, 5), Point64::new(10, 5)]]);
+
+        for clip_type in [ClipType::Difference, ClipType::Xor] {
+            let result = super::boolean_op64(&open_request(&open, &[], &clips, clip_type)).unwrap();
+            assert_eq!(
+                result.open,
+                vec![
+                    vec![Point64::new(-5, 5), Point64::new(0, 5)],
+                    vec![Point64::new(10, 5), Point64::new(15, 5)],
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn normalizes_and_discards_degenerate_open_subjects_before_clipping() {
+        let clip = [rectangle(0, 0, 10, 10)];
+        let open = [
+            vec![Point64::new(2, 2), Point64::new(2, 2), Point64::new(8, 8)],
+            vec![Point64::new(4, 4), Point64::new(4, 4)],
+        ];
+        let result =
+            super::boolean_op64(&open_request(&open, &[], &clip, ClipType::Intersection)).unwrap();
+        assert_eq!(result.closed, Vec::<Path64>::new());
+        assert_eq!(result.open, vec![vec![Point64::new(2, 2), Point64::new(8, 8)]]);
+    }
+
+    #[test]
+    fn union_clips_open_subjects_against_all_closed_regions() {
+        let open = [vec![Point64::new(-5, 5), Point64::new(25, 5)]];
+        let closed_subjects = [rectangle(0, 0, 10, 10)];
+        let clips = [rectangle(15, 0, 20, 10)];
+        let result =
+            super::boolean_op64(&open_request(&open, &closed_subjects, &clips, ClipType::Union))
+                .unwrap();
+        assert_eq!(result.closed.len(), 2);
+        assert_eq!(
+            result.open,
+            vec![
+                vec![Point64::new(-5, 5), Point64::new(0, 5)],
+                vec![Point64::new(10, 5), Point64::new(15, 5)],
+                vec![Point64::new(20, 5), Point64::new(25, 5)],
+            ]
+        );
+    }
+
+    #[test]
+    fn open_paths_do_not_interact_and_boundary_runs_use_adjacency() {
+        let clip = rectangle(0, 0, 10, 10);
+        let clips = [clip];
+        let open = [
+            vec![Point64::new(-5, 0), Point64::new(5, 0), Point64::new(5, 5)],
+            vec![Point64::new(5, -5), Point64::new(5, 15)],
+        ];
+        let result =
+            super::boolean_op64(&open_request(&open, &[], &clips, ClipType::Intersection)).unwrap();
+        assert_eq!(result.open.len(), 2);
+        assert_eq!(
+            result.open[0],
+            vec![Point64::new(0, 0), Point64::new(5, 0), Point64::new(5, 5)]
+        );
+        assert_eq!(result.open[1], vec![Point64::new(5, 0), Point64::new(5, 10)]);
+    }
+
+    #[test]
+    fn boundary_runs_at_open_path_ends_use_the_present_adjacent_fragment() {
+        let clips = [rectangle(0, 0, 10, 10)];
+        let cases = [
+            (
+                ClipType::Intersection,
+                vec![Point64::new(0, 0), Point64::new(5, 0), Point64::new(5, 5)],
+            ),
+            (
+                ClipType::Intersection,
+                vec![Point64::new(5, 5), Point64::new(5, 0), Point64::new(0, 0)],
+            ),
+            (
+                ClipType::Difference,
+                vec![Point64::new(0, 0), Point64::new(5, 0), Point64::new(5, -5)],
+            ),
+            (
+                ClipType::Difference,
+                vec![Point64::new(5, -5), Point64::new(5, 0), Point64::new(0, 0)],
+            ),
+        ];
+        for (clip_type, path) in cases {
+            let open = [path.clone()];
+            let result = super::boolean_op64(&open_request(&open, &[], &clips, clip_type)).unwrap();
+            assert_eq!(result.open, vec![path]);
+        }
+    }
+
+    #[test]
+    fn vertical_open_segments_preserve_input_direction() {
+        let clips = [rectangle(0, 0, 10, 10)];
+        for path in [
+            vec![Point64::new(5, -5), Point64::new(5, 15)],
+            vec![Point64::new(5, 15), Point64::new(5, -5)],
+        ] {
+            let expected = if path[0].y < path[1].y {
+                vec![Point64::new(5, 0), Point64::new(5, 10)]
+            } else {
+                vec![Point64::new(5, 10), Point64::new(5, 0)]
+            };
+            let open = [path];
+            let result =
+                super::boolean_op64(&open_request(&open, &[], &clips, ClipType::Intersection))
+                    .unwrap();
+            assert_eq!(result.open, vec![expected]);
+        }
+    }
+
+    #[test]
+    fn integer_direct_path_certificate_accepts_only_separated_simple_rings() {
+        let separated = [rectangle(0, 0, 2, 2), rectangle(4, 0, 6, 2)];
+        let direct = crate::dispatch::try_direct_paths64(&separated, FillRule::EvenOdd)
+            .expect("separated rings");
+        assert_eq!(direct.len(), 2);
+
+        let touching = [rectangle(0, 0, 2, 2), rectangle(2, 0, 4, 2)];
+        assert!(crate::dispatch::try_direct_paths64(&touching, FillRule::EvenOdd).is_none());
+
+        let reversed =
+            [vec![Point64::new(0, 0), Point64::new(0, 2), Point64::new(2, 2), Point64::new(2, 0)]];
+        let direct =
+            crate::dispatch::try_direct_paths64(&reversed, FillRule::NonZero).expect("simple ring");
+        assert!(crate::signed_area2(&direct[0]).unwrap().is_positive());
+
+        let bow_tie =
+            [vec![Point64::new(0, 0), Point64::new(2, 2), Point64::new(0, 2), Point64::new(2, 0)]];
+        assert!(crate::dispatch::try_direct_paths64(&bow_tie, FillRule::EvenOdd).is_none());
+        assert!(crate::dispatch::try_direct_paths64(&separated, FillRule::Positive).is_none());
+    }
+
+    #[test]
+    fn exact_open_conversion_normalizes_and_filters_degenerate_paths() {
+        let paths = [
+            vec![Point64::new(1, 1)],
+            vec![Point64::new(0, 0), Point64::new(0, 0), Point64::new(2, 3)],
+        ];
+        let exact = exact_open_paths64(&paths);
+        assert_eq!(exact.len(), 1);
+        assert_eq!(
+            exact_paths_to_i64(&exact).unwrap(),
+            vec![vec![Point64::new(0, 0), Point64::new(2, 3)]]
+        );
+    }
+
+    #[test]
+    fn exact_boolean_finish_propagates_errors_and_converts_results() {
+        assert_eq!(finish_exact_boolean(Err(Error::TopologyFailure)), Err(Error::TopologyFailure));
+        let exact = vec![exact_path(&[(0, 0), (1, 0), (0, 1)])];
+        assert_eq!(
+            finish_exact_boolean(Ok(exact)).unwrap(),
+            vec![vec![Point64::new(0, 0), Point64::new(1, 0), Point64::new(0, 1)]]
+        );
+    }
+
+    #[test]
+    fn exact_open_oracle_covers_operations_and_boundaries() {
+        let clip = [exact_path(&[(0, 0), (10, 0), (10, 10), (0, 10)])];
+        let crossing = [exact_path(&[(-5, 5), (15, 5)])];
+        assert_eq!(
+            exact_paths_to_i64(&clip_open_paths(
+                &crossing,
+                &[],
+                &clip,
+                ClipType::Intersection,
+                FillRule::EvenOdd,
+            ))
+            .unwrap(),
+            vec![vec![Point64::new(0, 5), Point64::new(10, 5)]]
+        );
+        for clip_type in [ClipType::Difference, ClipType::Xor] {
+            assert_eq!(
+                clip_open_paths(&crossing, &[], &clip, clip_type, FillRule::EvenOdd).len(),
+                2
+            );
+        }
+
+        let closed_subject = [exact_path(&[(-10, -10), (20, -10), (20, 20), (-10, 20)])];
+        assert!(
+            clip_open_paths(&crossing, &closed_subject, &clip, ClipType::Union, FillRule::EvenOdd,)
+                .is_empty()
+        );
+
+        let boundary = [exact_path(&[(0, 0), (5, 0), (5, 5)])];
+        assert_eq!(
+            exact_paths_to_i64(&clip_open_paths(
+                &boundary,
+                &[],
+                &clip,
+                ClipType::Intersection,
+                FillRule::EvenOdd,
+            ))
+            .unwrap(),
+            vec![vec![Point64::new(0, 0), Point64::new(5, 0), Point64::new(5, 5)]]
+        );
+    }
+
+    #[test]
+    fn integer_open_falls_back_to_exact_when_i128_certificate_overflows() {
+        const BOUND: i64 = 9_000_000_000_000_000_000;
+        let open = [vec![Point64::new(-BOUND, 0), Point64::new(BOUND, 0)]];
+        let clips = [rectangle(-BOUND, -BOUND, BOUND, BOUND)];
+        let output =
+            super::boolean_op64(&open_request(&open, &[], &clips, ClipType::Intersection)).unwrap();
+        assert_eq!(output.open, open);
+    }
+
+    #[test]
+    fn integer_open_falls_back_when_midpoint_predicate_overflows() {
+        const BOUND: i64 = 9_000_000_000_000_000_000;
+        let open = [vec![Point64::new(BOUND - 1, BOUND), Point64::new(BOUND, BOUND)]];
+        let clips = [vec![
+            Point64::new(-BOUND, -BOUND),
+            Point64::new(BOUND, -BOUND),
+            Point64::new(BOUND, -BOUND + 10),
+            Point64::new(-BOUND, -BOUND + 10),
+        ]];
+        let output =
+            super::boolean_op64(&open_request(&open, &[], &clips, ClipType::Intersection)).unwrap();
+        assert!(output.closed.is_empty());
+        assert!(output.open.is_empty());
+    }
+
+    #[test]
+    fn open_fragment_helpers_cover_conservative_cases() {
+        let mut split_points = vec![Point64::new(0, 0), Point64::new(3, 1)];
+        assert!(
+            split_edge_pair64(
+                Point64::new(0, 0),
+                Point64::new(3, 1),
+                Point64::new(1, -1),
+                Point64::new(1, 2),
+                &mut split_points,
+            )
+            .is_none()
+        );
+        assert_eq!(
+            point_on_segment64(Point64::new(1, 1), Point64::new(0, 0), Point64::new(2, 0)),
+            Some(false)
+        );
+        assert_eq!(
+            point_on_segment64(Point64::new(-1, 0), Point64::new(0, 0), Point64::new(2, 0)),
+            Some(false)
+        );
+        assert_eq!(
+            point_on_segment64(Point64::new(0, -1), Point64::new(0, 0), Point64::new(0, 2)),
+            Some(false)
+        );
+
+        let mut fractional_x = vec![Point64::new(0, 0), Point64::new(3, 0)];
+        assert!(
+            split_edge_pair64(
+                Point64::new(0, 0),
+                Point64::new(3, 0),
+                Point64::new(1, -1),
+                Point64::new(2, 1),
+                &mut fractional_x,
+            )
+            .is_none()
+        );
+
+        let mut points = vec![Point64::new(1, 2), Point64::new(1, 0), Point64::new(1, 1)];
+        sort_points_on_segment64(&mut points, Point64::new(1, 2), Point64::new(1, 0));
+        assert_eq!(points, vec![Point64::new(1, 2), Point64::new(1, 1), Point64::new(1, 0)]);
+
+        let subject = [rectangle(0, 0, 10, 10)];
+        assert!(matches!(
+            paths_winding_at64_midpoint(Point64::new(-2, 0), Point64::new(-1, 0), &subject,),
+            Some(MidpointWinding64::Winding(_))
+        ));
+        assert!(matches!(
+            paths_winding_at64_midpoint(Point64::new(11, 0), Point64::new(12, 0), &subject,),
+            Some(MidpointWinding64::Winding(_))
+        ));
+        assert!(matches!(
+            paths_winding_at64_midpoint(Point64::new(0, -2), Point64::new(0, -1), &subject,),
+            Some(MidpointWinding64::Winding(_))
+        ));
+        assert!(matches!(
+            paths_winding_at64_midpoint(Point64::new(0, 11), Point64::new(0, 12), &subject,),
+            Some(MidpointWinding64::Winding(_))
+        ));
+        assert!(matches!(
+            open_fragment_keep64(
+                Point64::new(0, 0),
+                Point64::new(5, 0),
+                &subject,
+                &[],
+                ClipType::Union,
+                FillRule::EvenOdd,
+            ),
+            Some(OpenKeep64::Boundary)
+        ));
+
+        assert!(!boundary_run_keep::<i64>(None, None, None, None));
+        assert!(boundary_run_keep(Some(true), Some(true), Some(&0), Some(&1)));
+        assert!(boundary_run_keep(Some(true), Some(false), Some(&2), Some(&1)));
+        assert!(boundary_run_keep(Some(false), Some(true), Some(&1), Some(&2)));
+        assert!(boundary_run_keep(Some(false), Some(true), Some(&1), Some(&1)));
+
+        let mut resolved = vec![
+            OpenFragment { start: exact_point(0, 0), end: exact_point(1, 0), keep: Some(false) },
+            OpenFragment { start: exact_point(1, 0), end: exact_point(2, 0), keep: None },
+            OpenFragment { start: exact_point(2, 0), end: exact_point(3, 0), keep: Some(true) },
+            OpenFragment { start: exact_point(3, 0), end: exact_point(4, 0), keep: None },
+        ];
+        resolve_boundary_fragments(&mut resolved);
+        assert!(resolved[1].keep.is_some());
+        assert!(resolved[3].keep.is_some());
+
+        let fragments = vec![
+            OpenFragment { start: exact_point(0, 0), end: exact_point(1, 0), keep: Some(true) },
+            OpenFragment { start: exact_point(1, 0), end: exact_point(2, 0), keep: Some(true) },
+            OpenFragment { start: exact_point(2, 0), end: exact_point(3, 0), keep: Some(false) },
+        ];
+        let mut output = Vec::new();
+        append_open_fragments(&fragments, &mut output);
+        assert_eq!(output, vec![exact_path(&[(0, 0), (1, 0), (2, 0)])]);
+    }
+
+    #[test]
+    fn exact_double_open_conversion_filters_empty_and_rejects_non_finite() {
+        let paths =
+            [vec![PointD::new(1.0, 1.0)], vec![PointD::new(0.0, 0.0), PointD::new(2.0, 3.0)]];
+        assert_eq!(exact_open_paths_d(&paths).unwrap().len(), 1);
+        assert!(matches!(
+            exact_open_paths_d(&[vec![PointD::new(0.0, 0.0), PointD::new(f64::NAN, 1.0)]]),
+            Err(Error::NonFiniteCoordinate { .. })
+        ));
+    }
+
+    #[test]
+    fn floating_open_clipping_preserves_fractional_intersections() {
+        let open = [vec![PointD::new(-1.0, 0.5), PointD::new(2.0, 0.5)]];
+        let clips = [vec![
+            PointD::new(0.25, 0.0),
+            PointD::new(1.25, 0.0),
+            PointD::new(1.25, 1.0),
+            PointD::new(0.25, 1.0),
+        ]];
+        let result = super::boolean_op_d(&BooleanRequest {
+            closed_subjects: &[],
+            open_subjects: &open,
+            clips: &clips,
+            clip_type: ClipType::Intersection,
+            fill_rule: FillRule::EvenOdd,
+            limits: crate::ComplexityLimits::DEFAULT,
+        })
+        .unwrap();
+        assert_eq!(result.open, vec![vec![PointD::new(0.25, 0.5), PointD::new(1.25, 0.5)]]);
     }
 
     fn rotate_to_minimum(mut points: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
@@ -2230,8 +3122,10 @@ mod tests {
     fn supports_non_integral_intersections_through_double_api() {
         let subject = rectangle_d(0.0, 0.0, 10.0, 10.0);
         let clip = vec![PointD::new(3.0, -1.0), PointD::new(13.0, 4.0), PointD::new(3.0, 9.0)];
-        let result = boolean_op_d(BooleanRequestD {
-            subjects: &[subject],
+        let result = boolean_op_d(BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &[subject],
             clips: &[clip],
             clip_type: ClipType::Intersection,
             fill_rule: FillRule::EvenOdd,
@@ -2263,7 +3157,9 @@ mod tests {
         ];
         let subjects = [path];
         let even_odd = boolean_op(BooleanRequest {
-            subjects: &subjects,
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &subjects,
             clips: &[],
             clip_type: ClipType::Union,
             fill_rule: FillRule::EvenOdd,
@@ -2271,7 +3167,9 @@ mod tests {
         .unwrap();
         assert!(even_odd.is_empty());
         let non_zero = boolean_op(BooleanRequest {
-            subjects: &subjects,
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &subjects,
             clips: &[],
             clip_type: ClipType::Union,
             fill_rule: FillRule::NonZero,
@@ -2285,7 +3183,9 @@ mod tests {
         let subject = rectangle(0, 0, 10, 10);
         let clip = vec![Point64::new(3, -1), Point64::new(13, 4), Point64::new(3, 9)];
         let result = boolean_op(BooleanRequest {
-            subjects: &[subject],
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &[subject],
             clips: &[clip],
             clip_type: ClipType::Intersection,
             fill_rule: FillRule::EvenOdd,
@@ -2302,15 +3202,17 @@ mod tests {
         for clip_type in
             [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor]
         {
-            let request = BooleanRequestD {
-                subjects: &subjects,
+            let request = BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: &subjects,
                 clips: &clips,
                 clip_type,
                 fill_rule: FillRule::EvenOdd,
             };
-            let fast = crate::dispatch::try_boolean_op_d(request)
+            let fast = crate::dispatch::try_boolean_op_d(&request)
                 .expect("well-conditioned input should use fast path");
-            let exact = boolean_op_d_exact(request).expect("exact oracle should close");
+            let exact = boolean_op_d_exact(&request).expect("exact oracle should close");
             assert_eq!(double_summary(&fast), double_summary(&exact));
         }
     }
@@ -2329,22 +3231,26 @@ mod tests {
         ];
 
         for (clip_type, expected_area) in expected {
-            let request = BooleanRequestD {
-                subjects: &subjects,
+            let request = BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: &subjects,
                 clips: &clips,
                 clip_type,
                 fill_rule: FillRule::EvenOdd,
             };
             let exact =
-                boolean_op_d_exact(request).expect("exact rectangle operation should close");
+                boolean_op_d_exact(&request).expect("exact rectangle operation should close");
             let result = boolean_op_d(request).expect("public rectangle operation should close");
             assert!((double_area_sum(&exact) - expected_area).abs() < f64::EPSILON);
             assert!((double_area_sum(&result) - expected_area).abs() < f64::EPSILON);
         }
 
         let touching = rectangle_d(10.0, 0.0, 20.0, 10.0);
-        let result = boolean_op_d(BooleanRequestD {
-            subjects: &subjects,
+        let result = boolean_op_d(BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &subjects,
             clips: std::slice::from_ref(&touching),
             clip_type: ClipType::Union,
             fill_rule: FillRule::EvenOdd,
@@ -2381,9 +3287,15 @@ mod tests {
             for clip_type in
                 [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor]
             {
-                let request =
-                    BooleanRequestD { subjects: &subjects, clips: &clips, clip_type, fill_rule };
-                let exact = boolean_op_d_exact(request).expect("exact rectilinear oracle");
+                let request = BooleanRequest {
+                    limits: crate::ComplexityLimits::DEFAULT,
+                    open_subjects: &[],
+                    closed_subjects: &subjects,
+                    clips: &clips,
+                    clip_type,
+                    fill_rule,
+                };
+                let exact = boolean_op_d_exact(&request).expect("exact rectilinear oracle");
                 let result = boolean_op_d(request).expect("public rectilinear operation");
                 let exact = exact
                     .iter()
@@ -2409,15 +3321,17 @@ mod tests {
         for fill_rule in
             [FillRule::EvenOdd, FillRule::NonZero, FillRule::Positive, FillRule::Negative]
         {
-            let request = BooleanRequestD {
-                subjects: &subjects,
+            let request = BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: &subjects,
                 clips: &clips,
                 clip_type: ClipType::Difference,
                 fill_rule,
             };
-            let fast = crate::dispatch::try_boolean_op_d(request)
+            let fast = crate::dispatch::try_boolean_op_d(&request)
                 .expect("well-conditioned input should use fast path");
-            let exact = boolean_op_d_exact(request).expect("exact oracle should close");
+            let exact = boolean_op_d_exact(&request).expect("exact oracle should close");
             assert_eq!(double_summary(&fast), double_summary(&exact), "fill rule: {fill_rule:?}");
         }
     }
@@ -2428,15 +3342,17 @@ mod tests {
         let clip = regular_polygon(12.0, 40.0, 16);
         let subjects = [subject];
         let clips = [clip];
-        let request = BooleanRequestD {
-            subjects: &subjects,
+        let request = BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &subjects,
             clips: &clips,
             clip_type: ClipType::Xor,
             fill_rule: FillRule::EvenOdd,
         };
-        let fast = crate::dispatch::try_boolean_op_d(request)
+        let fast = crate::dispatch::try_boolean_op_d(&request)
             .expect("high-vertex input should use fast path");
-        let exact = boolean_op_d_exact(request).expect("exact oracle should close");
+        let exact = boolean_op_d_exact(&request).expect("exact oracle should close");
         assert_eq!(double_summary(&fast), double_summary(&exact));
     }
 
@@ -2451,15 +3367,17 @@ mod tests {
             for clip_type in
                 [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor]
             {
-                let request = BooleanRequestD {
-                    subjects: &subjects,
+                let request = BooleanRequest {
+                    limits: crate::ComplexityLimits::DEFAULT,
+                    open_subjects: &[],
+                    closed_subjects: &subjects,
                     clips: &clips,
                     clip_type,
                     fill_rule: FillRule::EvenOdd,
                 };
-                let fast = crate::dispatch::try_boolean_op_d(request)
+                let fast = crate::dispatch::try_boolean_op_d(&request)
                     .expect("convex input should use fast path");
-                let exact = boolean_op_d_exact(request).expect("exact oracle should close");
+                let exact = boolean_op_d_exact(&request).expect("exact oracle should close");
                 assert_eq!(double_summary(&fast), double_summary(&exact), "case: {clip_type:?}");
             }
         }
@@ -2469,13 +3387,15 @@ mod tests {
     fn fast_double_path_defers_large_coordinates_to_exact_oracle() {
         let path = rectangle_d(2_000_000.0, 2_000_000.0, 2_000_010.0, 2_000_010.0);
         let subjects = [path];
-        let request = BooleanRequestD {
-            subjects: &subjects,
+        let request = BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &subjects,
             clips: &[],
             clip_type: ClipType::Union,
             fill_rule: FillRule::EvenOdd,
         };
-        assert!(crate::dispatch::try_boolean_op_d(request).is_none());
+        assert!(crate::dispatch::try_boolean_op_d(&request).is_none());
         assert_eq!(boolean_op_d(request).expect("exact fallback should close").len(), 1);
     }
 

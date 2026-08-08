@@ -4,8 +4,8 @@ use core::cmp::Ordering;
 use num_bigint::BigInt;
 
 use crate::{
-    BooleanRequest, BooleanRequestD, ClipType, Error, FillRule, PathKind, PathValidationError,
-    boolean_op, boolean_op_d,
+    BooleanRequest, ClipType, Error, FillRule, PathKind, PathValidationError, boolean_op,
+    boolean_op_d,
 };
 
 /// An integer point used by the exact-coordinate API.
@@ -599,6 +599,7 @@ pub fn trim_collinear_d(path: &[PointD], kind: PathKind) -> Result<PathD, Error>
 /// [`crate::boolean_op`].
 pub fn simplify_paths64(paths: &[Path64], fill_rule: FillRule) -> Result<Paths64, Error> {
     boolean_op(BooleanRequest::new(paths, &[], ClipType::Union, fill_rule))
+        .map(|output| output.closed)
 }
 
 /// Simplifies floating-point paths by applying a union with the selected fill
@@ -609,7 +610,8 @@ pub fn simplify_paths64(paths: &[Path64], fill_rule: FillRule) -> Result<Paths64
 /// Returns the same validation, non-finite-coordinate, and topology errors as
 /// [`crate::boolean_op_d`].
 pub fn simplify_paths_d(paths: &[PathD], fill_rule: FillRule) -> Result<PathsD, Error> {
-    boolean_op_d(BooleanRequestD::new(paths, &[], ClipType::Union, fill_rule))
+    boolean_op_d(BooleanRequest::new(paths, &[], ClipType::Union, fill_rule))
+        .map(|output| output.closed)
 }
 
 /// Clips integer paths to an axis-aligned rectangle.
@@ -630,6 +632,7 @@ pub fn clip_to_rect64(
         ClipType::Intersection,
         fill_rule,
     ))
+    .map(|output| output.closed)
 }
 
 /// Clips floating-point paths to an axis-aligned rectangle.
@@ -651,12 +654,13 @@ pub fn clip_to_rect_d(
         return Err(Error::NonFiniteCoordinate { point_index: 0 });
     }
     let clip = rectangle.path();
-    boolean_op_d(BooleanRequestD::new(
+    boolean_op_d(BooleanRequest::new(
         paths,
         std::slice::from_ref(&clip),
         ClipType::Intersection,
         fill_rule,
     ))
+    .map(|output| output.closed)
 }
 
 fn collinear_between64(previous: Point64, current: Point64, next: Point64) -> bool {

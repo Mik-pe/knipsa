@@ -8,6 +8,10 @@ minor releases before `1.0`.
 
 ### Added
 
+- Exact integer and floating-point Boolean clipping of open subject polylines,
+  with separate closed/open outputs, deterministic complexity limits, and
+  explicit intersection, union, difference, XOR, touching, and collinear
+  boundary semantics.
 - `build_polygons64` and `build_polygons_d` convert flat nested rings into
   strongly typed `Polygon64` and `PolygonD` values with canonical winding and
   explicit hole ownership. Integer nesting predicates are exact across the
@@ -16,6 +20,9 @@ minor releases before `1.0`.
 
 ### Changed
 
+- `boolean_op` and `boolean_op_d` now share one generic `BooleanRequest` and
+  return one generic `BooleanOutput`; the duplicate `BooleanRequestD` type was
+  removed instead of introducing a parallel open-path API family.
 - Polygon builders and all four Rust triangulation functions now require the
   same `ComplexityLimits` and return the same `Error`; structured resource
   preflight cannot be bypassed accidentally.

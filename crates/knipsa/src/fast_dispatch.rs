@@ -3,7 +3,7 @@
 use std::collections::{HashMap, hash_map::Entry};
 
 use crate::{
-    BooleanRequestD, ClipType, FillRule, PathsD,
+    BooleanRequest, ClipType, FillRule, PathD, PathsD,
     dispatch::{
         AxisAlignedRectangle, DirectedEdge, GridCoordinate, axis_aligned_rectangle, canonicalize,
         compare_paths, dedup_grid_coordinates, orthogonal_grid_size,
@@ -59,21 +59,21 @@ impl HorizontalSpanStats {
     }
 }
 
-pub(crate) fn try_apply(request: BooleanRequestD<'_>) -> Option<PathsD> {
+pub(crate) fn try_apply(request: &BooleanRequest<'_, PathD>) -> Option<PathsD> {
     try_long_rectangle_xor(request)
 }
 
-fn try_long_rectangle_xor(request: BooleanRequestD<'_>) -> Option<PathsD> {
+fn try_long_rectangle_xor(request: &BooleanRequest<'_, PathD>) -> Option<PathsD> {
     if request.clip_type != ClipType::Xor || request.fill_rule != FillRule::EvenOdd {
         return None;
     }
 
-    let capacity = request.subjects.len() + request.clips.len();
+    let capacity = request.closed_subjects.len() + request.clips.len();
     let mut rectangles = Vec::with_capacity(capacity);
     let mut stats = HorizontalSpanStats::default();
     let mut xs = Vec::with_capacity(capacity * 2);
     let mut ys = Vec::with_capacity(capacity * 2);
-    for path in request.subjects.iter().chain(request.clips) {
+    for path in request.closed_subjects.iter().chain(request.clips) {
         if path.is_empty() {
             continue;
         }
@@ -350,16 +350,18 @@ mod tests {
             })
             .collect::<Vec<_>>();
         clips.iter_mut().step_by(2).for_each(|path| path.reverse());
-        let request = BooleanRequestD {
-            subjects: &subjects,
+        let request = BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &subjects,
             clips: &clips,
             clip_type: ClipType::Xor,
             fill_rule: FillRule::EvenOdd,
         };
-        let specialized = try_long_rectangle_xor(request).expect("long rectangles select fusion");
-        let exact = crate::boolean::boolean_op_d_exact(request).expect("exact oracle closes");
+        let specialized = try_long_rectangle_xor(&request).expect("long rectangles select fusion");
+        let exact = crate::boolean::boolean_op_d_exact(&request).expect("exact oracle closes");
         assert_eq!(summary(&specialized), summary(&exact));
-        assert_eq!(summary(&try_apply(request).unwrap()), summary(&exact));
+        assert_eq!(summary(&try_apply(&request).unwrap()), summary(&exact));
     }
 
     #[test]
@@ -371,31 +373,44 @@ mod tests {
                 rectangle(x, 0.0, x + 2.0, 2.0)
             })
             .collect::<Vec<_>>();
-        let request = BooleanRequestD {
-            subjects: &rectangles,
+        let request = BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &rectangles,
             clips: &[],
             clip_type: ClipType::Xor,
             fill_rule: FillRule::EvenOdd,
         };
-        assert!(try_long_rectangle_xor(request).is_none());
-        assert!(try_apply(request).is_none());
-        assert!(crate::dispatch::try_boolean_op_d(request).is_some());
+        assert!(try_long_rectangle_xor(&request).is_none());
+        assert!(try_apply(&request).is_none());
+        assert!(crate::dispatch::try_boolean_op_d(&request).is_some());
         assert!(
-            try_long_rectangle_xor(BooleanRequestD { clip_type: ClipType::Union, ..request })
+            try_long_rectangle_xor(&BooleanRequest { clip_type: ClipType::Union, ..request })
                 .is_none()
         );
         assert!(
-            try_long_rectangle_xor(BooleanRequestD { fill_rule: FillRule::NonZero, ..request })
+            try_long_rectangle_xor(&BooleanRequest { fill_rule: FillRule::NonZero, ..request })
                 .is_none()
         );
         assert!(
-            try_long_rectangle_xor(BooleanRequestD { subjects: &rectangles[..7], ..request })
-                .is_none()
+            try_long_rectangle_xor(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: &rectangles[..7],
+                ..request
+            })
+            .is_none()
         );
         let mut with_empty = rectangles.clone();
         with_empty.push(Vec::new());
         assert!(
-            try_long_rectangle_xor(BooleanRequestD { subjects: &with_empty, ..request }).is_none()
+            try_long_rectangle_xor(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: &with_empty,
+                ..request
+            })
+            .is_none()
         );
 
         for invalid in [

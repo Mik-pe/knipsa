@@ -32,7 +32,7 @@ pub use offset::{
     EndType, JoinType, OffsetOptions, offset_path_d, offset_path64, offset_paths_d, offset_paths64,
 };
 pub use request::{
-    BooleanRequest, BooleanRequestD, ClipType, FillRule, boolean_op, boolean_op_d, difference,
+    BooleanOutput, BooleanRequest, ClipType, FillRule, boolean_op, boolean_op_d, difference,
     difference_d, difference_path, difference_path_d, intersection, intersection_d,
     intersection_path, intersection_path_d, union, union_d, union_path, union_path_d, xor, xor_d,
     xor_path, xor_path_d,
@@ -66,7 +66,9 @@ mod tests {
     fn public_contract_is_constructible() {
         assert_eq!(PathKind::Closed, PathKind::Closed);
         let request = BooleanRequest {
-            subjects: &[],
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &[],
             clips: &[],
             clip_type: ClipType::Xor,
             fill_rule: FillRule::Positive,
@@ -131,6 +133,11 @@ mod serde_tests {
             holes: Vec::new(),
         };
         assert_eq!(round_trip(&polygon64), polygon64);
+        let boolean_output = BooleanOutput {
+            closed: vec![vec![Point64::new(0, 0), Point64::new(1, 0), Point64::new(0, 1)]],
+            open: vec![vec![Point64::new(0, 0), Point64::new(1, 1)]],
+        };
+        assert_eq!(round_trip(&boolean_output), boolean_output);
 
         let limit_error =
             Error::LimitExceeded { resource: ComplexityResource::Vertices, limit: 4, required: 5 };

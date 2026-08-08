@@ -3,7 +3,7 @@
 use std::cmp::Ordering;
 
 use crate::{
-    BooleanRequestD, ClipType, FillRule, PathD, PathsD, PointD,
+    BooleanRequest, ClipType, FillRule, PathD, PathsD, PointD,
     dispatch::{
         AxisAlignedRectangle, DirectedEdge, GridCoordinate, apply_operation,
         axis_aligned_rectangle, canonicalize, compare_paths, exact_key, fill_rule_accepts_ring,
@@ -35,7 +35,7 @@ impl SmallBoundary {
     }
 }
 
-pub(crate) fn try_apply(request: BooleanRequestD<'_>) -> Option<PathsD> {
+pub(crate) fn try_apply(request: &BooleanRequest<'_, PathD>) -> Option<PathsD> {
     if let Some(result) = try_rectangle_pair(request) {
         return Some(result);
     }
@@ -54,11 +54,11 @@ pub(crate) fn try_apply(request: BooleanRequestD<'_>) -> Option<PathsD> {
 /// Resolves XOR over strictly nested or disjoint exact-grid rectangles. Under
 /// `EvenOdd` semantics every surviving rectangle toggles the combined parity,
 /// so its complete boundary can be emitted without an arrangement or stitch.
-fn try_nested_rectangle_xor(request: BooleanRequestD<'_>) -> Option<PathsD> {
+fn try_nested_rectangle_xor(request: &BooleanRequest<'_, PathD>) -> Option<PathsD> {
     if request.clip_type != ClipType::Xor || request.fill_rule != FillRule::EvenOdd {
         return None;
     }
-    let paths = request.subjects.iter().chain(request.clips).filter(|path| !path.is_empty());
+    let paths = request.closed_subjects.iter().chain(request.clips).filter(|path| !path.is_empty());
     let path_count = paths.clone().count();
     if !(3..=64).contains(&path_count) {
         return None;
@@ -141,15 +141,15 @@ fn rectangle_path(rectangle: AxisAlignedRectangle, positive: bool) -> PathD {
 
 /// Resolves strictly convex rings whose bounding boxes meet only on a line or
 /// point. Positive-length collinear contact stays on the general path.
-fn try_convex_zero_area_contact(request: BooleanRequestD<'_>) -> Option<PathsD> {
-    if request.subjects.len() != 1
+fn try_convex_zero_area_contact(request: &BooleanRequest<'_, PathD>) -> Option<PathsD> {
+    if request.closed_subjects.len() != 1
         || request.clips.len() != 1
         || !matches!(request.fill_rule, FillRule::EvenOdd | FillRule::NonZero)
     {
         return None;
     }
 
-    let subject = request.subjects[0].as_slice();
+    let subject = request.closed_subjects[0].as_slice();
     let clip = request.clips[0].as_slice();
     if !bounds_have_zero_area_contact(path_bounds(subject)?, path_bounds(clip)?) {
         return None;
@@ -204,15 +204,15 @@ fn bounds_have_zero_area_contact(
 }
 
 /// Splits a four-edge `EvenOdd` bow tie at its single proper crossing.
-fn try_even_odd_bow_tie(request: BooleanRequestD<'_>) -> Option<PathsD> {
+fn try_even_odd_bow_tie(request: &BooleanRequest<'_, PathD>) -> Option<PathsD> {
     if !request.clips.is_empty()
-        || request.subjects.len() != 1
+        || request.closed_subjects.len() != 1
         || request.fill_rule != FillRule::EvenOdd
         || !matches!(request.clip_type, ClipType::Union | ClipType::Difference | ClipType::Xor)
     {
         return None;
     }
-    let [first, second, third, fourth] = request.subjects[0].as_slice() else {
+    let [first, second, third, fourth] = request.closed_subjects[0].as_slice() else {
         return None;
     };
     let points = [*first, *second, *third, *fourth];
@@ -393,11 +393,11 @@ fn subtract(first: PointD, second: PointD) -> PointD {
 
 /// Handles one axis-aligned rectangle per side without coordinate vectors,
 /// event streams, winding buffers, or hash-based boundary stitching.
-fn try_rectangle_pair(request: BooleanRequestD<'_>) -> Option<PathsD> {
-    if request.subjects.len() != 1 || request.clips.len() != 1 {
+fn try_rectangle_pair(request: &BooleanRequest<'_, PathD>) -> Option<PathsD> {
+    if request.closed_subjects.len() != 1 || request.clips.len() != 1 {
         return None;
     }
-    let subject = request.subjects[0].as_slice();
+    let subject = request.closed_subjects[0].as_slice();
     let clip = request.clips[0].as_slice();
     let subject_rectangle = axis_aligned_rectangle(subject)?;
     let clip_rectangle = axis_aligned_rectangle(clip)?;

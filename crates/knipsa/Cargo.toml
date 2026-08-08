@@ -35,6 +35,10 @@ name = "workload"
 harness = false
 
 [[bench]]
+name = "open_workload"
+harness = false
+
+[[bench]]
 name = "offset_workload"
 harness = false
 

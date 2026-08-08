@@ -13,11 +13,11 @@ use std::{
 use std::cell::Cell;
 
 use knipsa::{
-    BooleanRequest, BooleanRequestD, ClipType, ComplexityLimits, EndType, Error, FillRule,
-    JoinType, OffsetOptions, Path64, PathD, PathKind, Point64, PointD, PointLocation, Rect64,
-    RectD, boolean_op, boolean_op_d, clip_to_rect_d, clip_to_rect64, offset_paths_d,
-    point_in_polygon, simplify_paths_d, simplify_paths64, triangulate_d, triangulate64,
-    validate_paths_d, validate_paths64,
+    BooleanRequest, ClipType, ComplexityLimits, EndType, Error, FillRule, JoinType, OffsetOptions,
+    Path64, PathD, PathKind, Point64, PointD, PointLocation, Rect64, RectD, boolean_op,
+    boolean_op_d, clip_to_rect_d, clip_to_rect64, offset_paths_d, point_in_polygon,
+    simplify_paths_d, simplify_paths64, triangulate_d, triangulate64, validate_paths_d,
+    validate_paths64,
 };
 
 /// A fixed-layout integer point for FFI callers.
@@ -494,14 +494,29 @@ pub extern "C" fn knipsa_boolean64(
     let operation = catch_unwind(AssertUnwindSafe(|| {
         #[cfg(test)]
         test_panic_if_requested();
+        check_ffi_boolean_complexity(
+            subjects,
+            subject_count,
+            clips,
+            clip_count,
+            ComplexityLimits::DEFAULT,
+            |path| path.point_count,
+        )?;
         let subjects = copy_paths64(subjects, subject_count)?;
         let clips = copy_paths64(clips, clip_count)?;
-        boolean_op(BooleanRequest { subjects: &subjects, clips: &clips, clip_type, fill_rule })
-            .map_err(|error| status_from_error(&error))
+        boolean_op(BooleanRequest {
+            closed_subjects: &subjects,
+            open_subjects: &[],
+            clips: &clips,
+            clip_type,
+            fill_rule,
+            limits: ComplexityLimits::DEFAULT,
+        })
+        .map_err(|error| status_from_error(&error))
     }));
     match operation {
         Ok(Ok(paths)) => {
-            write_paths64(paths, result);
+            write_paths64(paths.closed, result);
             KnipsaStatus::Ok
         }
         Ok(Err(status)) => status,
@@ -555,14 +570,29 @@ pub extern "C" fn knipsa_boolean_d(
     let operation = catch_unwind(AssertUnwindSafe(|| {
         #[cfg(test)]
         test_panic_if_requested();
+        check_ffi_boolean_complexity(
+            subjects,
+            subject_count,
+            clips,
+            clip_count,
+            ComplexityLimits::DEFAULT,
+            |path| path.point_count,
+        )?;
         let subjects = copy_paths_d(subjects, subject_count)?;
         let clips = copy_paths_d(clips, clip_count)?;
-        boolean_op_d(BooleanRequestD { subjects: &subjects, clips: &clips, clip_type, fill_rule })
-            .map_err(|error| status_from_error(&error))
+        boolean_op_d(BooleanRequest {
+            closed_subjects: &subjects,
+            open_subjects: &[],
+            clips: &clips,
+            clip_type,
+            fill_rule,
+            limits: ComplexityLimits::DEFAULT,
+        })
+        .map_err(|error| status_from_error(&error))
     }));
     match operation {
         Ok(Ok(paths)) => {
-            write_paths_d(paths, result);
+            write_paths_d(paths.closed, result);
             KnipsaStatus::Ok
         }
         Ok(Err(status)) => status,
@@ -1228,20 +1258,47 @@ fn check_ffi_complexity<T>(
     limits: ComplexityLimits,
     point_count: impl Fn(&T) -> usize,
 ) -> Result<(), KnipsaStatus> {
+    // SAFETY: The public ABI contract keeps the descriptor array readable for
+    // the duration of this preflight.
+    let descriptors = unsafe { ffi_path_descriptors(paths, path_count, limits)? };
+    limits.check(descriptors.iter().map(point_count)).map_err(|error| status_from_error(&error))
+}
+
+fn check_ffi_boolean_complexity<T>(
+    subjects: *const T,
+    subject_count: usize,
+    clips: *const T,
+    clip_count: usize,
+    limits: ComplexityLimits,
+    point_count: impl Fn(&T) -> usize,
+) -> Result<(), KnipsaStatus> {
+    // SAFETY: The public ABI contract keeps both descriptor arrays readable
+    // for the duration of this preflight.
+    let subjects = unsafe { ffi_path_descriptors(subjects, subject_count, limits)? };
+    // SAFETY: Same contract as for `subjects`.
+    let clips = unsafe { ffi_path_descriptors(clips, clip_count, limits)? };
+    limits
+        .check(subjects.iter().chain(clips).map(point_count))
+        .map_err(|error| status_from_error(&error))
+}
+
+unsafe fn ffi_path_descriptors<'a, T>(
+    paths: *const T,
+    path_count: usize,
+    limits: ComplexityLimits,
+) -> Result<&'a [T], KnipsaStatus> {
     if path_count != 0 && paths.is_null() {
         return Err(KnipsaStatus::NullPointer);
     }
     if path_count > limits.max_paths() {
         return Err(KnipsaStatus::InvalidArgument);
     }
-    let descriptors = if path_count == 0 {
-        &[]
-    } else {
-        // SAFETY: Null was rejected, the count is bounded, and the C contract
-        // requires the descriptor array to remain readable.
-        unsafe { slice::from_raw_parts(paths, path_count) }
-    };
-    limits.check(descriptors.iter().map(point_count)).map_err(|error| status_from_error(&error))
+    if path_count == 0 {
+        return Ok(&[]);
+    }
+    // SAFETY: Null was rejected, the count is bounded, and the C contract
+    // requires the descriptor array to remain readable for the call.
+    Ok(unsafe { slice::from_raw_parts(paths, path_count) })
 }
 
 fn copy_paths64(
@@ -1709,6 +1766,30 @@ mod tests {
         assert_eq!(result, KnipsaPaths64::default());
         knipsa_free_paths64(std::ptr::from_mut(&mut result));
         knipsa_free_paths64(std::ptr::null_mut());
+    }
+
+    #[test]
+    fn boolean_preflight_applies_one_combined_complexity_budget() {
+        let subjects = (0..600)
+            .map(|_| KnipsaPath64 { points: std::ptr::null(), point_count: 0 })
+            .collect::<Vec<_>>();
+        let clips = (0..600)
+            .map(|_| KnipsaPath64 { points: std::ptr::null(), point_count: 0 })
+            .collect::<Vec<_>>();
+        let mut result = KnipsaPaths64::default();
+        assert_eq!(
+            knipsa_boolean64(
+                subjects.as_ptr(),
+                subjects.len(),
+                clips.as_ptr(),
+                clips.len(),
+                ClipType::Union as u8,
+                FillRule::EvenOdd as u8,
+                std::ptr::from_mut(&mut result),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
+        assert_eq!(result, KnipsaPaths64::default());
     }
 
     #[test]
@@ -2504,6 +2585,7 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn rejects_bad_boolean_arguments_and_pointers() {
+        assert_eq!(copy_paths_d(std::ptr::null(), 1), Err(KnipsaStatus::NullPointer));
         assert_eq!(clip_type_from_u8(1), Some(ClipType::Intersection));
         assert_eq!(clip_type_from_u8(2), Some(ClipType::Union));
         assert_eq!(clip_type_from_u8(3), Some(ClipType::Difference));

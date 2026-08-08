@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::hash::{BuildHasherDefault, Hasher};
 
 use crate::{
-    BooleanRequestD, ClipType, Error, FillRule, PathD, PathsD, PointD,
+    BooleanRequest, ClipType, Error, FillRule, PathD, PathsD, PointD,
     dispatch::{
         DirectedEdge, GridCoordinate, KEY_SCALE, MAX_COORDINATE, PointKey, apply_operation,
         canonicalize, compare_paths, dedup_grid_coordinates, fill_rule_accepts_ring, key,
@@ -228,38 +228,38 @@ impl ConvexIndex<'_> {
     }
 }
 
-pub(crate) fn try_apply(request: BooleanRequestD<'_>) -> Option<PathsD> {
+pub(crate) fn try_apply(request: &BooleanRequest<'_, PathD>) -> Option<PathsD> {
     if let Some(result) = try_orthogonal_arrangement(request) {
         return result.ok();
     }
     if let Some(result) = try_large_strict_convex_boolean(request) {
         return Some(result);
     }
-    if !fast_pair_is_provably_safe(&request) {
+    if !fast_pair_is_provably_safe(request) {
         return None;
     }
     if let Some(result) = try_single_convex_boolean(request) {
         return result.ok();
     }
-    let subjects = fast_paths(request.subjects)?;
+    let subjects = fast_paths(request.closed_subjects)?;
     let clips = fast_paths(request.clips)?;
     run(&subjects, &clips, request.clip_type, request.fill_rule).ok()
 }
 
 /// Routes large, positive, strictly convex pairs directly through the existing
 /// linear boundary walk. Degenerate walks defer to the conservative gate.
-fn try_large_strict_convex_boolean(request: BooleanRequestD<'_>) -> Option<PathsD> {
-    if request.subjects.len() != 1
+fn try_large_strict_convex_boolean(request: &BooleanRequest<'_, PathD>) -> Option<PathsD> {
+    if request.closed_subjects.len() != 1
         || request.clips.len() != 1
         || !matches!(request.fill_rule, FillRule::EvenOdd | FillRule::NonZero | FillRule::Positive)
     {
         return None;
     }
-    let subject = request.subjects[0].as_slice();
+    let subject = request.closed_subjects[0].as_slice();
     let clip = request.clips[0].as_slice();
     if subject.len() < MIN_LINEAR_CONVEX_VERTICES
         || clip.len() < MIN_LINEAR_CONVEX_VERTICES
-        || !eligible(request.subjects, request.clips)
+        || !eligible(request.closed_subjects, request.clips)
         || !keyable_path(subject)
         || !keyable_path(clip)
         || area2(subject) <= 0.0
@@ -308,13 +308,15 @@ struct GridEvent {
 /// Resolves rectilinear input with coordinate compression and integer winding
 /// range updates. Diagonal, over-large, or quantization-ambiguous input is
 /// rejected so the exact arrangement remains the conservative fallback.
-fn try_orthogonal_arrangement(request: BooleanRequestD<'_>) -> Option<Result<PathsD, Error>> {
-    if (request.subjects.is_empty() && request.clips.is_empty())
-        || !eligible(request.subjects, request.clips)
+fn try_orthogonal_arrangement(
+    request: &BooleanRequest<'_, PathD>,
+) -> Option<Result<PathsD, Error>> {
+    if (request.closed_subjects.is_empty() && request.clips.is_empty())
+        || !eligible(request.closed_subjects, request.clips)
     {
         return None;
     }
-    let subjects = fast_paths(request.subjects)?;
+    let subjects = fast_paths(request.closed_subjects)?;
     let clips = fast_paths(request.clips)?;
     if !subjects.iter().chain(&clips).all(|path| orthogonal_path(path.points())) {
         return None;
@@ -565,11 +567,11 @@ fn push_grid_edge(
 /// internal sweep helpers. Shared collinear edges and non-convex rings use the
 /// exact arrangement until their topology rules have a complete oracle gate.
 /// This keeps a fast result from silently replacing a correct one.
-fn fast_pair_is_provably_safe(request: &BooleanRequestD<'_>) -> bool {
-    if request.subjects.len() != 1 || request.clips.len() != 1 {
+fn fast_pair_is_provably_safe(request: &BooleanRequest<'_, PathD>) -> bool {
+    if request.closed_subjects.len() != 1 || request.clips.len() != 1 {
         return false;
     }
-    let subject = request.subjects[0].as_slice();
+    let subject = request.closed_subjects[0].as_slice();
     let clip = request.clips[0].as_slice();
     if !strict_convex(subject) {
         return false;
@@ -592,14 +594,14 @@ fn has_collinear_contact(first: &[Point], second: &[Point]) -> bool {
     )
 }
 
-fn try_single_convex_boolean(request: BooleanRequestD<'_>) -> Option<Result<PathsD, Error>> {
-    if request.subjects.len() != 1
+fn try_single_convex_boolean(request: &BooleanRequest<'_, PathD>) -> Option<Result<PathsD, Error>> {
+    if request.closed_subjects.len() != 1
         || request.clips.len() != 1
-        || !eligible(request.subjects, request.clips)
+        || !eligible(request.closed_subjects, request.clips)
     {
         return None;
     }
-    let subject = request.subjects[0].as_slice();
+    let subject = request.closed_subjects[0].as_slice();
     let clip = request.clips[0].as_slice();
     if subject.len() >= 3 && clip.len() >= 3 && strict_convex(subject) && strict_convex(clip) {
         if !keyable_path(subject)
@@ -2266,16 +2268,20 @@ mod tests {
         let subject_points = fast_paths(&subjects).expect("finite high-vertex path");
         let clip_points = fast_paths(&clips).expect("finite high-vertex clip");
         assert!(eligible(&subject_points, &clip_points));
-        let request = BooleanRequestD {
-            subjects: &subjects,
+        let request = BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &subjects,
             clips: &clips,
             clip_type: ClipType::Intersection,
             fill_rule: FillRule::EvenOdd,
         };
-        let result = try_apply(request).expect("high-vertex input is eligible");
+        let result = try_apply(&request).expect("high-vertex input is eligible");
         assert!(!result.is_empty());
-        let xor_result = try_apply(BooleanRequestD {
-            subjects: &subjects,
+        let xor_result = try_apply(&BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &subjects,
             clips: &clips,
             clip_type: ClipType::Xor,
             fill_rule: FillRule::EvenOdd,
@@ -2300,22 +2306,26 @@ mod tests {
         let clips = [points[3..].to_vec()];
 
         for clip_type in [ClipType::Intersection, ClipType::Union, ClipType::Xor] {
-            let forward = crate::boolean::boolean_op_d(BooleanRequestD {
-                subjects: &subjects,
+            let forward = crate::boolean::boolean_op_d(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: &subjects,
                 clips: &clips,
                 clip_type,
                 fill_rule: FillRule::EvenOdd,
             });
-            let reverse = crate::boolean::boolean_op_d(BooleanRequestD {
-                subjects: &clips,
+            let reverse = crate::boolean::boolean_op_d(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: &clips,
                 clips: &subjects,
                 clip_type,
                 fill_rule: FillRule::EvenOdd,
             });
             let forward = forward.expect("forward operation closes");
             let reverse = reverse.expect("reverse operation closes");
-            assert_eq!(forward.len(), reverse.len(), "{clip_type:?} ring count");
-            for (forward_path, reverse_path) in forward.iter().zip(&reverse) {
+            assert_eq!(forward.closed.len(), reverse.closed.len(), "{clip_type:?} ring count");
+            for (forward_path, reverse_path) in forward.closed.iter().zip(&reverse.closed) {
                 assert_eq!(forward_path.len(), reverse_path.len(), "{clip_type:?} vertex count");
                 assert_eq!(
                     area2(forward_path) > 0.0,
@@ -2352,12 +2362,18 @@ mod tests {
             for clip_type in
                 [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor]
             {
-                let request =
-                    BooleanRequestD { subjects: &subjects, clips: &clips, clip_type, fill_rule };
-                let fast = try_large_strict_convex_boolean(request)
+                let request = BooleanRequest {
+                    limits: crate::ComplexityLimits::DEFAULT,
+                    open_subjects: &[],
+                    closed_subjects: &subjects,
+                    clips: &clips,
+                    clip_type,
+                    fill_rule,
+                };
+                let fast = try_large_strict_convex_boolean(&request)
                     .expect("large positive convex pair uses linear dispatch");
-                let exact =
-                    crate::boolean::boolean_op_d_exact(request).expect("exact oracle should close");
+                let exact = crate::boolean::boolean_op_d_exact(&request)
+                    .expect("exact oracle should close");
                 assert_eq!(summary(&fast), summary(&exact), "{fill_rule:?} {clip_type:?}");
             }
         }
@@ -2366,11 +2382,13 @@ mod tests {
     #[test]
     fn large_strict_convex_dispatch_rejects_unsafe_inputs() {
         fn rejected(subjects: &[PathD], clips: &[PathD], fill_rule: FillRule) -> bool {
-            try_large_strict_convex_boolean(BooleanRequestD {
-                subjects,
+            try_large_strict_convex_boolean(&BooleanRequest {
+                closed_subjects: subjects,
+                open_subjects: &[],
                 clips,
                 clip_type: ClipType::Union,
                 fill_rule,
+                limits: crate::ComplexityLimits::DEFAULT,
             })
             .is_none()
         }
@@ -2460,13 +2478,16 @@ mod tests {
             Some((true, true)),
         )
         .expect("linear convex xor should close");
-        let request = BooleanRequestD {
-            subjects: std::slice::from_ref(&subject),
+        let request = BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: std::slice::from_ref(&subject),
             clips: std::slice::from_ref(&clip),
             clip_type: ClipType::Xor,
             fill_rule: FillRule::EvenOdd,
         };
-        let exact = crate::boolean::boolean_op_d_exact(request).expect("exact oracle should close");
+        let exact =
+            crate::boolean::boolean_op_d_exact(&request).expect("exact oracle should close");
         let summary = |paths: &PathsD| {
             let mut values = paths
                 .iter()
@@ -2476,7 +2497,7 @@ mod tests {
             values
         };
         assert_eq!(summary(&fast), summary(&exact));
-        assert!(try_apply(request).is_some());
+        assert!(try_apply(&request).is_some());
     }
 
     #[test]
@@ -2501,16 +2522,18 @@ mod tests {
         for fill_rule in
             [FillRule::EvenOdd, FillRule::NonZero, FillRule::Positive, FillRule::Negative]
         {
-            let request = BooleanRequestD {
-                subjects: &subjects,
+            let request = BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: &subjects,
                 clips: &[],
                 clip_type: ClipType::Union,
                 fill_rule,
             };
-            let fast = try_orthogonal_arrangement(request)
+            let fast = try_orthogonal_arrangement(&request)
                 .expect("orthogonal set should be recognized")
                 .expect("orthogonal boundary should close");
-            let exact = crate::boolean::boolean_op_d_exact(request).expect("exact oracle");
+            let exact = crate::boolean::boolean_op_d_exact(&request).expect("exact oracle");
             assert_eq!(summary(&fast), summary(&exact), "fill rule: {fill_rule:?}");
         }
 
@@ -2524,16 +2547,18 @@ mod tests {
             point(16.0, 12.0),
             point(0.0, 12.0),
         ]];
-        let request = BooleanRequestD {
-            subjects: &self_crossing,
+        let request = BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &self_crossing,
             clips: &[],
             clip_type: ClipType::Union,
             fill_rule: FillRule::EvenOdd,
         };
-        let fast = try_orthogonal_arrangement(request)
+        let fast = try_orthogonal_arrangement(&request)
             .expect("orthogonal self-crossing path should be recognized")
             .expect("orthogonal self-crossing boundary should close");
-        let exact = crate::boolean::boolean_op_d_exact(request).expect("exact oracle");
+        let exact = crate::boolean::boolean_op_d_exact(&request).expect("exact oracle");
         let exact = exact
             .iter()
             .map(|path| crate::trim_collinear_d(path, crate::PathKind::Closed))
@@ -2545,16 +2570,18 @@ mod tests {
             vec![point(0.0, 0.0), point(4.0, 0.0), point(4.0, 4.0), point(0.0, 4.0)],
             vec![point(4.0, 4.0), point(8.0, 4.0), point(8.0, 8.0), point(4.0, 8.0)],
         ];
-        let touching_request = BooleanRequestD {
-            subjects: &touching_subjects,
+        let touching_request = BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &touching_subjects,
             clips: &[],
             clip_type: ClipType::Union,
             fill_rule: FillRule::EvenOdd,
         };
-        let touching_fast = try_orthogonal_arrangement(touching_request)
+        let touching_fast = try_orthogonal_arrangement(&touching_request)
             .expect("vertex-touch input should be recognized")
             .expect("vertex-touch boundary should close");
-        let touching_exact = crate::boolean::boolean_op_d_exact(touching_request)
+        let touching_exact = crate::boolean::boolean_op_d_exact(&touching_request)
             .expect("exact vertex-touch oracle");
         assert_eq!(touching_fast.len(), 2);
         assert_eq!(summary(&touching_fast), summary(&touching_exact));
@@ -2566,13 +2593,15 @@ mod tests {
             point(4.0, 4.0),
             point(0.0, 4.0),
         ]];
-        let split_horizontal_request = BooleanRequestD {
-            subjects: &split_horizontal_subjects,
+        let split_horizontal_request = BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &split_horizontal_subjects,
             clips: &[],
             clip_type: ClipType::Union,
             fill_rule: FillRule::EvenOdd,
         };
-        let split_horizontal_fast = try_orthogonal_arrangement(split_horizontal_request)
+        let split_horizontal_fast = try_orthogonal_arrangement(&split_horizontal_request)
             .expect("split horizontal edge should be recognized")
             .expect("split horizontal boundary should close");
         let split_horizontal_expected =
@@ -2587,13 +2616,15 @@ mod tests {
             point(4.0, 4.0),
             point(0.0, 4.0),
         ]];
-        let horizontal_spike_request = BooleanRequestD {
-            subjects: &horizontal_spike_subjects,
+        let horizontal_spike_request = BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &horizontal_spike_subjects,
             clips: &[],
             clip_type: ClipType::Union,
             fill_rule: FillRule::EvenOdd,
         };
-        let horizontal_spike_fast = try_orthogonal_arrangement(horizontal_spike_request)
+        let horizontal_spike_fast = try_orthogonal_arrangement(&horizontal_spike_request)
             .expect("horizontal spike should be recognized")
             .expect("horizontal spike boundary should close");
         assert_eq!(summary(&horizontal_spike_fast), summary(&split_horizontal_expected));
@@ -2618,16 +2649,18 @@ mod tests {
             for fill_rule in
                 [FillRule::EvenOdd, FillRule::NonZero, FillRule::Positive, FillRule::Negative]
             {
-                let request = BooleanRequestD {
-                    subjects: &matrix_subjects,
+                let request = BooleanRequest {
+                    limits: crate::ComplexityLimits::DEFAULT,
+                    open_subjects: &[],
+                    closed_subjects: &matrix_subjects,
                     clips: &matrix_clips,
                     clip_type,
                     fill_rule,
                 };
-                let fast = try_orthogonal_arrangement(request)
+                let fast = try_orthogonal_arrangement(&request)
                     .expect("orthogonal operation matrix should be recognized")
                     .expect("orthogonal operation matrix should close");
-                let exact = crate::boolean::boolean_op_d_exact(request)
+                let exact = crate::boolean::boolean_op_d_exact(&request)
                     .expect("exact matrix oracle")
                     .iter()
                     .map(|path| crate::trim_collinear_d(path, crate::PathKind::Closed))
@@ -2670,8 +2703,10 @@ mod tests {
         let no_paths: [PathD; 0] = [];
         let one_clip = [subjects[0].clone()];
         assert!(
-            try_orthogonal_arrangement(BooleanRequestD {
-                subjects: &no_paths,
+            try_orthogonal_arrangement(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: &no_paths,
                 clips: &one_clip,
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::EvenOdd,
@@ -2679,14 +2714,18 @@ mod tests {
             .expect("clip-only orthogonal input should be recognized")
             .is_ok()
         );
-        assert!(!fast_pair_is_provably_safe(&BooleanRequestD {
-            subjects: &one_clip,
+        assert!(!fast_pair_is_provably_safe(&BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &one_clip,
             clips: &no_paths,
             clip_type: ClipType::Union,
             fill_rule: FillRule::EvenOdd,
         }));
-        assert!(!fast_pair_is_provably_safe(&BooleanRequestD {
-            subjects: &self_crossing,
+        assert!(!fast_pair_is_provably_safe(&BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &self_crossing,
             clips: &one_clip,
             clip_type: ClipType::Union,
             fill_rule: FillRule::EvenOdd,
@@ -2699,8 +2738,10 @@ mod tests {
             point(0.0, 10.0),
         ]];
         assert!(!strict_convex(&concave_subject[0]));
-        assert!(!fast_pair_is_provably_safe(&BooleanRequestD {
-            subjects: &concave_subject,
+        assert!(!fast_pair_is_provably_safe(&BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &concave_subject,
             clips: &one_clip,
             clip_type: ClipType::Union,
             fill_rule: FillRule::EvenOdd,
@@ -2716,24 +2757,28 @@ mod tests {
             (std::slice::from_ref(&negative), std::slice::from_ref(&positive)),
             (std::slice::from_ref(&positive), std::slice::from_ref(&negative)),
         ] {
-            let request = BooleanRequestD {
-                subjects,
+            let request = BooleanRequest {
+                closed_subjects: subjects,
+                open_subjects: &[],
                 clips,
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::Positive,
+                limits: crate::ComplexityLimits::DEFAULT,
             };
-            assert!(try_single_convex_boolean(request).is_none());
+            assert!(try_single_convex_boolean(&request).is_none());
             assert!(run(subjects, clips, ClipType::Union, FillRule::Positive).is_ok());
             let _ = convex_boolean(&subjects[0], &clips[0], ClipType::Union, None);
         }
         let fallback_subject = vec![point(-1.0, 1.0), point(2.0, 4.0), point(4.0, -1.0)];
-        let request = BooleanRequestD {
-            subjects: std::slice::from_ref(&fallback_subject),
+        let request = BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: std::slice::from_ref(&fallback_subject),
             clips: std::slice::from_ref(&positive),
             clip_type: ClipType::Union,
             fill_rule: FillRule::Positive,
         };
-        assert!(try_apply(request).is_some());
+        assert!(try_apply(&request).is_some());
     }
 
     fn point(x: f64, y: f64) -> Point {
@@ -3290,8 +3335,10 @@ mod tests {
         let subjects = [collinear_convex.clone()];
         let clips = [rectangle.clone()];
         assert!(
-            try_apply(BooleanRequestD {
-                subjects: &subjects,
+            try_apply(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: &subjects,
                 clips: &clips,
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::EvenOdd,
@@ -3300,8 +3347,10 @@ mod tests {
         );
         let non_convex_subjects = [concave.clone()];
         assert!(
-            try_single_convex_boolean(BooleanRequestD {
-                subjects: &non_convex_subjects,
+            try_single_convex_boolean(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: &non_convex_subjects,
                 clips: &clips,
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::EvenOdd,
@@ -3454,22 +3503,28 @@ mod tests {
         let collinear_clockwise = collinear.iter().copied().rev().collect::<Vec<_>>();
 
         assert!(
-            try_single_convex_boolean(BooleanRequestD {
-                subjects: &[],
+            try_single_convex_boolean(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: &[],
                 clips: std::slice::from_ref(&rectangle),
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::EvenOdd,
             })
             .is_none()
         );
-        let _ = try_single_convex_boolean(BooleanRequestD {
-            subjects: std::slice::from_ref(&rectangle),
+        let _ = try_single_convex_boolean(&BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: std::slice::from_ref(&rectangle),
             clips: std::slice::from_ref(&collinear),
             clip_type: ClipType::Union,
             fill_rule: FillRule::EvenOdd,
         });
-        let _ = try_single_convex_boolean(BooleanRequestD {
-            subjects: std::slice::from_ref(&collinear),
+        let _ = try_single_convex_boolean(&BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: std::slice::from_ref(&collinear),
             clips: std::slice::from_ref(&rectangle),
             clip_type: ClipType::Union,
             fill_rule: FillRule::EvenOdd,
@@ -3483,8 +3538,10 @@ mod tests {
             point(MAX_COORDINATE + 1.0, 1.0),
         ];
         assert!(
-            try_single_convex_boolean(BooleanRequestD {
-                subjects: std::slice::from_ref(&huge),
+            try_single_convex_boolean(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: std::slice::from_ref(&huge),
                 clips: std::slice::from_ref(&rectangle),
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::EvenOdd,
@@ -3492,8 +3549,10 @@ mod tests {
             .is_none()
         );
         assert!(
-            try_single_convex_boolean(BooleanRequestD {
-                subjects: std::slice::from_ref(&key_collision),
+            try_single_convex_boolean(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: std::slice::from_ref(&key_collision),
                 clips: std::slice::from_ref(&rectangle),
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::EvenOdd,
@@ -3501,8 +3560,10 @@ mod tests {
             .is_none()
         );
         assert!(
-            try_single_convex_boolean(BooleanRequestD {
-                subjects: std::slice::from_ref(&rectangle),
+            try_single_convex_boolean(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: std::slice::from_ref(&rectangle),
                 clips: std::slice::from_ref(&key_collision),
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::EvenOdd,
@@ -3510,29 +3571,37 @@ mod tests {
             .is_none()
         );
         assert!(
-            try_single_convex_boolean(BooleanRequestD {
-                subjects: std::slice::from_ref(&rectangle),
+            try_single_convex_boolean(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: std::slice::from_ref(&rectangle),
                 clips: std::slice::from_ref(&clockwise),
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::Positive,
             })
             .is_none()
         );
-        let _ = try_single_convex_boolean(BooleanRequestD {
-            subjects: std::slice::from_ref(&collinear),
+        let _ = try_single_convex_boolean(&BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: std::slice::from_ref(&collinear),
             clips: std::slice::from_ref(&rectangle),
             clip_type: ClipType::Union,
             fill_rule: FillRule::Negative,
         });
-        let _ = try_single_convex_boolean(BooleanRequestD {
-            subjects: std::slice::from_ref(&collinear_clockwise),
+        let _ = try_single_convex_boolean(&BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: std::slice::from_ref(&collinear_clockwise),
             clips: std::slice::from_ref(&collinear),
             clip_type: ClipType::Union,
             fill_rule: FillRule::Negative,
         });
         assert!(
-            try_single_convex_boolean(BooleanRequestD {
-                subjects: std::slice::from_ref(&clockwise),
+            try_single_convex_boolean(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: std::slice::from_ref(&clockwise),
                 clips: std::slice::from_ref(&rectangle),
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::Negative,
@@ -3540,8 +3609,10 @@ mod tests {
             .is_none()
         );
         assert!(
-            try_single_convex_boolean(BooleanRequestD {
-                subjects: std::slice::from_ref(&short),
+            try_single_convex_boolean(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: std::slice::from_ref(&short),
                 clips: std::slice::from_ref(&rectangle),
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::EvenOdd,
@@ -3549,8 +3620,10 @@ mod tests {
             .is_none()
         );
         assert!(
-            try_single_convex_boolean(BooleanRequestD {
-                subjects: std::slice::from_ref(&rectangle),
+            try_single_convex_boolean(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: std::slice::from_ref(&rectangle),
                 clips: std::slice::from_ref(&short),
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::EvenOdd,
@@ -3558,8 +3631,10 @@ mod tests {
             .is_none()
         );
         assert!(
-            try_single_convex_boolean(BooleanRequestD {
-                subjects: std::slice::from_ref(&rectangle),
+            try_single_convex_boolean(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: std::slice::from_ref(&rectangle),
                 clips: std::slice::from_ref(&concave),
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::EvenOdd,
@@ -3903,8 +3978,10 @@ mod tests {
         let invalid = vec![point(f64::NAN, 0.0), point(1.0, 0.0), point(0.0, 1.0)];
         let subjects = [invalid.clone(), rectangle.clone()];
         assert!(
-            try_apply(BooleanRequestD {
-                subjects: &subjects,
+            try_apply(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: &subjects,
                 clips: &[],
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::EvenOdd,
@@ -3914,8 +3991,10 @@ mod tests {
         let subjects = [rectangle.clone(), rectangle.clone()];
         let clips = [invalid];
         assert!(
-            try_apply(BooleanRequestD {
-                subjects: &subjects,
+            try_apply(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: &subjects,
                 clips: &clips,
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::EvenOdd,
@@ -3929,8 +4008,10 @@ mod tests {
             point(110.0, 110.0),
             point(100.0, 110.0),
         ];
-        assert!(!fast_pair_is_provably_safe(&BooleanRequestD {
-            subjects: std::slice::from_ref(&rectangle),
+        assert!(!fast_pair_is_provably_safe(&BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: std::slice::from_ref(&rectangle),
             clips: std::slice::from_ref(&overlap),
             clip_type: ClipType::Union,
             fill_rule: FillRule::EvenOdd,
@@ -3942,8 +4023,10 @@ mod tests {
             point(10.0, 10.0),
             point(0.0, 10.0),
         ];
-        assert!(!fast_pair_is_provably_safe(&BooleanRequestD {
-            subjects: std::slice::from_ref(&rectangle),
+        assert!(!fast_pair_is_provably_safe(&BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: std::slice::from_ref(&rectangle),
             clips: std::slice::from_ref(&concave),
             clip_type: ClipType::Intersection,
             fill_rule: FillRule::EvenOdd,
@@ -3959,8 +4042,10 @@ mod tests {
             .is_some()
         );
         assert!(
-            try_single_convex_boolean(BooleanRequestD {
-                subjects: std::slice::from_ref(&rectangle),
+            try_single_convex_boolean(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: std::slice::from_ref(&rectangle),
                 clips: &[],
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::EvenOdd,

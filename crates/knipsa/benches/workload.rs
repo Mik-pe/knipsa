@@ -3,8 +3,8 @@
 use std::{env, fs};
 
 use knipsa::{
-    BooleanRequest, BooleanRequestD, ClipType, Error, FillRule, Path64, PathD, Point64, PointD,
-    boolean_op, boolean_op_d,
+    BooleanRequest, ClipType, Error, FillRule, Path64, PathD, Point64, PointD, boolean_op,
+    boolean_op_d,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -81,7 +81,8 @@ impl BenchmarkCoordinate for f64 {
         clip_type: ClipType,
         fill_rule: FillRule,
     ) -> Result<Vec<PathD>, Error> {
-        boolean_op_d(BooleanRequestD::new(subjects, clips, clip_type, fill_rule))
+        boolean_op_d(BooleanRequest::new(subjects, clips, clip_type, fill_rule))
+            .map(|output| output.closed)
     }
 }
 
@@ -103,6 +104,7 @@ impl BenchmarkCoordinate for i64 {
         fill_rule: FillRule,
     ) -> Result<Vec<Path64>, Error> {
         boolean_op(BooleanRequest::new(subjects, clips, clip_type, fill_rule))
+            .map(|output| output.closed)
     }
 }
 

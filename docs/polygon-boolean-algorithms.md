@@ -36,7 +36,7 @@ machine-specific.
 The current working tree already goes beyond the README's older "next major
 piece" wording:
 
-- `BooleanRequest`/`BooleanRequestD` expose all four operations and `EvenOdd`,
+- the generic `BooleanRequest` exposes all four operations and `EvenOdd`,
   `NonZero`, `Positive`, and `Negative` fill rules.
 - `src/boolean.rs` converts inputs to reduced arbitrary-precision rationals,
   splits crossings and collinear overlaps, classifies the two sides of atomic

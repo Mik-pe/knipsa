@@ -31,7 +31,9 @@ assert_eq!(result.len(), 1);
 Use [`crate::intersection`] for exact integer output. The convenience
 operations and single-ring `_path` variants use [`crate::FillRule::EvenOdd`];
 use [`crate::boolean_op`] or [`crate::boolean_op_d`] when another fill rule is
-required. Use
+required. Their shared generic [`crate::BooleanRequest`] accepts both closed
+and open subjects and their [`crate::BooleanOutput`] keeps closed rings and
+open polylines separate. Clips are always closed. Use
 [`crate::offset_path_d`] for one polygon or polyline offset,
 [`crate::offset_paths_d`] for offset collections, and [`crate::triangulate_d`]
 for counter-clockwise triangles.
@@ -43,9 +45,9 @@ clockwise, and nested islands become separate polygons.
 Integer topology classification is exact across the complete `i64` coordinate
 domain and does not round-trip through floating point.
 
-Every polygon-builder and triangulation call requires
-[`crate::ComplexityLimits`]. Start with [`crate::ComplexityLimits::DEFAULT`]
-to reject oversized requests before quadratic intersection validation begins;
+Every Boolean request, polygon-builder, and triangulation call is bounded by
+[`crate::ComplexityLimits`]. Start with [`crate::ComplexityLimits::DEFAULT`] to
+reject oversized requests before quadratic intersection validation begins;
 there is no unbounded public path.
 
 Use [`crate::validate_paths_d_located`] or

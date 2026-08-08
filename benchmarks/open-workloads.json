@@ -1,0 +1,185 @@
+{
+  "schema": "knipsa-open-workload-v1",
+  "coordinate_type": "i64",
+  "comparison": {
+    "coordinate_tolerance": 0
+  },
+  "cases": [
+    {
+      "id": "crossing-intersection",
+      "clip_type": "intersection",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[-5, 5], [15, 5]]],
+      "clips": [[[0, 0], [10, 0], [10, 10], [0, 10]]]
+    },
+    {
+      "id": "crossing-difference",
+      "clip_type": "difference",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[-5, 5], [15, 5]]],
+      "clips": [[[0, 0], [10, 0], [10, 10], [0, 10]]]
+    },
+    {
+      "id": "crossing-union",
+      "clip_type": "union",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[-5, 5], [15, 5]]],
+      "clips": [[[0, 0], [10, 0], [10, 10], [0, 10]]]
+    },
+    {
+      "id": "crossing-xor",
+      "clip_type": "xor",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[-5, 5], [15, 5]]],
+      "clips": [[[0, 0], [10, 0], [10, 10], [0, 10]]]
+    },
+    {
+      "id": "contained-intersection",
+      "clip_type": "intersection",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[2, 2], [8, 8]]],
+      "clips": [[[0, 0], [10, 0], [10, 10], [0, 10]]]
+    },
+    {
+      "id": "disjoint-intersection",
+      "clip_type": "intersection",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[-8, -4], [-2, -4]]],
+      "clips": [[[0, 0], [10, 0], [10, 10], [0, 10]]]
+    },
+    {
+      "id": "boundary-collinear-intersection",
+      "clip_type": "intersection",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[-5, 0], [5, 0], [15, 0]]],
+      "clips": [[[0, 0], [10, 0], [10, 10], [0, 10]]]
+    },
+    {
+      "id": "boundary-collinear-difference",
+      "clip_type": "difference",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[-5, 0], [5, 0], [15, 0]]],
+      "clips": [[[0, 0], [10, 0], [10, 10], [0, 10]]]
+    },
+    {
+      "id": "leading-boundary-inside-intersection",
+      "clip_type": "intersection",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[0, 0], [5, 0], [5, 5]]],
+      "clips": [[[0, 0], [10, 0], [10, 10], [0, 10]]]
+    },
+    {
+      "id": "trailing-boundary-inside-intersection",
+      "clip_type": "intersection",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[5, 5], [5, 0], [0, 0]]],
+      "clips": [[[0, 0], [10, 0], [10, 10], [0, 10]]]
+    },
+    {
+      "id": "leading-boundary-outside-difference",
+      "clip_type": "difference",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[0, 0], [5, 0], [5, -5]]],
+      "clips": [[[0, 0], [10, 0], [10, 10], [0, 10]]]
+    },
+    {
+      "id": "trailing-boundary-outside-difference",
+      "clip_type": "difference",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[5, -5], [5, 0], [0, 0]]],
+      "clips": [[[0, 0], [10, 0], [10, 10], [0, 10]]]
+    },
+    {
+      "id": "vertex-tangent-intersection",
+      "clip_type": "intersection",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[-5, 5], [0, 0], [5, -5]]],
+      "clips": [[[0, 0], [10, 0], [10, 10], [0, 10]]]
+    },
+    {
+      "id": "multiple-open-directions",
+      "clip_type": "intersection",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[-5, 3], [15, 3]], [[15, 7], [-5, 7]]],
+      "clips": [[[0, 0], [10, 0], [10, 10], [0, 10]]]
+    },
+    {
+      "id": "zigzag-multiple-crossings",
+      "clip_type": "intersection",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[-4, 2], [4, 2], [12, 2], [4, 8], [-4, 8], [4, 4], [12, 4]]],
+      "clips": [[[0, 0], [8, 0], [8, 10], [0, 10]]]
+    },
+    {
+      "id": "two-disconnected-clips",
+      "clip_type": "intersection",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[-5, 5], [21, 5]]],
+      "clips": [[[0, 0], [6, 0], [6, 10], [0, 10]], [[10, 0], [16, 0], [16, 10], [10, 10]]]
+    },
+    {
+      "id": "closed-and-open-union",
+      "clip_type": "union",
+      "fill_rule": "even_odd",
+      "closed_subjects": [[[0, 0], [10, 0], [10, 10], [0, 10]]],
+      "open_subjects": [[[-5, 5], [20, 5]]],
+      "clips": [[[5, 0], [15, 0], [15, 10], [5, 10]]]
+    },
+    {
+      "id": "nonzero-hole-intersection",
+      "clip_type": "intersection",
+      "fill_rule": "non_zero",
+      "closed_subjects": [],
+      "open_subjects": [[[-5, 10], [25, 10]]],
+      "clips": [[[0, 0], [20, 0], [20, 20], [0, 20]], [[5, 5], [5, 15], [15, 15], [15, 5]]]
+    },
+    {
+      "id": "positive-orientation-filter",
+      "clip_type": "intersection",
+      "fill_rule": "positive",
+      "closed_subjects": [],
+      "open_subjects": [[[-5, 5], [35, 5]]],
+      "clips": [[[0, 0], [10, 0], [10, 10], [0, 10]], [[20, 0], [20, 10], [30, 10], [30, 0]]]
+    },
+    {
+      "id": "negative-orientation-filter",
+      "clip_type": "intersection",
+      "fill_rule": "negative",
+      "closed_subjects": [],
+      "open_subjects": [[[-5, 5], [35, 5]]],
+      "clips": [[[0, 0], [10, 0], [10, 10], [0, 10]], [[20, 0], [20, 10], [30, 10], [30, 0]]]
+    },
+    {
+      "id": "reversed-direction-difference",
+      "clip_type": "difference",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[15, 5], [10, 5], [0, 5], [-5, 5]]],
+      "clips": [[[0, 0], [10, 0], [10, 10], [0, 10]]]
+    },
+    {
+      "id": "beyond-f64-intersection",
+      "clip_type": "intersection",
+      "fill_rule": "even_odd",
+      "closed_subjects": [],
+      "open_subjects": [[[4000000000000000000, 4000000000000000500], [4000000000000002000, 4000000000000000500]]],
+      "clips": [[[4000000000000000500, 4000000000000000000], [4000000000000001500, 4000000000000000000], [4000000000000001500, 4000000000000001000], [4000000000000000500, 4000000000000001000]]]
+    }
+  ]
+}

@@ -7,12 +7,14 @@ import contextlib
 import importlib.util
 import io
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
 SCRIPT = Path(__file__).with_name("compare-benchmark-results.py")
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location("compare_benchmark_results", SCRIPT)
 assert SPEC and SPEC.loader
 COMPARATOR = importlib.util.module_from_spec(SPEC)
@@ -20,7 +22,12 @@ SPEC.loader.exec_module(COMPARATOR)
 
 
 def write_jsonl(path: Path, implementation: str, records: list[dict[str, object]]) -> None:
-    lines = [{"implementation": implementation, "samples": 1, "warmups": 0}, *records]
+    lines = [{
+        "implementation": implementation,
+        "samples": 1,
+        "warmups": 0,
+        "minimum_sample_time_ns": 1,
+    }, *records]
     path.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
 
 

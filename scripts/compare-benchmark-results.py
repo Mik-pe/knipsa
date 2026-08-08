@@ -11,66 +11,13 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-
-class ResultFormatError(ValueError):
-    """Raised when an adapter output is incomplete or malformed."""
-
-
-def load_results(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
-    header: dict[str, Any] | None = None
-    records: dict[str, dict[str, Any]] = {}
-    saw_record = False
-
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if not line.strip():
-            continue
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError as error:
-            raise ResultFormatError(f"{path}:{line_number}: invalid JSON: {error}") from error
-        if not isinstance(value, dict):
-            raise ResultFormatError(f"{path}:{line_number}: JSON value is not an object")
-        if "implementation" in value:
-            if saw_record:
-                raise ResultFormatError(f"{path}:{line_number}: header appears after a case")
-            if header is not None:
-                raise ResultFormatError(f"{path}:{line_number}: duplicate adapter header")
-            header = value
-            continue
-        saw_record = True
-        case_id = value.get("id")
-        if not isinstance(case_id, str) or not case_id:
-            raise ResultFormatError(f"{path}:{line_number}: case has no non-empty string id")
-        if case_id in records:
-            raise ResultFormatError(f"{path}:{line_number}: duplicate case id {case_id!r}")
-        records[case_id] = value
-
-    if header is None:
-        raise ResultFormatError(f"{path}: missing adapter header")
-    if not records:
-        raise ResultFormatError(f"{path}: contains no case records")
-    return header, records
-
-
-def load_expected_ids(path: Path) -> set[str]:
-    try:
-        workload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as error:
-        raise ResultFormatError(f"{path}: invalid workload JSON: {error}") from error
-    if not isinstance(workload, dict) or not isinstance(workload.get("cases"), list):
-        raise ResultFormatError(f"{path}: workload must contain a cases array")
-
-    ids: set[str] = set()
-    for index, case in enumerate(workload["cases"]):
-        if not isinstance(case, dict) or not isinstance(case.get("id"), str) or not case["id"]:
-            raise ResultFormatError(f"{path}: case {index} has no non-empty string id")
-        case_id = case["id"]
-        if case_id in ids:
-            raise ResultFormatError(f"{path}: duplicate case id {case_id!r}")
-        ids.add(case_id)
-    if not ids:
-        raise ResultFormatError(f"{path}: workload contains no cases")
-    return ids
+from benchmark_result_protocol import (
+    ResultFormatError,
+    calibrated_timing_error,
+    expected_id_errors,
+    load_expected_ids,
+    load_results,
+)
 
 
 def load_tolerances(path: Path) -> tuple[float, float]:
@@ -114,13 +61,13 @@ def validate_record(record: dict[str, Any], source: str, case_id: str) -> str | 
     if status != "ok":
         return f"{source}:{case_id}: adapter reported {record.get('error')!r}"
 
-    for key in ("median_ns", "p95_ns", "ring_count"):
+    timing_error = calibrated_timing_error(record, source, case_id)
+    if timing_error is not None:
+        return timing_error
+    for key in ("ring_count",):
         value = record.get(key)
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             return f"{source}:{case_id}: invalid non-negative integer {key}={value!r}"
-    iterations = record.get("iterations_per_sample")
-    if not isinstance(iterations, int) or isinstance(iterations, bool) or iterations < 1:
-        return f"{source}:{case_id}: invalid positive integer iterations_per_sample={iterations!r}"
     try:
         signature = json.loads(record["signature"])
     except (KeyError, TypeError, json.JSONDecodeError) as error:
@@ -448,13 +395,7 @@ def compare(
 
     failures: list[str] = []
     if expected is not None:
-        for name, records in (("left", left), ("right", right)):
-            missing = sorted(expected - records.keys())
-            extra = sorted(records.keys() - expected)
-            if missing:
-                failures.append(f"{name}: missing cases: {', '.join(missing)}")
-            if extra:
-                failures.append(f"{name}: unexpected cases: {', '.join(extra)}")
+        failures.extend(expected_id_errors(expected, {"left": left, "right": right}))
 
     ids = sorted(set(left) | set(right))
     matches = 0

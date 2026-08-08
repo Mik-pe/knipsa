@@ -4,9 +4,40 @@ The next pre-1.0 minor release removes unbounded topology analysis and
 makes polygon hole ownership explicit. These changes are intentionally
 breaking; there are no compatibility wrappers.
 
+## One Boolean request and output model
+
+`BooleanRequestD` was removed. Both coordinate APIs now use the generic
+`BooleanRequest<'_, P>`, which separates closed and open subjects, keeps clips
+closed, and carries `ComplexityLimits`. Both operations return
+`BooleanOutput<P>` with separate `closed` and `open` collections:
+
+```rust
+use knipsa::{
+    BooleanRequest, ClipType, ComplexityLimits, FillRule, Path64, boolean_op,
+};
+
+# let closed_subjects: Vec<Path64> = Vec::new();
+# let open_subjects: Vec<Path64> = Vec::new();
+# let clips: Vec<Path64> = Vec::new();
+let output = boolean_op(BooleanRequest {
+    closed_subjects: &closed_subjects,
+    open_subjects: &open_subjects,
+    clips: &clips,
+    clip_type: ClipType::Intersection,
+    fill_rule: FillRule::EvenOdd,
+    limits: ComplexityLimits::DEFAULT,
+})?;
+let _closed_rings = output.closed;
+let _open_polylines = output.open;
+# Ok::<(), knipsa::Error>(())
+```
+
+The convenience polygon operations still return closed `Paths64` or `PathsD`.
+There are no parallel `Open*` request types or open-operation aliases.
+
 ## Topology complexity limits
 
-Every Rust polygon-builder and triangulation call now takes
+Every configurable Boolean request, polygon-builder, and triangulation call now takes
 `ComplexityLimits` and returns the shared `Error` type:
 
 ```rust
@@ -62,6 +93,8 @@ macros and `knipsa_version()` runtime function for dynamically linked callers.
 
 ## C callers
 
-The C function signatures are unchanged. Both triangulation entry points use
+The C function signatures are unchanged and remain closed-polygon Boolean
+operations; open-subject clipping is currently a safe-Rust API. Both
+triangulation entry points use
 the documented fixed default budgets and return
 `KNIPSA_STATUS_INVALID_ARGUMENT` when a budget is exceeded.

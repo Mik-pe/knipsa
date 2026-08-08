@@ -42,12 +42,12 @@ fn nested_rectangle_xor_matches_exact_and_rejects_ambiguous_boundaries() {
         }
         let subjects = [paths[0].clone()];
         let clips = [paths[1].clone(), paths[2].clone()];
-        let request = BooleanRequestD::new(&subjects, &clips, ClipType::Xor, FillRule::EvenOdd);
-        let specialized = try_nested_rectangle_xor(request).expect("strict nesting is direct");
+        let request = BooleanRequest::new(&subjects, &clips, ClipType::Xor, FillRule::EvenOdd);
+        let specialized = try_nested_rectangle_xor(&request).expect("strict nesting is direct");
         let exact = exact_result(request);
         assert_eq!(canonical_geometry(specialized.clone()), canonical_geometry(exact));
         assert_eq!(
-            canonical_geometry(try_apply(request).unwrap()),
+            canonical_geometry(try_apply(&request).unwrap()),
             canonical_geometry(exact_result(request))
         );
         assert_eq!(specialized.iter().filter(|path| signed_area2_d(path) > 0.0).count(), 2);
@@ -57,8 +57,8 @@ fn nested_rectangle_xor_matches_exact_and_rejects_ambiguous_boundaries() {
     let duplicates = [outer.clone(), outer.clone()];
     let clips = [inner.clone()];
     let duplicate_request =
-        BooleanRequestD::new(&duplicates, &clips, ClipType::Xor, FillRule::EvenOdd);
-    let specialized = try_nested_rectangle_xor(duplicate_request).expect("duplicate parity");
+        BooleanRequest::new(&duplicates, &clips, ClipType::Xor, FillRule::EvenOdd);
+    let specialized = try_nested_rectangle_xor(&duplicate_request).expect("duplicate parity");
     assert_eq!(specialized.len(), 1);
     assert_eq!(
         canonical_geometry(specialized),
@@ -71,13 +71,13 @@ fn nested_rectangle_xor_matches_exact_and_rejects_ambiguous_boundaries() {
         rectangle(0.0, 4.0, 2.0, 6.0),
     ];
     let disjoint_request =
-        BooleanRequestD::new(&disjoint[..2], &disjoint[2..], ClipType::Xor, FillRule::EvenOdd);
-    assert_eq!(try_nested_rectangle_xor(disjoint_request).unwrap().len(), 3);
+        BooleanRequest::new(&disjoint[..2], &disjoint[2..], ClipType::Xor, FillRule::EvenOdd);
+    assert_eq!(try_nested_rectangle_xor(&disjoint_request).unwrap().len(), 3);
 
     let reverse_subjects = [inner.clone()];
     let reverse_clips = [middle.clone(), outer.clone()];
     assert!(
-        try_nested_rectangle_xor(BooleanRequestD::new(
+        try_nested_rectangle_xor(&BooleanRequest::new(
             &reverse_subjects,
             &reverse_clips,
             ClipType::Xor,
@@ -96,7 +96,7 @@ fn nested_rectangle_xor_matches_exact_and_rejects_ambiguous_boundaries() {
         let subjects = [outer.clone()];
         let clips = [middle.clone(), ambiguous];
         assert!(
-            try_nested_rectangle_xor(BooleanRequestD::new(
+            try_nested_rectangle_xor(&BooleanRequest::new(
                 &subjects,
                 &clips,
                 ClipType::Xor,
@@ -109,7 +109,7 @@ fn nested_rectangle_xor_matches_exact_and_rejects_ambiguous_boundaries() {
     let subjects = [outer.clone()];
     let clips = [middle.clone(), inner.clone()];
     assert!(
-        try_nested_rectangle_xor(BooleanRequestD::new(
+        try_nested_rectangle_xor(&BooleanRequest::new(
             &subjects,
             &clips,
             ClipType::Union,
@@ -118,7 +118,7 @@ fn nested_rectangle_xor_matches_exact_and_rejects_ambiguous_boundaries() {
         .is_none()
     );
     assert!(
-        try_nested_rectangle_xor(BooleanRequestD::new(
+        try_nested_rectangle_xor(&BooleanRequest::new(
             &subjects,
             &clips,
             ClipType::Xor,
@@ -127,7 +127,7 @@ fn nested_rectangle_xor_matches_exact_and_rejects_ambiguous_boundaries() {
         .is_none()
     );
     assert!(
-        try_nested_rectangle_xor(BooleanRequestD::new(
+        try_nested_rectangle_xor(&BooleanRequest::new(
             &subjects,
             &clips[..1],
             ClipType::Xor,
@@ -156,7 +156,7 @@ fn integer_dispatch_translates_large_local_coordinates_without_rounding() {
     let base = 4_000_000_000_000_000_000;
     let subjects = [rectangle64(base, base, base + 1_000, base + 1_000)];
     let clips = [rectangle64(base + 500, base, base + 1_500, base + 1_000)];
-    let result = try_boolean_op64(BooleanRequest::new(
+    let result = try_boolean_op64(&BooleanRequest::new(
         &subjects,
         &clips,
         ClipType::Intersection,
@@ -170,7 +170,7 @@ fn integer_dispatch_translates_large_local_coordinates_without_rounding() {
 
     let wide = [rectangle64(i64::MIN, 0, i64::MAX, 10)];
     assert!(
-        try_boolean_op64(BooleanRequest::new(&wide, &[], ClipType::Union, FillRule::EvenOdd,))
+        try_boolean_op64(&BooleanRequest::new(&wide, &[], ClipType::Union, FillRule::EvenOdd,))
             .is_none()
     );
 }
@@ -186,12 +186,12 @@ fn canonical_geometry(mut paths: PathsD) -> PathsD {
     paths
 }
 
-fn base_result(request: BooleanRequestD<'_>) -> PathsD {
-    crate::fast::try_apply(request).expect("base fast path accepts rectangle oracle")
+fn base_result(request: BooleanRequest<'_, PathD>) -> PathsD {
+    crate::fast::try_apply(&request).expect("base fast path accepts rectangle oracle")
 }
 
-fn exact_result(request: BooleanRequestD<'_>) -> PathsD {
-    crate::boolean::boolean_op_d_exact(request).expect("exact oracle closes")
+fn exact_result(request: BooleanRequest<'_, PathD>) -> PathsD {
+    crate::boolean::boolean_op_d_exact(&request).expect("exact oracle closes")
 }
 
 fn edge(
@@ -240,14 +240,16 @@ fn rectangle_pair_matches_base_or_falls_back_for_ambiguous_topology() {
                     for clip_type in clip_types {
                         let subjects = [subject.clone()];
                         let clips = [clip.clone()];
-                        let request = BooleanRequestD {
-                            subjects: &subjects,
+                        let request = BooleanRequest {
+                            limits: crate::ComplexityLimits::DEFAULT,
+                            open_subjects: &[],
+                            closed_subjects: &subjects,
                             clips: &clips,
                             clip_type,
                             fill_rule,
                         };
                         let expected = canonical_geometry(base_result(request));
-                        if let Some(actual) = try_rectangle_pair(request) {
+                        if let Some(actual) = try_rectangle_pair(&request) {
                             accelerated += 1;
                             assert_eq!(
                                 canonical_geometry(actual),
@@ -275,30 +277,34 @@ fn wrapper_falls_back_for_non_rectangle_and_vertex_touch_topology() {
     let square = rectangle(0.0, 0.0, 10.0, 10.0);
     let subjects = [triangle];
     let clips = [square];
-    let request = BooleanRequestD {
-        subjects: &subjects,
+    let request = BooleanRequest {
+        limits: crate::ComplexityLimits::DEFAULT,
+        open_subjects: &[],
+        closed_subjects: &subjects,
         clips: &clips,
         clip_type: ClipType::Intersection,
         fill_rule: FillRule::EvenOdd,
     };
-    assert!(try_rectangle_pair(request).is_none());
-    assert!(try_apply(request).is_none());
+    assert!(try_rectangle_pair(&request).is_none());
+    assert!(try_apply(&request).is_none());
     assert_eq!(
-        canonical_geometry(crate::boolean::boolean_op_d(request).unwrap()),
-        canonical_geometry(crate::boolean::boolean_op_d_exact(request).unwrap()),
+        canonical_geometry(crate::boolean::boolean_op_d(&request).unwrap().closed),
+        canonical_geometry(crate::boolean::boolean_op_d_exact(&request).unwrap()),
     );
 
     let subjects = [rectangle(0.0, 0.0, 10.0, 10.0)];
     let clips = [rectangle(10.0, 10.0, 20.0, 20.0)];
-    let request = BooleanRequestD {
-        subjects: &subjects,
+    let request = BooleanRequest {
+        limits: crate::ComplexityLimits::DEFAULT,
+        open_subjects: &[],
+        closed_subjects: &subjects,
         clips: &clips,
         clip_type: ClipType::Xor,
         fill_rule: FillRule::EvenOdd,
     };
-    assert!(try_rectangle_pair(request).is_none());
+    assert!(try_rectangle_pair(&request).is_none());
     assert_eq!(
-        canonical_geometry(try_apply(request).unwrap()),
+        canonical_geometry(try_apply(&request).unwrap()),
         canonical_geometry(base_result(request)),
     );
 }
@@ -323,13 +329,15 @@ fn convex_point_contact_matches_exact_oracle() {
                 for clip_type in
                     [ClipType::Intersection, ClipType::Union, ClipType::Difference, ClipType::Xor]
                 {
-                    let request = BooleanRequestD {
-                        subjects: &subjects,
+                    let request = BooleanRequest {
+                        limits: crate::ComplexityLimits::DEFAULT,
+                        open_subjects: &[],
+                        closed_subjects: &subjects,
                         clips: &clips,
                         clip_type,
                         fill_rule,
                     };
-                    let fast = try_convex_zero_area_contact(request)
+                    let fast = try_convex_zero_area_contact(&request)
                         .expect("strictly convex point contact is certified");
                     assert_eq!(canonical_geometry(fast), canonical_geometry(exact_result(request)));
                 }
@@ -358,23 +366,27 @@ fn convex_contact_rejects_ambiguous_or_unsupported_pairs() {
     let subjects = [subject];
     for clip in [shared_edge, overlap, disjoint, vertically_disjoint, concave, aliased] {
         let clips = [clip];
-        let request = BooleanRequestD {
-            subjects: &subjects,
+        let request = BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &subjects,
             clips: &clips,
             clip_type: ClipType::Xor,
             fill_rule: FillRule::EvenOdd,
         };
-        assert!(try_convex_zero_area_contact(request).is_none());
+        assert!(try_convex_zero_area_contact(&request).is_none());
     }
 
     let clips = [vec![PointD::new(10.0, 0.0), PointD::new(20.0, 0.0), PointD::new(15.0, 10.0)]];
-    let unsupported = BooleanRequestD {
-        subjects: &subjects,
+    let unsupported = BooleanRequest {
+        limits: crate::ComplexityLimits::DEFAULT,
+        open_subjects: &[],
+        closed_subjects: &subjects,
         clips: &clips,
         clip_type: ClipType::Xor,
         fill_rule: FillRule::Positive,
     };
-    assert!(try_convex_zero_area_contact(unsupported).is_none());
+    assert!(try_convex_zero_area_contact(&unsupported).is_none());
     assert!(exact_path_keys(&[]).is_none());
     let repeated_winding = [
         PointD::new(0.0, 0.0),
@@ -408,15 +420,17 @@ fn even_odd_bow_tie_matches_exact_oracle() {
             }
             let subjects = [path];
             for clip_type in [ClipType::Union, ClipType::Difference, ClipType::Xor] {
-                let request = BooleanRequestD {
-                    subjects: &subjects,
+                let request = BooleanRequest {
+                    limits: crate::ComplexityLimits::DEFAULT,
+                    open_subjects: &[],
+                    closed_subjects: &subjects,
                     clips: &[],
                     clip_type,
                     fill_rule: FillRule::EvenOdd,
                 };
-                let fast = try_even_odd_bow_tie(request).expect("certified bow tie");
+                let fast = try_even_odd_bow_tie(&request).expect("certified bow tie");
                 assert_eq!(canonical_geometry(fast), canonical_geometry(exact_result(request)));
-                assert!(try_apply(request).is_some());
+                assert!(try_apply(&request).is_some());
             }
         }
     }
@@ -425,18 +439,20 @@ fn even_odd_bow_tie_matches_exact_oracle() {
 #[test]
 fn bow_tie_and_exact_predicates_reject_unsupported_inputs() {
     let simple = [rectangle(0.0, 0.0, 10.0, 10.0)];
-    let request = BooleanRequestD {
-        subjects: &simple,
+    let request = BooleanRequest {
+        limits: crate::ComplexityLimits::DEFAULT,
+        open_subjects: &[],
+        closed_subjects: &simple,
         clips: &[],
         clip_type: ClipType::Union,
         fill_rule: FillRule::EvenOdd,
     };
-    assert!(try_even_odd_bow_tie(request).is_none());
+    assert!(try_even_odd_bow_tie(&request).is_none());
     assert!(
-        try_even_odd_bow_tie(BooleanRequestD { fill_rule: FillRule::NonZero, ..request }).is_none()
+        try_even_odd_bow_tie(&BooleanRequest { fill_rule: FillRule::NonZero, ..request }).is_none()
     );
     assert!(
-        try_even_odd_bow_tie(BooleanRequestD { clip_type: ClipType::Intersection, ..request })
+        try_even_odd_bow_tie(&BooleanRequest { clip_type: ClipType::Intersection, ..request })
             .is_none()
     );
 
@@ -447,11 +463,17 @@ fn bow_tie_and_exact_predicates_reject_unsupported_inputs() {
         PointD::new(2.0, 0.0),
     ]];
     assert!(
-        try_even_odd_bow_tie(BooleanRequestD { subjects: &non_grid_crossing, ..request }).is_none()
+        try_even_odd_bow_tie(&BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &non_grid_crossing,
+            ..request
+        })
+        .is_none()
     );
 
     let clips = [simple[0].clone()];
-    assert!(try_even_odd_bow_tie(BooleanRequestD { clips: &clips, ..request }).is_none());
+    assert!(try_even_odd_bow_tie(&BooleanRequest { clips: &clips, ..request }).is_none());
     assert!(!opposite_signs(0, 1));
     let point = |x, y| PointKey { x, y };
     assert!(point_on_segment(point(1, 1), point(0, 0), point(2, 2)));
@@ -486,7 +508,7 @@ fn bow_tie_and_exact_predicates_reject_unsupported_inputs() {
     );
     let tall = [rectangle64(0, i64::MIN, 10, i64::MAX)];
     assert!(
-        try_boolean_op64(BooleanRequest::new(&tall, &[], ClipType::Union, FillRule::EvenOdd,))
+        try_boolean_op64(&BooleanRequest::new(&tall, &[], ClipType::Union, FillRule::EvenOdd,))
             .is_none()
     );
 }
@@ -606,8 +628,10 @@ fn coordinate_helpers_reject_quantized_aliases() {
     ] {
         let subjects = [rectangle(0.0, 0.0, 10.0, 10.0)];
         assert!(
-            try_rectangle_pair(BooleanRequestD {
-                subjects: &subjects,
+            try_rectangle_pair(&BooleanRequest {
+                limits: crate::ComplexityLimits::DEFAULT,
+                open_subjects: &[],
+                closed_subjects: &subjects,
                 clips: &clips,
                 clip_type: ClipType::Union,
                 fill_rule: FillRule::EvenOdd,
@@ -700,21 +724,25 @@ fn ordering_helpers_and_request_cardinality_branches_are_covered() {
     let rectangle = rectangle(0.0, 0.0, 10.0, 10.0);
     let subjects = [rectangle.clone(), rectangle.clone()];
     let clips = [rectangle.clone()];
-    let request = BooleanRequestD {
-        subjects: &subjects,
+    let request = BooleanRequest {
+        limits: crate::ComplexityLimits::DEFAULT,
+        open_subjects: &[],
+        closed_subjects: &subjects,
         clips: &clips,
         clip_type: ClipType::Union,
         fill_rule: FillRule::EvenOdd,
     };
-    assert!(try_rectangle_pair(request).is_none());
+    assert!(try_rectangle_pair(&request).is_none());
 
     let subjects = [rectangle];
     let clips: [PathD; 0] = [];
-    let request = BooleanRequestD {
-        subjects: &subjects,
+    let request = BooleanRequest {
+        limits: crate::ComplexityLimits::DEFAULT,
+        open_subjects: &[],
+        closed_subjects: &subjects,
         clips: &clips,
         clip_type: ClipType::Union,
         fill_rule: FillRule::EvenOdd,
     };
-    assert!(try_rectangle_pair(request).is_none());
+    assert!(try_rectangle_pair(&request).is_none());
 }

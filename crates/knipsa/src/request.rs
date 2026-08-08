@@ -1,6 +1,10 @@
 //! Public operation contracts for integer and floating-point paths.
 
-use crate::{Error, Path64, PathD, PathKind, Paths64, PathsD, validate_paths_d, validate_paths64};
+use crate::complexity::BooleanComplexity;
+use crate::{
+    ComplexityLimits, Error, Path64, PathD, PathKind, Paths64, PathsD, validate_path_d,
+    validate_path64,
+};
 
 /// A boolean operation over filled paths.
 ///
@@ -41,62 +45,80 @@ pub enum FillRule {
     Negative = 3,
 }
 
-/// Borrowed integer inputs to a boolean operation.
+/// Borrowed paths and options for one bounded Boolean operation.
 ///
-/// Every non-empty path is interpreted as a closed ring. The first point does
-/// not need to be repeated at the end.
-#[derive(Clone, Copy, Debug)]
-pub struct BooleanRequest<'a> {
-    /// Subject paths, the left-hand side of the operation.
-    pub subjects: &'a [Path64],
-    /// Clip paths, the right-hand side of the operation.
-    pub clips: &'a [Path64],
+/// Closed subjects and clips define filled regions; clips are always closed.
+/// Open subjects are polylines and never contribute winding or affect the
+/// closed result. Intersection retains open fragments inside clips, difference
+/// and XOR retain fragments outside clips, and union retains fragments outside
+/// every filled closed subject and clip. Open paths do not interact with one
+/// another. A fragment collinear with a filled boundary follows Clipper2's
+/// adjacent-fragment rule; at a polyline end, the one present adjacent
+/// fragment decides whether the boundary run remains.
+#[derive(Debug)]
+pub struct BooleanRequest<'a, P> {
+    /// Closed subject paths, the filled left-hand side of the operation.
+    pub closed_subjects: &'a [P],
+    /// Open subject polylines to clip.
+    pub open_subjects: &'a [P],
+    /// Closed clip paths, the right-hand side of the operation.
+    pub clips: &'a [P],
     /// Boolean operation to perform.
     pub clip_type: ClipType,
     /// Fill rule for both path sets.
     pub fill_rule: FillRule,
+    /// Deterministic input-complexity budget.
+    pub limits: ComplexityLimits,
 }
 
-impl<'a> BooleanRequest<'a> {
-    /// Creates a boolean request from borrowed subject and clip paths.
-    #[must_use]
-    pub const fn new(
-        subjects: &'a [Path64],
-        clips: &'a [Path64],
-        clip_type: ClipType,
-        fill_rule: FillRule,
-    ) -> Self {
-        Self { subjects, clips, clip_type, fill_rule }
+impl<P> Copy for BooleanRequest<'_, P> {}
+
+impl<P> Clone for BooleanRequest<'_, P> {
+    fn clone(&self) -> Self {
+        *self
     }
 }
 
-/// Borrowed floating-point inputs to a boolean operation.
-///
-/// This has the same topology contract as [`BooleanRequest`], but accepts
-/// finite [`f64`](f64) coordinates.
-#[derive(Clone, Copy, Debug)]
-pub struct BooleanRequestD<'a> {
-    /// Subject paths, the left-hand side of the operation.
-    pub subjects: &'a [PathD],
-    /// Clip paths, the right-hand side of the operation.
-    pub clips: &'a [PathD],
-    /// Boolean operation to perform.
-    pub clip_type: ClipType,
-    /// Fill rule for both path sets.
-    pub fill_rule: FillRule,
-}
-
-impl<'a> BooleanRequestD<'a> {
-    /// Creates a floating-point boolean request from borrowed paths.
+impl<'a, P> BooleanRequest<'a, P> {
+    /// Creates a closed-subject Boolean request with [`ComplexityLimits::DEFAULT`].
+    ///
+    /// Set `open_subjects` or `limits` directly when constructing a request
+    /// that needs open clipping or a different deterministic budget.
     #[must_use]
     pub const fn new(
-        subjects: &'a [PathD],
-        clips: &'a [PathD],
+        closed_subjects: &'a [P],
+        clips: &'a [P],
         clip_type: ClipType,
         fill_rule: FillRule,
     ) -> Self {
-        Self { subjects, clips, clip_type, fill_rule }
+        Self {
+            closed_subjects,
+            open_subjects: &[],
+            clips,
+            clip_type,
+            fill_rule,
+            limits: ComplexityLimits::DEFAULT,
+        }
     }
+}
+
+/// Separate closed and open outputs from a Boolean operation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BooleanOutput<P> {
+    /// Closed polygon rings produced by the operation.
+    pub closed: Vec<P>,
+    /// Clipped open subject polylines.
+    pub open: Vec<P>,
+}
+
+fn closed_request<'a, P>(
+    subjects: &'a [P],
+    clips: &'a [P],
+    clip_type: ClipType,
+    fill_rule: FillRule,
+) -> BooleanRequest<'a, P> {
+    BooleanRequest::new(subjects, clips, clip_type, fill_rule)
 }
 
 /// Executes an exact integer boolean request.
@@ -126,8 +148,8 @@ impl<'a> BooleanRequestD<'a> {
 /// ))
 /// .expect("valid polygons close");
 ///
-/// assert_eq!(result.len(), 1);
-/// assert!(!result[0].is_empty());
+/// assert_eq!(result.closed.len(), 1);
+/// assert!(result.open.is_empty());
 /// ```
 ///
 /// # Errors
@@ -136,10 +158,9 @@ impl<'a> BooleanRequestD<'a> {
 /// for checked integer overflow, [`Error::NonIntegralResult`] when an exact
 /// result cannot be represented by `i64`, or [`Error::TopologyFailure`] if the
 /// arrangement cannot be closed.
-pub fn boolean_op(request: BooleanRequest<'_>) -> Result<Paths64, Error> {
-    validate_paths64(request.subjects, PathKind::Closed)?;
-    validate_paths64(request.clips, PathKind::Closed)?;
-    crate::boolean::boolean_op64(request)
+pub fn boolean_op(request: BooleanRequest<'_, Path64>) -> Result<BooleanOutput<Path64>, Error> {
+    validate_bounded64(&request)?;
+    crate::boolean::boolean_op64(&request)
 }
 
 /// Executes a floating-point boolean request.
@@ -153,10 +174,59 @@ pub fn boolean_op(request: BooleanRequest<'_>) -> Result<Paths64, Error> {
 ///
 /// Returns [`Error::InvalidPath`] or [`Error::NonFiniteCoordinate`] for invalid
 /// input and [`Error::TopologyFailure`] if the arrangement cannot be closed.
-pub fn boolean_op_d(request: BooleanRequestD<'_>) -> Result<PathsD, Error> {
-    validate_paths_d(request.subjects, PathKind::Closed)?;
-    validate_paths_d(request.clips, PathKind::Closed)?;
-    crate::boolean::boolean_op_d(request)
+pub fn boolean_op_d(request: BooleanRequest<'_, PathD>) -> Result<BooleanOutput<PathD>, Error> {
+    validate_bounded_d(&request)?;
+    crate::boolean::boolean_op_d(&request)
+}
+
+fn validate_bounded64(request: &BooleanRequest<'_, Path64>) -> Result<(), Error> {
+    let mut validation_error = None;
+    let mut complexity = BooleanComplexity::default();
+    for path in request.closed_subjects {
+        complexity.add_closed_subject(path.len());
+        if validation_error.is_none() {
+            validation_error = validate_path64(path, PathKind::Closed).err();
+        }
+    }
+    for path in request.open_subjects {
+        complexity.add_open_subject(path.len());
+        if validation_error.is_none() {
+            validation_error = validate_path64(path, PathKind::Open).err();
+        }
+    }
+    for path in request.clips {
+        complexity.add_clip(path.len());
+        if validation_error.is_none() {
+            validation_error = validate_path64(path, PathKind::Closed).err();
+        }
+    }
+    complexity.check(request.limits, request.clip_type == ClipType::Union)?;
+    validation_error.map_or(Ok(()), Err)
+}
+
+fn validate_bounded_d(request: &BooleanRequest<'_, PathD>) -> Result<(), Error> {
+    let mut validation_error = None;
+    let mut complexity = BooleanComplexity::default();
+    for path in request.closed_subjects {
+        complexity.add_closed_subject(path.len());
+        if validation_error.is_none() {
+            validation_error = validate_path_d(path, PathKind::Closed).err();
+        }
+    }
+    for path in request.open_subjects {
+        complexity.add_open_subject(path.len());
+        if validation_error.is_none() {
+            validation_error = validate_path_d(path, PathKind::Open).err();
+        }
+    }
+    for path in request.clips {
+        complexity.add_clip(path.len());
+        if validation_error.is_none() {
+            validation_error = validate_path_d(path, PathKind::Closed).err();
+        }
+    }
+    complexity.check(request.limits, request.clip_type == ClipType::Union)?;
+    validation_error.map_or(Ok(()), Err)
 }
 
 /// Intersects integer path collections using the orientation-independent
@@ -169,7 +239,8 @@ pub fn boolean_op_d(request: BooleanRequestD<'_>) -> Result<PathsD, Error> {
 /// Propagates validation, arithmetic, representation, and topology errors from
 /// [`boolean_op`].
 pub fn intersection(subjects: &[Path64], clips: &[Path64]) -> Result<Paths64, Error> {
-    boolean_op(BooleanRequest::new(subjects, clips, ClipType::Intersection, FillRule::EvenOdd))
+    boolean_op(closed_request(subjects, clips, ClipType::Intersection, FillRule::EvenOdd))
+        .map(|output| output.closed)
 }
 
 /// Unites two integer path collections using [`FillRule::EvenOdd`].
@@ -178,7 +249,8 @@ pub fn intersection(subjects: &[Path64], clips: &[Path64]) -> Result<Paths64, Er
 ///
 /// Propagates errors from [`boolean_op`].
 pub fn union(subjects: &[Path64], clips: &[Path64]) -> Result<Paths64, Error> {
-    boolean_op(BooleanRequest::new(subjects, clips, ClipType::Union, FillRule::EvenOdd))
+    boolean_op(closed_request(subjects, clips, ClipType::Union, FillRule::EvenOdd))
+        .map(|output| output.closed)
 }
 
 /// Subtracts integer `clips` from `subjects` using [`FillRule::EvenOdd`].
@@ -187,7 +259,8 @@ pub fn union(subjects: &[Path64], clips: &[Path64]) -> Result<Paths64, Error> {
 ///
 /// Propagates errors from [`boolean_op`].
 pub fn difference(subjects: &[Path64], clips: &[Path64]) -> Result<Paths64, Error> {
-    boolean_op(BooleanRequest::new(subjects, clips, ClipType::Difference, FillRule::EvenOdd))
+    boolean_op(closed_request(subjects, clips, ClipType::Difference, FillRule::EvenOdd))
+        .map(|output| output.closed)
 }
 
 /// Computes integer symmetric difference using [`FillRule::EvenOdd`].
@@ -196,7 +269,8 @@ pub fn difference(subjects: &[Path64], clips: &[Path64]) -> Result<Paths64, Erro
 ///
 /// Propagates errors from [`boolean_op`].
 pub fn xor(subjects: &[Path64], clips: &[Path64]) -> Result<Paths64, Error> {
-    boolean_op(BooleanRequest::new(subjects, clips, ClipType::Xor, FillRule::EvenOdd))
+    boolean_op(closed_request(subjects, clips, ClipType::Xor, FillRule::EvenOdd))
+        .map(|output| output.closed)
 }
 
 /// Intersects floating-point path collections using [`FillRule::EvenOdd`].
@@ -207,7 +281,8 @@ pub fn xor(subjects: &[Path64], clips: &[Path64]) -> Result<Paths64, Error> {
 ///
 /// Propagates validation, arithmetic, and topology errors from [`boolean_op_d`].
 pub fn intersection_d(subjects: &[PathD], clips: &[PathD]) -> Result<PathsD, Error> {
-    boolean_op_d(BooleanRequestD::new(subjects, clips, ClipType::Intersection, FillRule::EvenOdd))
+    boolean_op_d(closed_request(subjects, clips, ClipType::Intersection, FillRule::EvenOdd))
+        .map(|output| output.closed)
 }
 
 /// Unites two floating-point path collections using [`FillRule::EvenOdd`].
@@ -216,7 +291,8 @@ pub fn intersection_d(subjects: &[PathD], clips: &[PathD]) -> Result<PathsD, Err
 ///
 /// Propagates errors from [`boolean_op_d`].
 pub fn union_d(subjects: &[PathD], clips: &[PathD]) -> Result<PathsD, Error> {
-    boolean_op_d(BooleanRequestD::new(subjects, clips, ClipType::Union, FillRule::EvenOdd))
+    boolean_op_d(closed_request(subjects, clips, ClipType::Union, FillRule::EvenOdd))
+        .map(|output| output.closed)
 }
 
 /// Subtracts floating-point `clips` from `subjects` using
@@ -226,7 +302,8 @@ pub fn union_d(subjects: &[PathD], clips: &[PathD]) -> Result<PathsD, Error> {
 ///
 /// Propagates errors from [`boolean_op_d`].
 pub fn difference_d(subjects: &[PathD], clips: &[PathD]) -> Result<PathsD, Error> {
-    boolean_op_d(BooleanRequestD::new(subjects, clips, ClipType::Difference, FillRule::EvenOdd))
+    boolean_op_d(closed_request(subjects, clips, ClipType::Difference, FillRule::EvenOdd))
+        .map(|output| output.closed)
 }
 
 /// Computes floating-point symmetric difference using [`FillRule::EvenOdd`].
@@ -235,7 +312,8 @@ pub fn difference_d(subjects: &[PathD], clips: &[PathD]) -> Result<PathsD, Error
 ///
 /// Propagates errors from [`boolean_op_d`].
 pub fn xor_d(subjects: &[PathD], clips: &[PathD]) -> Result<PathsD, Error> {
-    boolean_op_d(BooleanRequestD::new(subjects, clips, ClipType::Xor, FillRule::EvenOdd))
+    boolean_op_d(closed_request(subjects, clips, ClipType::Xor, FillRule::EvenOdd))
+        .map(|output| output.closed)
 }
 
 /// Intersects two integer rings using [`FillRule::EvenOdd`].
@@ -344,23 +422,64 @@ mod tests {
             ClipType::Difference,
             FillRule::Positive,
         );
-        assert!(std::ptr::eq(integer_request.subjects[0].as_ptr(), integer_subject.as_ptr()));
+        assert!(std::ptr::eq(
+            integer_request.closed_subjects[0].as_ptr(),
+            integer_subject.as_ptr()
+        ));
         assert!(std::ptr::eq(integer_request.clips[0].as_ptr(), integer_clip.as_ptr()));
         assert_eq!(integer_request.clip_type, ClipType::Difference);
         assert_eq!(integer_request.fill_rule, FillRule::Positive);
+        let cloned = Clone::clone(&integer_request);
+        assert_eq!(cloned.closed_subjects, integer_request.closed_subjects);
 
         let double_subject = vec![crate::PointD::new(0.0, 0.0)];
         let double_clip = vec![crate::PointD::new(1.0, 1.0)];
-        let double_request = BooleanRequestD::new(
+        let double_request = BooleanRequest::new(
             std::slice::from_ref(&double_subject),
             std::slice::from_ref(&double_clip),
             ClipType::Xor,
             FillRule::Negative,
         );
-        assert!(std::ptr::eq(double_request.subjects[0].as_ptr(), double_subject.as_ptr()));
+        assert!(std::ptr::eq(double_request.closed_subjects[0].as_ptr(), double_subject.as_ptr()));
         assert!(std::ptr::eq(double_request.clips[0].as_ptr(), double_clip.as_ptr()));
         assert_eq!(double_request.clip_type, ClipType::Xor);
         assert_eq!(double_request.fill_rule, FillRule::Negative);
+    }
+
+    #[test]
+    fn open_subjects_are_charged_only_against_relevant_filled_boundaries() {
+        let open = [(0..3_000).map(|x| crate::Point64::new(x, 0)).collect::<Path64>()];
+        let output = boolean_op(BooleanRequest {
+            closed_subjects: &[],
+            open_subjects: &open,
+            clips: &[],
+            clip_type: ClipType::Difference,
+            fill_rule: FillRule::EvenOdd,
+            limits: ComplexityLimits::new(1, 3_000, 0),
+        })
+        .expect("an isolated open polyline has no candidate edge pairs");
+        assert_eq!(output.open, open);
+
+        let open_d = [vec![crate::PointD::new(-1.0, 0.5), crate::PointD::new(2.0, 0.5)]];
+        let clip_d = [vec![
+            crate::PointD::new(0.0, 0.0),
+            crate::PointD::new(1.0, 0.0),
+            crate::PointD::new(1.0, 1.0),
+            crate::PointD::new(0.0, 1.0),
+        ]];
+        let output = boolean_op_d(BooleanRequest {
+            closed_subjects: &[],
+            open_subjects: &open_d,
+            clips: &clip_d,
+            clip_type: ClipType::Intersection,
+            fill_rule: FillRule::EvenOdd,
+            limits: ComplexityLimits::DEFAULT,
+        })
+        .expect("valid floating open request");
+        assert_eq!(
+            output.open,
+            vec![vec![crate::PointD::new(0.0, 0.5), crate::PointD::new(1.0, 0.5)]]
+        );
     }
 
     #[test]
@@ -368,23 +487,99 @@ mod tests {
         let square =
             vec![crate::Point64::new(0, 0), crate::Point64::new(1, 0), crate::Point64::new(1, 1)];
         let request = BooleanRequest {
-            subjects: &[square],
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &[square],
             clips: &[],
             clip_type: ClipType::Union,
             fill_rule: FillRule::NonZero,
         };
-        assert_eq!(boolean_op(request).expect("valid request").len(), 1);
+        assert_eq!(boolean_op(request).expect("valid request").closed.len(), 1);
     }
 
     #[test]
     fn rejects_invalid_boolean_input_before_kernel() {
         let request = BooleanRequest {
-            subjects: &[vec![crate::Point64::new(0, 0)]],
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &[vec![crate::Point64::new(0, 0)]],
             clips: &[],
             clip_type: ClipType::Intersection,
             fill_rule: FillRule::EvenOdd,
         };
         assert!(matches!(boolean_op(request), Err(Error::InvalidPath { .. })));
+    }
+
+    #[test]
+    fn validation_keeps_scanning_complexity_after_the_first_error() {
+        let integer_closed = [
+            vec![crate::Point64::new(0, 0)],
+            vec![crate::Point64::new(0, 0), crate::Point64::new(2, 0), crate::Point64::new(0, 2)],
+        ];
+        let integer_open = [vec![crate::Point64::new(0, 0), crate::Point64::new(1, 1)]];
+        assert!(matches!(
+            boolean_op(BooleanRequest {
+                closed_subjects: &integer_closed,
+                open_subjects: &integer_open,
+                clips: &[],
+                clip_type: ClipType::Intersection,
+                fill_rule: FillRule::EvenOdd,
+                limits: ComplexityLimits::DEFAULT,
+            }),
+            Err(Error::InvalidPath { .. })
+        ));
+
+        let double_closed = [
+            vec![crate::PointD::new(0.0, 0.0)],
+            vec![
+                crate::PointD::new(0.0, 0.0),
+                crate::PointD::new(2.0, 0.0),
+                crate::PointD::new(0.0, 2.0),
+            ],
+        ];
+        let double_open = [vec![crate::PointD::new(0.0, 0.0), crate::PointD::new(1.0, 1.0)]];
+        assert!(matches!(
+            boolean_op_d(BooleanRequest {
+                closed_subjects: &double_closed,
+                open_subjects: &double_open,
+                clips: &[],
+                clip_type: ClipType::Intersection,
+                fill_rule: FillRule::EvenOdd,
+                limits: ComplexityLimits::DEFAULT,
+            }),
+            Err(Error::InvalidPath { .. })
+        ));
+    }
+
+    #[test]
+    fn open_requests_validate_and_preflight_before_geometry_work() {
+        let invalid_open = [vec![crate::Point64::new(0, 0)]];
+        let validation = BooleanRequest {
+            closed_subjects: &[],
+            open_subjects: &invalid_open,
+            clips: &[],
+            clip_type: ClipType::Intersection,
+            fill_rule: FillRule::EvenOdd,
+            limits: ComplexityLimits::DEFAULT,
+        };
+        assert!(matches!(
+            boolean_op(validation),
+            Err(Error::InvalidPath { kind: PathKind::Open, .. })
+        ));
+
+        let oversized = [vec![crate::Point64::new(0, 0), crate::Point64::new(1, 1)]];
+        let limited = BooleanRequest {
+            closed_subjects: &[],
+            open_subjects: &oversized,
+            clips: &[],
+            clip_type: ClipType::Difference,
+            fill_rule: FillRule::EvenOdd,
+            limits: ComplexityLimits::new(0, 0, 0),
+        };
+        assert!(matches!(
+            boolean_op(limited),
+            Err(Error::LimitExceeded { resource: crate::ComplexityResource::Paths, .. })
+        ));
     }
 
     #[test]
@@ -394,15 +589,22 @@ mod tests {
             crate::PointD::new(1.0, 0.0),
             crate::PointD::new(1.0, 1.0),
         ];
-        let request = BooleanRequestD {
-            subjects: &[square],
+        let request = BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &[square],
             clips: &[],
             clip_type: ClipType::Union,
             fill_rule: FillRule::NonZero,
         };
-        assert_eq!(crate::boolean_op_d(request).expect("valid request").len(), 1);
-        let bad = BooleanRequestD {
-            subjects: &[vec![crate::PointD::new(0.0, 0.0), crate::PointD::new(f64::NAN, 0.0)]],
+        assert_eq!(crate::boolean_op_d(request).expect("valid request").closed.len(), 1);
+        let bad = BooleanRequest {
+            limits: crate::ComplexityLimits::DEFAULT,
+            open_subjects: &[],
+            closed_subjects: &[vec![
+                crate::PointD::new(0.0, 0.0),
+                crate::PointD::new(f64::NAN, 0.0),
+            ]],
             clips: &[],
             clip_type: ClipType::Union,
             fill_rule: FillRule::EvenOdd,

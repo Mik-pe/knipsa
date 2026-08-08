@@ -83,13 +83,16 @@ Each coordinate/cardinality combination has one canonical name; the `0.x`
 API intentionally does not retain duplicate aliases. Integer helpers use the
 `64` suffix where a suffix is needed, while floating-point helpers use `_d`.
 The configurable Boolean entry points are `boolean_op` and `boolean_op_d`.
+Both take the same generic `BooleanRequest`, require a deterministic
+`ComplexityLimits` budget, and return `BooleanOutput` with separate `closed`
+and `open` path collections. Only subjects may be open; clips are closed.
 
 | Need | Use |
 | --- | --- |
 | Two individual rings | `intersection_path`, `union_path`, `difference_path`, `xor_path` and `_d` variants |
 | Ring collections with EvenOdd | `intersection`, `union`, `difference`, `xor` and `_d` variants |
-| Exact integer polygon booleans | `boolean_op` with `Point64` |
-| Fractional coordinates | `boolean_op_d` with `PointD` |
+| Exact integer polygon and open-path booleans | `boolean_op` with `Point64` |
+| Fractional polygon and open-path booleans | `boolean_op_d` with `PointD` |
 | Clean self-intersections or internal boundaries | `simplify_paths64` or `simplify_paths_d` |
 | Clip paths to an axis-aligned rectangle | `clip_to_rect64` or `clip_to_rect_d` |
 | Remove redundant collinear vertices | `trim_collinear64` or `trim_collinear_d` |
@@ -132,8 +135,13 @@ need to choose a fast path or an epsilon policy.
 
 ## Geometry conventions
 
-- Boolean and triangulation inputs are closed rings. Do not repeat the first
-  point at the end; if it is repeated, normalization removes it.
+- Closed Boolean subjects, clips, and triangulation inputs are rings. Boolean
+  subjects may additionally be open polylines; clips are always closed. Do not
+  repeat a ring's first point at the end; normalization removes it if present.
+- Boolean output separates closed rings from open polylines. Intersection keeps
+  open fragments inside clips; difference and XOR keep fragments outside
+  clips; union keeps fragments outside every filled closed subject and clip.
+  Open paths neither fill regions nor interact with one another.
 - Empty paths and empty path collections are valid and represent no geometry.
 - Coordinates use the ordinary Cartesian convention: positive signed area is
   counter-clockwise winding.
@@ -145,7 +153,8 @@ need to choose a fast path or an epsilon policy.
   and islands.
 - Polygon builders turn flat ring collections into counter-clockwise outer
   rings with owned clockwise holes; nested islands become separate polygons.
-- Every polygon-builder and triangulation call requires `ComplexityLimits`;
+- Every Boolean, polygon-builder, and triangulation request is bounded by
+  `ComplexityLimits`;
   `DEFAULT` bounds path count, total vertices, and conservative candidate
   intersection pairs before quadratic validation begins. There is no
   unbounded public path.
@@ -159,8 +168,10 @@ and optional point indices.
 
 ## C and other languages
 
-The `knipsa-ffi` crate exposes the same operations through a C ABI. The 0.2 ABI
-is preserved across 0.2.x patch releases; pre-1.0 minor releases may break it.
+The `knipsa-ffi` crate exposes the closed-path operations and other core
+geometry operations through a C ABI; open-subject Boolean clipping is currently
+available only through the safe Rust API. The 0.2 ABI is preserved across 0.2.x
+patch releases; pre-1.0 minor releases may break it.
 The public header is
 [`crates/knipsa-ffi/include/knipsa.h`](https://github.com/Mik-pe/knipsa/blob/main/crates/knipsa-ffi/include/knipsa.h),
 and the ownership and null-pointer rules are documented in

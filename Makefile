@@ -1,4 +1,4 @@
-.PHONY: check test lint docs c-api coverage conformance conformance-integer conformance-offset conformance-triangulation conformance-triangulation-d fuzz-replay release-check
+.PHONY: check test lint docs c-api coverage conformance conformance-integer conformance-open conformance-offset conformance-triangulation conformance-triangulation-d fuzz-replay release-check
 
 check: test lint c-api
 
@@ -25,6 +25,9 @@ conformance:
 conformance-integer:
 	./scripts/run-conformance.sh benchmarks/integer-workloads.json \
 		target/conformance-integer clipper2-integer
+
+conformance-open:
+	./scripts/run-open-conformance.sh
 
 conformance-offset:
 	./scripts/run-offset-conformance.sh

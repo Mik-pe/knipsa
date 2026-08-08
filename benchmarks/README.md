@@ -148,6 +148,23 @@ EvenOdd profile that edge multiset defines the same parity-filled region.
 Reference adapters are comparison tools only; they are not runtime
 dependencies of knipsa.
 
+## Open Boolean matrix
+
+Open-subject Boolean clipping has a separate exact integer workload and emits
+closed polygon results separately from clipped open polylines:
+
+```sh
+make conformance-open
+```
+
+The 22 generated cases cover every Boolean operation and fill rule, boundary
+contacts, direction, multiple paths, holes, combined closed/open output, and
+coordinates beyond exact `f64` representation. The comparator atomizes
+collinear subdivisions across both results. Closed edges are compared without
+direction; open edges retain direction and multiplicity. Missing cases,
+adapter errors, malformed integer coordinates, and uncalibrated samples fail
+closed.
+
 ## Offset matrix
 
 Offsetting has a separate workload because round joins can represent the same
@@ -192,8 +209,9 @@ exact doubled area, and reconstruct every outer and hole boundary. This lets
 different valid triangulations match without reducing correctness to an area
 or triangle-count check.
 
-The four native Rust workload binaries share one benchmark module for warm-up,
-power-of-two batch calibration, sampling, and percentile selection. Boolean,
-offset, and triangulation timing therefore use identical measurement logic.
+The five native Rust workload binaries share one benchmark module for warm-up,
+power-of-two batch calibration, sampling, and percentile selection. Closed
+Boolean, open Boolean, offset, and triangulation timing therefore use identical
+measurement logic.
 The three isolated `geo` reference binaries likewise share one reference-side
 calibration module.
