@@ -175,6 +175,24 @@ and bidirectional boundary distance using per-case tolerances:
 make conformance-offset
 ```
 
+`make conformance-offset-scale` deterministically generates and runs a separate
+scale matrix through the same benchmark binaries and comparator. It varies
+input vertex count and reflexity, contour count, overlap density, round-arc
+tolerance, and collinear retrace length. Offset benchmark rows include the
+output vertex count so timing changes can be distinguished from tessellation
+changes without adding instrumentation to the production API.
+
+The deliberately separate known-gap reproducer is generated and run with:
+
+```sh
+./scripts/generate-offset-scale-workload.py --known-gaps target/offset-known-gaps.json
+./scripts/run-offset-conformance.sh target/offset-known-gaps.json target/conformance-offset-known-gaps
+```
+
+It currently records the minimized dense 228-reflex-corner cleanup discrepancy
+without weakening or making the ordinary conformance gate depend on a known
+mismatch.
+
 ## Triangulation matrix
 
 The integer triangulation profile compares `triangulate64` with both Clipper2's

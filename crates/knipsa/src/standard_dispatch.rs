@@ -12,6 +12,7 @@ use crate::{
 };
 
 const MAX_BOUNDARY_EDGES: usize = 24;
+const MAX_COALESCED_RECTANGLES: usize = 1024;
 
 struct SmallBoundary {
     edges: [DirectedEdge; MAX_BOUNDARY_EDGES],
@@ -54,9 +55,9 @@ pub(crate) fn try_apply(request: &BooleanRequest<'_, PathD>) -> Option<PathsD> {
     None
 }
 
-/// Coalesces two same-winding exact-grid rectangles when their union is itself
-/// a rectangle. This covers adjacent and overlapping offset contours without
-/// building even the tiny rectangle arrangement used by `try_rectangle_pair`.
+/// Coalesces same-winding exact-grid rectangles when their union is itself a
+/// rectangle. This covers contained rectangles and connected horizontal or
+/// vertical strips without building an arrangement.
 fn try_coalesced_rectangle_union(request: &BooleanRequest<'_, PathD>) -> Option<PathsD> {
     if !request.open_subjects.is_empty()
         || request.clip_type != ClipType::Union
@@ -64,43 +65,53 @@ fn try_coalesced_rectangle_union(request: &BooleanRequest<'_, PathD>) -> Option<
     {
         return None;
     }
-    let mut paths =
-        request.closed_subjects.iter().chain(request.clips).filter(|path| !path.is_empty());
+    let paths = request.closed_subjects.iter().chain(request.clips).filter(|path| !path.is_empty());
+    let path_count = paths.clone().count();
+    if !(2..=MAX_COALESCED_RECTANGLES).contains(&path_count) {
+        return None;
+    }
+
+    let mut paths = paths;
     let first_path = paths.next()?.as_slice();
-    let second_path = paths.next()?.as_slice();
-    if paths.next().is_some()
-        || signed_area2_d(first_path).signum() != signed_area2_d(second_path).signum()
-    {
-        return None;
+    let mut union = axis_aligned_rectangle(first_path)?;
+    let first_winding_is_positive = signed_area2_d(first_path).is_sign_positive();
+    for path in paths {
+        if first_winding_is_positive != signed_area2_d(path).is_sign_positive() {
+            return None;
+        }
+        let rectangle = axis_aligned_rectangle(path)?;
+        let (xs, x_len) =
+            tiny_coordinates(union.min_x, union.max_x, rectangle.min_x, rectangle.max_x)?;
+        let (ys, y_len) =
+            tiny_coordinates(union.min_y, union.max_y, rectangle.min_y, rectangle.max_y)?;
+        if contains_rectangle(union, rectangle) {
+            continue;
+        }
+        if contains_rectangle(rectangle, union) {
+            union = rectangle;
+            continue;
+        }
+        let horizontal = rectangle.min_y.key == union.min_y.key
+            && rectangle.max_y.key == union.max_y.key
+            && rectangle.max_x.key >= union.min_x.key
+            && union.max_x.key >= rectangle.min_x.key;
+        let vertical = rectangle.min_x.key == union.min_x.key
+            && rectangle.max_x.key == union.max_x.key
+            && rectangle.max_y.key >= union.min_y.key
+            && union.max_y.key >= rectangle.min_y.key;
+        // Requiring every next rectangle to preserve a rectangular union makes
+        // the certificate linear and allocation-free. An out-of-order bridge
+        // can be missed safely because `None` invokes the exact fallback.
+        if !horizontal && !vertical {
+            return None;
+        }
+        union.min_x = xs[0];
+        union.min_y = ys[0];
+        union.max_x = xs[x_len - 1];
+        union.max_y = ys[y_len - 1];
     }
 
-    let first = axis_aligned_rectangle(first_path)?;
-    let second = axis_aligned_rectangle(second_path)?;
-    let (xs, x_len) = tiny_coordinates(first.min_x, first.max_x, second.min_x, second.max_x)?;
-    let (ys, y_len) = tiny_coordinates(first.min_y, first.max_y, second.min_y, second.max_y)?;
-
-    let contained = contains_rectangle(first, second) || contains_rectangle(second, first);
-    let horizontal_strip = first.min_y.key == second.min_y.key
-        && first.max_y.key == second.max_y.key
-        && first.max_x.key >= second.min_x.key
-        && second.max_x.key >= first.min_x.key;
-    let vertical_strip = first.min_x.key == second.min_x.key
-        && first.max_x.key == second.max_x.key
-        && first.max_y.key >= second.min_y.key
-        && second.max_y.key >= first.min_y.key;
-    if !contained && !horizontal_strip && !vertical_strip {
-        return None;
-    }
-
-    Some(vec![rectangle_path(
-        AxisAlignedRectangle {
-            min_x: xs[0],
-            min_y: ys[0],
-            max_x: xs[x_len - 1],
-            max_y: ys[y_len - 1],
-        },
-        true,
-    )])
+    Some(vec![rectangle_path(union, true)])
 }
 
 fn contains_rectangle(outer: AxisAlignedRectangle, inner: AxisAlignedRectangle) -> bool {

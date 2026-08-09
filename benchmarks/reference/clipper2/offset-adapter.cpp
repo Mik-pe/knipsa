@@ -4,6 +4,7 @@
 #include <chrono>
 #include <iomanip>
 #include <iostream>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -114,10 +115,16 @@ int main() {
       std::cout << "{\"id\":\"" << id << "\",\"status\":\"ok\",\"error\":null,\"median_ns\":"
                 << timings[kSamples / 2] << ",\"p95_ns\":" << timings[(kSamples * 95 + 99) / 100 - 1]
                 << ",\"iterations_per_sample\":" << iterations_per_sample
-                << ",\"ring_count\":" << result.size() << ",\"signature\":\"" << signature(result) << "\"}\n";
+                << ",\"ring_count\":" << result.size()
+                << ",\"output_vertex_count\":"
+                << std::accumulate(result.begin(), result.end(), std::size_t{0},
+                                   [](std::size_t total, const PathD& path) {
+                                     return total + path.size();
+                                   })
+                << ",\"signature\":\"" << signature(result) << "\"}\n";
     } catch (const std::exception& error) {
       std::cout << "{\"id\":\"" << id << "\",\"status\":\"error\",\"error\":\"" << error.what()
-                << "\",\"median_ns\":0,\"p95_ns\":0,\"iterations_per_sample\":0,\"ring_count\":0,\"signature\":\"[]\"}\n";
+                << "\",\"median_ns\":0,\"p95_ns\":0,\"iterations_per_sample\":0,\"ring_count\":0,\"output_vertex_count\":0,\"signature\":\"[]\"}\n";
     }
   }
 }

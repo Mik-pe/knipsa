@@ -85,6 +85,100 @@ fn coalesced_rectangle_union_matches_exact_oracle_and_defers_other_topologies() 
     assert!(try_coalesced_rectangle_union(&request).is_none());
 }
 
+#[test]
+fn coalesced_rectangle_chain_matches_exact_oracle_and_defers_gaps() {
+    for vertical in [false, true] {
+        for reverse in [false, true] {
+            let mut paths = (0..32)
+                .map(|index| {
+                    let start = f64::from(index * 8);
+                    if vertical {
+                        rectangle(0.0, start, 10.0, start + 10.0)
+                    } else {
+                        rectangle(start, 0.0, start + 10.0, 10.0)
+                    }
+                })
+                .collect::<Vec<_>>();
+            if reverse {
+                for path in &mut paths {
+                    path.reverse();
+                }
+            }
+            paths.reverse();
+            let request = BooleanRequest::new(&paths, &[], ClipType::Union, FillRule::NonZero);
+            let specialized = try_coalesced_rectangle_union(&request).expect("chain coalesces");
+            assert_eq!(
+                canonical_trimmed_geometry(specialized),
+                canonical_trimmed_geometry(exact_result(request))
+            );
+        }
+    }
+
+    let contained = [
+        rectangle(0.0, 0.0, 100.0, 100.0),
+        rectangle(10.0, 20.0, 30.0, 40.0),
+        rectangle(60.0, 50.0, 90.0, 80.0),
+    ];
+    let request = BooleanRequest::new(&contained, &[], ClipType::Union, FillRule::NonZero);
+    let specialized = try_coalesced_rectangle_union(&request).expect("outer contains all");
+    assert_eq!(
+        canonical_trimmed_geometry(specialized),
+        canonical_trimmed_geometry(exact_result(request))
+    );
+
+    let contained_outer_later = [contained[1].clone(), contained[0].clone(), contained[2].clone()];
+    let request =
+        BooleanRequest::new(&contained_outer_later, &[], ClipType::Union, FillRule::NonZero);
+    let specialized = try_coalesced_rectangle_union(&request).expect("later outer contains union");
+    assert_eq!(
+        canonical_trimmed_geometry(specialized),
+        canonical_trimmed_geometry(exact_result(request))
+    );
+
+    let gap = [rectangle(0.0, 0.0, 10.0, 10.0), rectangle(11.0, 0.0, 20.0, 10.0)];
+    let request = BooleanRequest::new(&gap, &[], ClipType::Union, FillRule::NonZero);
+    assert!(try_coalesced_rectangle_union(&request).is_none());
+    let reversed_gap = [gap[1].clone(), gap[0].clone()];
+    let request = BooleanRequest::new(&reversed_gap, &[], ClipType::Union, FillRule::NonZero);
+    assert!(try_coalesced_rectangle_union(&request).is_none());
+
+    let l_shape = [
+        rectangle(0.0, 0.0, 20.0, 10.0),
+        rectangle(0.0, 10.0, 10.0, 20.0),
+        rectangle(2.0, 2.0, 4.0, 4.0),
+    ];
+    let request = BooleanRequest::new(&l_shape, &[], ClipType::Union, FillRule::NonZero);
+    assert!(try_coalesced_rectangle_union(&request).is_none());
+}
+
+#[test]
+fn coalesced_rectangle_union_rejects_quantized_coordinate_aliases_and_respects_limit() {
+    let alias_offset = 0.25e-9;
+    assert_eq!(key(PointD::new(10.0, 0.0)), key(PointD::new(10.0 + alias_offset, 0.0)));
+    assert_ne!(10.0_f64.to_bits(), (10.0 + alias_offset).to_bits());
+    for aliased in [
+        [rectangle(0.0, 0.0, 10.0, 10.0), rectangle(10.0 + alias_offset, 0.0, 20.0, 10.0)],
+        [rectangle(0.0, 0.0, 10.0, 10.0), rectangle(0.0, 10.0 + alias_offset, 10.0, 20.0)],
+    ] {
+        let request = BooleanRequest::new(&aliased, &[], ClipType::Union, FillRule::NonZero);
+        assert!(try_coalesced_rectangle_union(&request).is_none());
+        assert!(try_apply(&request).is_none());
+        assert_eq!(
+            canonical_geometry(crate::boolean::boolean_op_d(&request).unwrap().closed),
+            canonical_geometry(exact_result(request))
+        );
+    }
+
+    let rectangle = rectangle(0.0, 0.0, 10.0, 10.0);
+    let at_limit = vec![rectangle.clone(); MAX_COALESCED_RECTANGLES];
+    let request = BooleanRequest::new(&at_limit, &[], ClipType::Union, FillRule::NonZero);
+    assert!(try_coalesced_rectangle_union(&request).is_some());
+
+    let above_limit = vec![rectangle; MAX_COALESCED_RECTANGLES + 1];
+    let request = BooleanRequest::new(&above_limit, &[], ClipType::Union, FillRule::NonZero);
+    assert!(try_coalesced_rectangle_union(&request).is_none());
+}
+
 fn canonical_trimmed_geometry(paths: PathsD) -> PathsD {
     canonical_geometry(
         paths

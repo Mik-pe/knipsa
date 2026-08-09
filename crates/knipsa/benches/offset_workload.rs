@@ -38,6 +38,7 @@ struct BenchResult {
     p95_ns: u128,
     iterations_per_sample: usize,
     ring_count: usize,
+    output_vertex_count: usize,
     signature: String,
 }
 
@@ -81,6 +82,7 @@ fn main() {
             p95_ns: measured.p95_ns,
             iterations_per_sample: measured.iterations_per_sample,
             ring_count: measured.output.len(),
+            output_vertex_count: measured.output.iter().map(Vec::len).sum(),
             signature: serde_json::to_string(
                 &measured
                     .output
@@ -103,6 +105,7 @@ fn print_error(id: String, error: String) {
         p95_ns: 0,
         iterations_per_sample: 0,
         ring_count: 0,
+        output_vertex_count: 0,
         signature: "[]".to_owned(),
     };
     println!("{}", serde_json::to_string(&result).expect("serializable error result"));
