@@ -6,6 +6,8 @@ minor releases before `1.0`.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-09
+
 ### Added
 
 - Exact integer and floating-point Boolean clipping of open subject polylines,
@@ -20,6 +22,14 @@ minor releases before `1.0`.
 
 ### Changed
 
+- Rust callers of `knipsa-ffi` must now use `unsafe` for functions whose raw
+  pointers carry validity requirements. The C ABI and exported symbols are
+  unchanged.
+- `OffsetOptions` now carries `ComplexityLimits`; offset calls preflight input
+  and generated contours before topology cleanup.
+- Exact integer Boolean calls with an empty side now return separated simple
+  rings directly for every fill rule and collapse identical `NonZero` copies
+  before the general arrangement.
 - `boolean_op` and `boolean_op_d` now share one generic `BooleanRequest` and
   return one generic `BooleanOutput`; the duplicate `BooleanRequestD` type was
   removed instead of introducing a parallel open-path API family.
@@ -100,6 +110,7 @@ minor releases before `1.0`.
   scope and deferred capabilities are recorded in
   [`docs/release-scope-0.2.md`](docs/release-scope-0.2.md).
 
-[Unreleased]: https://github.com/Mik-pe/knipsa/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/Mik-pe/knipsa/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Mik-pe/knipsa/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/Mik-pe/knipsa/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Mik-pe/knipsa/compare/v0.1.1...v0.2.0

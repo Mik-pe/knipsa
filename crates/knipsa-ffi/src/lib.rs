@@ -398,8 +398,7 @@ pub extern "C" fn knipsa_status_message(status: u8) -> *const c_char {
 /// non-empty point pointer must refer to readable memory for the duration of
 /// the call.
 #[unsafe(no_mangle)]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn knipsa_validate_paths64(
+pub unsafe extern "C" fn knipsa_validate_paths64(
     paths: *const KnipsaPath64,
     path_count: usize,
     kind: u8,
@@ -429,8 +428,7 @@ pub extern "C" fn knipsa_validate_paths64(
 /// non-empty point pointer must refer to readable memory for the duration of
 /// the call.
 #[unsafe(no_mangle)]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn knipsa_validate_paths_d(
+pub unsafe extern "C" fn knipsa_validate_paths_d(
     paths: *const KnipsaPathD,
     path_count: usize,
     kind: u8,
@@ -464,8 +462,7 @@ pub extern "C" fn knipsa_validate_paths_d(
 /// call. Passing a live result without releasing it first returns
 /// [`KnipsaStatus::InvalidArgument`] and leaves that result untouched.
 #[unsafe(no_mangle)]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn knipsa_boolean64(
+pub unsafe extern "C" fn knipsa_boolean64(
     subjects: *const KnipsaPath64,
     subject_count: usize,
     clips: *const KnipsaPath64,
@@ -540,8 +537,7 @@ pub extern "C" fn knipsa_boolean64(
 /// call. Passing a live result without releasing it first returns
 /// [`KnipsaStatus::InvalidArgument`] and leaves that result untouched.
 #[unsafe(no_mangle)]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn knipsa_boolean_d(
+pub unsafe extern "C" fn knipsa_boolean_d(
     subjects: *const KnipsaPathD,
     subject_count: usize,
     clips: *const KnipsaPathD,
@@ -610,8 +606,7 @@ pub extern "C" fn knipsa_boolean_d(
 /// `path_count` is non-zero, `paths` and every non-empty point buffer must be
 /// readable for the duration of the call.
 #[unsafe(no_mangle)]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn knipsa_simplify64(
+pub unsafe extern "C" fn knipsa_simplify64(
     paths: *const KnipsaPath64,
     path_count: usize,
     fill_rule: u8,
@@ -633,6 +628,9 @@ pub extern "C" fn knipsa_simplify64(
     let operation = catch_unwind(AssertUnwindSafe(|| {
         #[cfg(test)]
         test_panic_if_requested();
+        check_ffi_complexity(paths, path_count, ComplexityLimits::DEFAULT, |path| {
+            path.point_count
+        })?;
         let paths = copy_paths64(paths, path_count)?;
         simplify_paths64(&paths, fill_rule).map_err(|error| status_from_error(&error))
     }));
@@ -656,8 +654,7 @@ pub extern "C" fn knipsa_simplify64(
 /// `path_count` is non-zero, `paths` and every non-empty point buffer must be
 /// readable for the duration of the call.
 #[unsafe(no_mangle)]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn knipsa_simplify_d(
+pub unsafe extern "C" fn knipsa_simplify_d(
     paths: *const KnipsaPathD,
     path_count: usize,
     fill_rule: u8,
@@ -679,6 +676,9 @@ pub extern "C" fn knipsa_simplify_d(
     let operation = catch_unwind(AssertUnwindSafe(|| {
         #[cfg(test)]
         test_panic_if_requested();
+        check_ffi_complexity(paths, path_count, ComplexityLimits::DEFAULT, |path| {
+            path.point_count
+        })?;
         let paths = copy_paths_d(paths, path_count)?;
         simplify_paths_d(&paths, fill_rule).map_err(|error| status_from_error(&error))
     }));
@@ -702,8 +702,7 @@ pub extern "C" fn knipsa_simplify_d(
 /// `path_count` is non-zero, `paths` and every non-empty point buffer must be
 /// readable for the duration of the call.
 #[unsafe(no_mangle)]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn knipsa_clip_to_rect64(
+pub unsafe extern "C" fn knipsa_clip_to_rect64(
     paths: *const KnipsaPath64,
     path_count: usize,
     rectangle: KnipsaRect64,
@@ -750,8 +749,7 @@ pub extern "C" fn knipsa_clip_to_rect64(
 /// `path_count` is non-zero, `paths` and every non-empty point buffer must be
 /// readable for the duration of the call.
 #[unsafe(no_mangle)]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn knipsa_clip_to_rect_d(
+pub unsafe extern "C" fn knipsa_clip_to_rect_d(
     paths: *const KnipsaPathD,
     path_count: usize,
     rectangle: KnipsaRectD,
@@ -805,8 +803,7 @@ pub extern "C" fn knipsa_clip_to_rect_d(
 /// a live result without releasing it first returns
 /// [`KnipsaStatus::InvalidArgument`] and leaves that result untouched.
 #[unsafe(no_mangle)]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn knipsa_offset64(
+pub unsafe extern "C" fn knipsa_offset64(
     paths: *const KnipsaPath64,
     path_count: usize,
     delta: f64,
@@ -830,6 +827,9 @@ pub extern "C" fn knipsa_offset64(
     let operation = catch_unwind(AssertUnwindSafe(|| {
         #[cfg(test)]
         test_panic_if_requested();
+        check_ffi_complexity(paths, path_count, ComplexityLimits::DEFAULT, |path| {
+            path.point_count
+        })?;
         let paths = copy_paths64(paths, path_count)?;
         let paths = paths64_to_d(&paths)?;
         offset_paths_d(&paths, delta, options).map_err(|error| status_from_error(&error))
@@ -858,8 +858,7 @@ pub extern "C" fn knipsa_offset64(
 /// a live result without releasing it first returns
 /// [`KnipsaStatus::InvalidArgument`] and leaves that result untouched.
 #[unsafe(no_mangle)]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn knipsa_offset_d(
+pub unsafe extern "C" fn knipsa_offset_d(
     paths: *const KnipsaPathD,
     path_count: usize,
     delta: f64,
@@ -883,6 +882,9 @@ pub extern "C" fn knipsa_offset_d(
     let operation = catch_unwind(AssertUnwindSafe(|| {
         #[cfg(test)]
         test_panic_if_requested();
+        check_ffi_complexity(paths, path_count, ComplexityLimits::DEFAULT, |path| {
+            path.point_count
+        })?;
         let paths = copy_paths_d(paths, path_count)?;
         offset_paths_d(&paths, delta, options).map_err(|error| status_from_error(&error))
     }));
@@ -909,8 +911,7 @@ pub extern "C" fn knipsa_offset_d(
 /// call. Passing a live result without releasing it first returns
 /// [`KnipsaStatus::InvalidArgument`] and leaves that result untouched.
 #[unsafe(no_mangle)]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn knipsa_triangulate64(
+pub unsafe extern "C" fn knipsa_triangulate64(
     paths: *const KnipsaPath64,
     path_count: usize,
     fill_rule: u8,
@@ -965,8 +966,7 @@ pub extern "C" fn knipsa_triangulate64(
 /// call. Passing a live result without releasing it first returns
 /// [`KnipsaStatus::InvalidArgument`] and leaves that result untouched.
 #[unsafe(no_mangle)]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn knipsa_triangulate_d(
+pub unsafe extern "C" fn knipsa_triangulate_d(
     paths: *const KnipsaPathD,
     path_count: usize,
     fill_rule: u8,
@@ -1014,9 +1014,14 @@ pub extern "C" fn knipsa_triangulate_d(
 ///
 /// The pointer must be a valid pointer to a result descriptor previously
 /// initialized by this library or a zeroed descriptor.
+///
+/// # Safety
+///
+/// A non-null `result` must point to writable storage initialized by this
+/// library or to a zeroed descriptor. Its allocation metadata must not have
+/// been modified by the caller.
 #[unsafe(no_mangle)]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn knipsa_free_paths64(result: *mut KnipsaPaths64) {
+pub unsafe extern "C" fn knipsa_free_paths64(result: *mut KnipsaPaths64) {
     if result.is_null() {
         return;
     }
@@ -1053,9 +1058,14 @@ pub extern "C" fn knipsa_free_paths64(result: *mut KnipsaPaths64) {
 ///
 /// The pointer must be a valid pointer to a result descriptor previously
 /// initialized by this library or a zeroed descriptor.
+///
+/// # Safety
+///
+/// A non-null `result` must point to writable storage initialized by this
+/// library or to a zeroed descriptor. Its allocation metadata must not have
+/// been modified by the caller.
 #[unsafe(no_mangle)]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn knipsa_free_paths_d(result: *mut KnipsaPathsD) {
+pub unsafe extern "C" fn knipsa_free_paths_d(result: *mut KnipsaPathsD) {
     if result.is_null() {
         return;
     }
@@ -1094,8 +1104,7 @@ pub extern "C" fn knipsa_free_paths_d(result: *mut KnipsaPathsD) {
 /// `path.point_count` is non-zero, `path.points` must point to readable
 /// `KnipsaPoint64` values for the duration of the call.
 #[unsafe(no_mangle)]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn knipsa_point_in_polygon64(
+pub unsafe extern "C" fn knipsa_point_in_polygon64(
     path: KnipsaPath64,
     point: KnipsaPoint64,
     location: *mut KnipsaLocation,
@@ -1196,6 +1205,7 @@ fn offset_options_from_u8(
         miter_limit,
         arc_tolerance,
         preserve_collinear: preserve_collinear != 0,
+        limits: ComplexityLimits::DEFAULT,
     })
 }
 
@@ -1426,6 +1436,178 @@ impl From<PointLocation> for KnipsaLocation {
 mod tests {
     use super::*;
     use std::ffi::CStr;
+
+    // The unit tests construct every descriptor and keep its backing storage
+    // alive across each call, so these wrappers centralize the matching
+    // Rust-side safety proof while exercising the exported ABI functions.
+    fn knipsa_validate_paths64(
+        paths: *const KnipsaPath64,
+        path_count: usize,
+        kind: u8,
+    ) -> KnipsaStatus {
+        // SAFETY: Test callers satisfy the exported borrowed-slice contract.
+        unsafe { super::knipsa_validate_paths64(paths, path_count, kind) }
+    }
+
+    fn knipsa_validate_paths_d(
+        paths: *const KnipsaPathD,
+        path_count: usize,
+        kind: u8,
+    ) -> KnipsaStatus {
+        // SAFETY: Test callers satisfy the exported borrowed-slice contract.
+        unsafe { super::knipsa_validate_paths_d(paths, path_count, kind) }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn knipsa_boolean64(
+        subjects: *const KnipsaPath64,
+        subject_count: usize,
+        clips: *const KnipsaPath64,
+        clip_count: usize,
+        clip_type: u8,
+        fill_rule: u8,
+        result: *mut KnipsaPaths64,
+    ) -> KnipsaStatus {
+        // SAFETY: Test callers keep inputs readable and result slots writable.
+        unsafe {
+            super::knipsa_boolean64(
+                subjects,
+                subject_count,
+                clips,
+                clip_count,
+                clip_type,
+                fill_rule,
+                result,
+            )
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn knipsa_boolean_d(
+        subjects: *const KnipsaPathD,
+        subject_count: usize,
+        clips: *const KnipsaPathD,
+        clip_count: usize,
+        clip_type: u8,
+        fill_rule: u8,
+        result: *mut KnipsaPathsD,
+    ) -> KnipsaStatus {
+        // SAFETY: Test callers keep inputs readable and result slots writable.
+        unsafe {
+            super::knipsa_boolean_d(
+                subjects,
+                subject_count,
+                clips,
+                clip_count,
+                clip_type,
+                fill_rule,
+                result,
+            )
+        }
+    }
+
+    fn knipsa_simplify64(
+        paths: *const KnipsaPath64,
+        path_count: usize,
+        fill_rule: u8,
+        result: *mut KnipsaPaths64,
+    ) -> KnipsaStatus {
+        // SAFETY: Test callers keep inputs readable and result slots writable.
+        unsafe { super::knipsa_simplify64(paths, path_count, fill_rule, result) }
+    }
+
+    fn knipsa_simplify_d(
+        paths: *const KnipsaPathD,
+        path_count: usize,
+        fill_rule: u8,
+        result: *mut KnipsaPathsD,
+    ) -> KnipsaStatus {
+        // SAFETY: Test callers keep inputs readable and result slots writable.
+        unsafe { super::knipsa_simplify_d(paths, path_count, fill_rule, result) }
+    }
+
+    fn knipsa_clip_to_rect64(
+        paths: *const KnipsaPath64,
+        path_count: usize,
+        rectangle: KnipsaRect64,
+        fill_rule: u8,
+        result: *mut KnipsaPaths64,
+    ) -> KnipsaStatus {
+        // SAFETY: Test callers keep inputs readable and result slots writable.
+        unsafe { super::knipsa_clip_to_rect64(paths, path_count, rectangle, fill_rule, result) }
+    }
+
+    fn knipsa_clip_to_rect_d(
+        paths: *const KnipsaPathD,
+        path_count: usize,
+        rectangle: KnipsaRectD,
+        fill_rule: u8,
+        result: *mut KnipsaPathsD,
+    ) -> KnipsaStatus {
+        // SAFETY: Test callers keep inputs readable and result slots writable.
+        unsafe { super::knipsa_clip_to_rect_d(paths, path_count, rectangle, fill_rule, result) }
+    }
+
+    fn knipsa_offset64(
+        paths: *const KnipsaPath64,
+        path_count: usize,
+        delta: f64,
+        options: *const KnipsaOffsetOptions,
+        result: *mut KnipsaPathsD,
+    ) -> KnipsaStatus {
+        // SAFETY: Test callers keep inputs/options readable and result slots writable.
+        unsafe { super::knipsa_offset64(paths, path_count, delta, options, result) }
+    }
+
+    fn knipsa_offset_d(
+        paths: *const KnipsaPathD,
+        path_count: usize,
+        delta: f64,
+        options: *const KnipsaOffsetOptions,
+        result: *mut KnipsaPathsD,
+    ) -> KnipsaStatus {
+        // SAFETY: Test callers keep inputs/options readable and result slots writable.
+        unsafe { super::knipsa_offset_d(paths, path_count, delta, options, result) }
+    }
+
+    fn knipsa_triangulate64(
+        paths: *const KnipsaPath64,
+        path_count: usize,
+        fill_rule: u8,
+        result: *mut KnipsaPaths64,
+    ) -> KnipsaStatus {
+        // SAFETY: Test callers keep inputs readable and result slots writable.
+        unsafe { super::knipsa_triangulate64(paths, path_count, fill_rule, result) }
+    }
+
+    fn knipsa_triangulate_d(
+        paths: *const KnipsaPathD,
+        path_count: usize,
+        fill_rule: u8,
+        result: *mut KnipsaPathsD,
+    ) -> KnipsaStatus {
+        // SAFETY: Test callers keep inputs readable and result slots writable.
+        unsafe { super::knipsa_triangulate_d(paths, path_count, fill_rule, result) }
+    }
+
+    fn knipsa_free_paths64(result: *mut KnipsaPaths64) {
+        // SAFETY: Test callers pass library-owned or zeroed result descriptors.
+        unsafe { super::knipsa_free_paths64(result) }
+    }
+
+    fn knipsa_free_paths_d(result: *mut KnipsaPathsD) {
+        // SAFETY: Test callers pass library-owned or zeroed result descriptors.
+        unsafe { super::knipsa_free_paths_d(result) }
+    }
+
+    fn knipsa_point_in_polygon64(
+        path: KnipsaPath64,
+        point: KnipsaPoint64,
+        location: *mut KnipsaLocation,
+    ) -> KnipsaStatus {
+        // SAFETY: Test callers keep the path readable and output writable.
+        unsafe { super::knipsa_point_in_polygon64(path, point, location) }
+    }
 
     const TRIANGLE: [KnipsaPoint64; 3] = [
         KnipsaPoint64 { x: 0, y: 0 },
@@ -2496,6 +2678,39 @@ mod tests {
             KnipsaStatus::InternalError
         );
         FORCE_BOOLEAN_PANIC.with(|panic| panic.set(false));
+    }
+
+    #[test]
+    fn offset_preflight_rejects_oversized_descriptors() {
+        let mut offset = KnipsaPathsD::default();
+        let oversized_64 = KnipsaPath64 {
+            points: std::ptr::null(),
+            point_count: ComplexityLimits::DEFAULT.max_vertices() + 1,
+        };
+        assert_eq!(
+            knipsa_offset64(
+                std::ptr::from_ref(&oversized_64),
+                1,
+                1.0,
+                std::ptr::from_ref(&KnipsaOffsetOptions::default()),
+                std::ptr::from_mut(&mut offset),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
+        let oversized_d = KnipsaPathD {
+            points: std::ptr::null(),
+            point_count: ComplexityLimits::DEFAULT.max_vertices() + 1,
+        };
+        assert_eq!(
+            knipsa_offset_d(
+                std::ptr::from_ref(&oversized_d),
+                1,
+                1.0,
+                std::ptr::from_ref(&KnipsaOffsetOptions::default()),
+                std::ptr::from_mut(&mut offset),
+            ),
+            KnipsaStatus::InvalidArgument
+        );
     }
 
     #[test]

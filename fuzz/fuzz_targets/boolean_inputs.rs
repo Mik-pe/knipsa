@@ -39,21 +39,17 @@ fuzz_target!(|data: &[u8]| {
             assert_valid(&output.closed, PathKind::Closed);
             assert_valid(&output.open, PathKind::Open);
         }
-        let result = result.map(|output| output.closed);
         if matches!(clip_type, ClipType::Intersection | ClipType::Union | ClipType::Xor) {
+            let result = boolean_op(BooleanRequest::new(&subjects, &clips, clip_type, fill_rule))
+                .map(|output| output.closed);
             let reverse = boolean_op(BooleanRequest::new(&clips, &subjects, clip_type, fill_rule))
                 .map(|output| output.closed);
-            assert_eq!(result, reverse, "commutative operation changed with operand order");
+            assert_eq!(result, reverse, "commutative {clip_type:?} changed with operand order");
         }
     }
 
-    let self_xor = boolean_op(BooleanRequest::new(
-        &subjects,
-        &subjects,
-        ClipType::Xor,
-        fill_rule,
-    ))
-    .map(|output| output.closed);
+    let self_xor = boolean_op(BooleanRequest::new(&subjects, &subjects, ClipType::Xor, fill_rule))
+        .map(|output| output.closed);
     if let Ok(paths) = self_xor {
         assert!(paths.is_empty(), "self XOR must be empty");
     }

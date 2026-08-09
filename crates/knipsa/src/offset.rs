@@ -84,6 +84,8 @@ pub struct OffsetOptions {
     pub arc_tolerance: f64,
     /// Keep collinear vertices in the returned rings instead of cleaning them.
     pub preserve_collinear: bool,
+    /// Deterministic budget for input and generated contour complexity.
+    pub limits: crate::ComplexityLimits,
 }
 
 impl Default for OffsetOptions {
@@ -129,12 +131,20 @@ impl OffsetOptions {
         self
     }
 
+    /// Returns these options with a different deterministic work budget.
+    #[must_use]
+    pub const fn with_limits(mut self, limits: crate::ComplexityLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
     const DEFAULT: Self = Self {
         join_type: JoinType::Round,
         end_type: EndType::Polygon,
         miter_limit: 2.0,
         arc_tolerance: 0.0,
         preserve_collinear: false,
+        limits: crate::ComplexityLimits::DEFAULT,
     };
 }
 
@@ -152,13 +162,15 @@ impl OffsetOptions {
 /// # Errors
 ///
 /// Returns [`Error::InvalidPath`] for malformed paths, [`Error::InvalidOffset`]
-/// for invalid options, and [`Error::ArithmeticOverflow`] when rounded output
-/// cannot be represented by `i64`.
+/// for invalid options, [`Error::LimitExceeded`] when input or generated
+/// contours exceed the configured budget, and [`Error::ArithmeticOverflow`]
+/// when rounded output cannot be represented by `i64`.
 pub fn offset_paths64(
     paths: &[Path64],
     delta: f64,
     options: OffsetOptions,
 ) -> Result<Paths64, Error> {
+    options.limits.check(paths.iter().map(Vec::len))?;
     let (origin, paths_d) = paths64_to_local_d(paths)?;
     offset_paths_d(&paths_d, delta, options)?
         .into_iter()
@@ -190,14 +202,16 @@ pub fn offset_path64(path: &Path64, delta: f64, options: OffsetOptions) -> Resul
 /// # Errors
 ///
 /// Returns [`Error::InvalidPath`] for malformed paths, [`Error::InvalidOffset`]
-/// for invalid options, and [`Error::TopologyFailure`] if generated outlines
-/// cannot be cleaned into closed polygon rings.
+/// for invalid options, [`Error::LimitExceeded`] when input or generated
+/// contours exceed the configured budget, and [`Error::TopologyFailure`] if
+/// generated outlines cannot be cleaned into closed polygon rings.
 pub fn offset_paths_d(
     paths: &[PathD],
     delta: f64,
     options: OffsetOptions,
 ) -> Result<PathsD, Error> {
     validate_options(delta, options)?;
+    options.limits.check(paths.iter().map(Vec::len))?;
     let kind = if options.end_type == EndType::Polygon { PathKind::Closed } else { PathKind::Open };
     for path in paths {
         validate_path_d(path, kind)?;
@@ -224,6 +238,7 @@ pub fn offset_paths_d(
             open_outline(path, delta.abs(), options)?
         };
         add_generated_outline(&mut generated, outline, options.preserve_collinear);
+        options.limits.check(generated.iter().map(Vec::len))?;
     }
     if generated.is_empty() {
         return Ok(Vec::new());
@@ -236,12 +251,13 @@ pub fn offset_paths_d(
             .collect());
     }
 
-    merge_generated_contours(&generated, options.preserve_collinear)
+    merge_generated_contours(&generated, options.preserve_collinear, options.limits)
 }
 
 fn merge_generated_contours(
     generated: &[PathD],
     preserve_collinear: bool,
+    limits: crate::ComplexityLimits,
 ) -> Result<PathsD, Error> {
     // Concave offsets can contain overlapping lobes and negative slivers. The
     // exact non-zero union is the topology cleanup stage and also merges
@@ -254,7 +270,7 @@ fn merge_generated_contours(
         clips: &[],
         clip_type: ClipType::Union,
         fill_rule: FillRule::NonZero,
-        limits: crate::ComplexityLimits::DEFAULT,
+        limits,
     })?;
     Ok(result.closed.into_iter().map(|path| clean_ring(path, preserve_collinear)).collect())
 }
@@ -1208,6 +1224,7 @@ fn clean_ring(mut path: PathD, preserve_collinear: bool) -> PathD {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ComplexityLimits;
 
     fn rectangle(left: f64, bottom: f64, right: f64, top: f64) -> PathD {
         vec![
@@ -1372,7 +1389,8 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert!(area2(&result[0]).abs() > 250.0);
 
-        let merged = merge_generated_contours(&[first, second], false).unwrap();
+        let merged =
+            merge_generated_contours(&[first, second], false, ComplexityLimits::DEFAULT).unwrap();
         assert_eq!(merged.len(), 1);
         assert_eq!(bounds(&merged), (0.0, 0.0, 15.0, 10.0));
     }
@@ -1383,11 +1401,13 @@ mod tests {
         let options = OffsetOptions::polyline(JoinType::Miter, EndType::Square)
             .with_miter_limit(4.0)
             .with_arc_tolerance(0.01)
-            .with_preserve_collinear(true);
+            .with_preserve_collinear(true)
+            .with_limits(ComplexityLimits::new(3, 20, 100));
         assert_eq!(options.join_type, JoinType::Miter);
         assert_eq!(options.end_type, EndType::Square);
         assert!((options.miter_limit - 4.0).abs() < f64::EPSILON);
         assert!((options.arc_tolerance - 0.01).abs() < f64::EPSILON);
+        assert_eq!(options.limits, ComplexityLimits::new(3, 20, 100));
         assert!(options.preserve_collinear);
     }
 
@@ -1446,6 +1466,31 @@ mod tests {
 
     #[test]
     fn validates_options_and_integer_rounding() {
+        let rectangle_d = rectangle(0.0, 0.0, 1.0, 1.0);
+        assert_eq!(
+            offset_paths_d(
+                std::slice::from_ref(&rectangle_d),
+                1.0,
+                OffsetOptions::default().with_limits(ComplexityLimits::new(1, 3, usize::MAX)),
+            ),
+            Err(Error::LimitExceeded {
+                resource: crate::ComplexityResource::Vertices,
+                limit: 3,
+                required: 4,
+            })
+        );
+        assert_eq!(
+            offset_paths_d(
+                std::slice::from_ref(&rectangle_d),
+                1.0,
+                OffsetOptions::default().with_limits(ComplexityLimits::new(1, 4, usize::MAX)),
+            ),
+            Err(Error::LimitExceeded {
+                resource: crate::ComplexityResource::Vertices,
+                limit: 4,
+                required: 56,
+            })
+        );
         assert_eq!(
             offset_paths_d(
                 &[rectangle(0.0, 0.0, 1.0, 1.0)],

@@ -169,9 +169,30 @@ fn integer_dispatch_translates_large_local_coordinates_without_rounding() {
     }));
 
     let wide = [rectangle64(i64::MIN, 0, i64::MAX, 10)];
+    assert_eq!(
+        try_boolean_op64(&BooleanRequest::new(&wide, &[], ClipType::Union, FillRule::EvenOdd,)),
+        Some(wide.to_vec())
+    );
+    let narrow_clip = [rectangle64(-1, 1, 1, 9)];
     assert!(
-        try_boolean_op64(&BooleanRequest::new(&wide, &[], ClipType::Union, FillRule::EvenOdd,))
-            .is_none()
+        try_boolean_op64(&BooleanRequest::new(
+            &wide,
+            &narrow_clip,
+            ClipType::Intersection,
+            FillRule::EvenOdd,
+        ))
+        .is_none()
+    );
+
+    let touching_clips = [rectangle64(0, 0, 2, 2), rectangle64(2, 0, 4, 2)];
+    assert!(
+        try_boolean_op64(&BooleanRequest::new(
+            &[],
+            &touching_clips,
+            ClipType::Union,
+            FillRule::EvenOdd,
+        ))
+        .is_some()
     );
 }
 
@@ -507,9 +528,19 @@ fn bow_tie_and_exact_predicates_reject_unsupported_inputs() {
         .is_none()
     );
     let tall = [rectangle64(0, i64::MIN, 10, i64::MAX)];
+    assert_eq!(
+        try_boolean_op64(&BooleanRequest::new(&tall, &[], ClipType::Union, FillRule::EvenOdd,)),
+        Some(tall.to_vec())
+    );
+    let narrow_clip = [rectangle64(1, -1, 9, 1)];
     assert!(
-        try_boolean_op64(&BooleanRequest::new(&tall, &[], ClipType::Union, FillRule::EvenOdd,))
-            .is_none()
+        try_boolean_op64(&BooleanRequest::new(
+            &tall,
+            &narrow_clip,
+            ClipType::Intersection,
+            FillRule::EvenOdd,
+        ))
+        .is_none()
     );
 }
 

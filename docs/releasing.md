@@ -10,8 +10,8 @@ crate can be verified or published.
 2. Update the workspace version, the `knipsa-ffi` dependency requirement, C
    header version macros, C smoke assertion, changelog, migration guide, and
    release fixture expectations.
-   Keep [`release-scope-0.2.md`](release-scope-0.2.md) accurate when known
-   limitations or patch-release policy changes.
+   Keep the current release-scope document accurate when known limitations or
+   patch-release policy changes.
 3. Run `make release-check`. It packages the core crate, runs Cargo's publish
    dry-run, compiles a separate consumer against the unpacked core `.crate`
    artifact, and tests the FFI crate in the workspace.
