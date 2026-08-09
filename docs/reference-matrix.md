@@ -78,8 +78,9 @@ non-integer output, or uncalibrated timings fail the gate.
 `benchmarks/offset-workloads.json` is the executable floating-point offset and
 open-stroke profile. `make conformance-offset` compares polygon expansion and
 contraction, all join families, open caps, holes, overlap cleanup, collapse,
-rounding tolerance, and translated coordinates against pinned Clipper2. CI
-requires all cases to match their per-case boundary and area budgets.
+rounding tolerance, repeated collinear retraces, and translated coordinates
+against pinned Clipper2. CI requires all cases to match their per-case boundary
+and area budgets.
 
 `benchmarks/triangulation-workloads.json` is the executable integer
 triangulation profile. `make conformance-triangulation` compares the public

@@ -463,15 +463,16 @@ fn open_outline(path: &[PointD], radius: f64, options: OffsetOptions) -> Result<
         return Ok(Vec::new());
     }
     let end_style = effective_open_end_style(options);
-    if let Some((outer_endpoint, reversal)) = three_point_reversal(path) {
-        let reversal_style =
-            if options.join_type == JoinType::Round { EndType::Round } else { EndType::Butt };
+    let might_retrace = path.len() <= 3 || has_collinear_reversal(path);
+    if might_retrace
+        && let Some((start, end, start_style, end_style)) = collinear_open_span(path, options)
+    {
         return open_segment_outline(
-            outer_endpoint,
-            reversal,
+            start,
+            end,
             radius,
+            start_style,
             end_style,
-            reversal_style,
             options.arc_tolerance,
         );
     }
@@ -503,6 +504,14 @@ fn open_outline(path: &[PointD], radius: f64, options: OffsetOptions) -> Result<
     ensure_finite(result)
 }
 
+fn has_collinear_reversal(path: &[PointD]) -> bool {
+    path.windows(3).any(|points| {
+        let incoming = Vector::from(points[1]).sub(Vector::from(points[0]));
+        let outgoing = Vector::from(points[2]).sub(Vector::from(points[1]));
+        incoming.dot(outgoing) < 0.0 && incoming.cross(outgoing).abs() <= EPSILON
+    })
+}
+
 fn effective_open_end_style(options: OffsetOptions) -> EndType {
     if options.end_type == EndType::Joined {
         if options.join_type == JoinType::Round { EndType::Round } else { EndType::Square }
@@ -511,18 +520,58 @@ fn effective_open_end_style(options: OffsetOptions) -> EndType {
     }
 }
 
-fn three_point_reversal(path: &[PointD]) -> Option<(PointD, PointD)> {
-    let [first, reversal, last] = path else {
-        return None;
-    };
-    let incoming = Vector::from(*reversal).sub(Vector::from(*first)).normalized()?;
-    let outgoing = Vector::from(*last).sub(Vector::from(*reversal)).normalized()?;
-    if incoming.dot(outgoing) >= -1.0 + EPSILON || incoming.cross(outgoing).abs() > EPSILON {
+/// Reduces an arbitrarily retraced collinear polyline to its covered span.
+/// Endpoint caps apply at original endpoints; internal extrema use the join's
+/// reversal cap. Mixed cap requirements at one extreme defer to the general
+/// outline and exact cleanup path.
+fn collinear_open_span(
+    path: &[PointD],
+    options: OffsetOptions,
+) -> Option<(PointD, PointD, EndType, EndType)> {
+    let origin = *path.first()?;
+    let direction = Vector::from(*path.get(1)?).sub(Vector::from(origin)).normalized()?;
+    let mut minimum = 0.0_f64;
+    let mut maximum = 0.0_f64;
+    for point in path.iter().copied().skip(1) {
+        let offset = Vector::from(point).sub(Vector::from(origin));
+        if direction.cross(offset).abs() > EPSILON {
+            return None;
+        }
+        let projection = direction.dot(offset);
+        minimum = minimum.min(projection);
+        maximum = maximum.max(projection);
+    }
+    let endpoint_style = effective_open_end_style(options);
+    let reversal_style =
+        if options.join_type == JoinType::Round { EndType::Round } else { EndType::Butt };
+    let mut minimum_style = None;
+    let mut maximum_style = None;
+    for (index, point) in path.iter().copied().enumerate() {
+        let projection = direction.dot(Vector::from(point).sub(Vector::from(origin)));
+        let style =
+            if index == 0 || index + 1 == path.len() { endpoint_style } else { reversal_style };
+        if projection.total_cmp(&minimum).is_eq() {
+            merge_cap_style(&mut minimum_style, style)?;
+        }
+        if projection.total_cmp(&maximum).is_eq() {
+            merge_cap_style(&mut maximum_style, style)?;
+        }
+    }
+
+    Some((
+        direction.scale(minimum).add(Vector::from(origin)).into(),
+        direction.scale(maximum).add(Vector::from(origin)).into(),
+        minimum_style?,
+        maximum_style?,
+    ))
+}
+
+fn merge_cap_style(slot: &mut Option<EndType>, style: EndType) -> Option<()> {
+    if slot.is_some_and(|known| known != style) {
         return None;
     }
-    let first_distance = distance(*first, *reversal);
-    let last_distance = distance(*last, *reversal);
-    Some((if first_distance >= last_distance { *first } else { *last }, *reversal))
+    *slot = Some(style);
+    Some(())
 }
 
 fn open_segment_outline(
@@ -1526,8 +1575,11 @@ mod tests {
         let longer_return =
             [PointD::new(-10.0, 0.0), PointD::new(0.0, 0.0), PointD::new(-20.0, 0.0)];
         assert_eq!(
-            three_point_reversal(&longer_return),
-            Some((longer_return[2], longer_return[1]))
+            collinear_open_span(
+                &longer_return,
+                OffsetOptions::polyline(JoinType::Round, EndType::Butt)
+            ),
+            Some((longer_return[2], longer_return[1], EndType::Butt, EndType::Round))
         );
         let bevel_reversal = offset_paths_d(
             &[longer_return.to_vec()],
@@ -1538,14 +1590,56 @@ mod tests {
         assert_eq!(bevel_reversal.len(), 1);
         assert_eq!(bevel_reversal[0].len(), 4);
         assert!(
-            three_point_reversal(&[
-                PointD::new(-1.0, 0.0),
-                PointD::new(0.0, 0.0),
-                PointD::new(-1.0, 0.000_001),
-            ])
+            collinear_open_span(
+                &[PointD::new(-1.0, 0.0), PointD::new(0.0, 0.0), PointD::new(-1.0, 0.000_001),],
+                OffsetOptions::polyline(JoinType::Round, EndType::Butt),
+            )
             .is_none()
         );
+    }
 
+    #[test]
+    fn collinear_retraces_reduce_to_one_certified_span() {
+        let repeated = [
+            PointD::new(-20.0, 0.0),
+            PointD::new(15.0, 0.0),
+            PointD::new(-10.0, 0.0),
+            PointD::new(10.0, 0.0),
+            PointD::new(-5.0, 0.0),
+        ];
+        let repeated_stroke = offset_paths_d(
+            &[repeated.to_vec()],
+            5.0,
+            OffsetOptions::polyline(JoinType::Round, EndType::Butt).with_arc_tolerance(0.02),
+        )
+        .unwrap();
+        assert_eq!(repeated_stroke.len(), 1);
+        assert!(repeated_stroke[0].len() > 8);
+        assert!(repeated_stroke[0].iter().any(|point| point.x > 19.9));
+
+        let vertical = [PointD::new(0.0, -20.0), PointD::new(0.0, 15.0), PointD::new(0.0, -10.0)];
+        assert_eq!(
+            collinear_open_span(&vertical, OffsetOptions::polyline(JoinType::Round, EndType::Butt)),
+            Some((vertical[0], vertical[1], EndType::Butt, EndType::Round))
+        );
+
+        let mixed_caps = [
+            PointD::new(0.0, 0.0),
+            PointD::new(10.0, 0.0),
+            PointD::new(0.0, 0.0),
+            PointD::new(10.0, 0.0),
+        ];
+        assert!(
+            collinear_open_span(
+                &mixed_caps,
+                OffsetOptions::polyline(JoinType::Round, EndType::Butt)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn exact_round_reversal_join_covers_the_outer_semicircle() {
         let mut internal_join = Vec::new();
         append_join(
             &mut internal_join,

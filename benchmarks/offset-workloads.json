@@ -14,6 +14,8 @@
     {"id":"open-butt-bevel","paths":[[[0,0],[40,0],[55,30],[90,30]]],"delta":6,"join_type":"bevel","end_type":"butt","miter_limit":2,"arc_tolerance":0.02,"preserve_collinear":false,"boundary_tolerance":0.000001,"area_tolerance":0.0001},
     {"id":"open-square-miter","paths":[[[0,0],[40,0],[55,30],[90,30]]],"delta":6,"join_type":"miter","end_type":"square","miter_limit":2,"arc_tolerance":0.02,"preserve_collinear":false,"boundary_tolerance":0.000001,"area_tolerance":0.0001},
     {"id":"open-round-round","paths":[[[0,0],[40,0],[55,30],[90,30]]],"delta":6,"join_type":"round","end_type":"round","miter_limit":2,"arc_tolerance":0.02,"preserve_collinear":false,"boundary_tolerance":0.08,"area_tolerance":3.0},
+    {"id":"open-retrace-round","paths":[[[-20,0],[15,0],[-10,0],[10,0],[-5,0]]],"delta":5,"join_type":"round","end_type":"butt","miter_limit":2,"arc_tolerance":0.02,"preserve_collinear":false,"boundary_tolerance":0.08,"area_tolerance":3.0},
+    {"id":"open-retrace-bevel","paths":[[[-20,0],[15,0],[-10,0],[10,0],[-5,0]]],"delta":5,"join_type":"bevel","end_type":"butt","miter_limit":2,"arc_tolerance":0.02,"preserve_collinear":false,"boundary_tolerance":0.000001,"area_tolerance":0.0001},
     {"id":"large-origin","paths":[[[100000,100000],[100100,100000],[100100,100060],[100000,100060]]],"delta":7,"join_type":"miter","end_type":"polygon","miter_limit":2,"arc_tolerance":0.02,"preserve_collinear":false,"boundary_tolerance":0.000001,"area_tolerance":0.0001}
   ]
 }

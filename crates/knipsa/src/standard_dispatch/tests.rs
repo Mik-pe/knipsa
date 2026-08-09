@@ -28,6 +28,73 @@ fn rectangle64(min_x: i64, min_y: i64, max_x: i64, max_y: i64) -> Path64 {
 }
 
 #[test]
+fn coalesced_rectangle_union_matches_exact_oracle_and_defers_other_topologies() {
+    let cases = [
+        (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(5.0, 0.0, 15.0, 10.0), true),
+        (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(10.0, 0.0, 20.0, 10.0), true),
+        (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(0.0, 5.0, 10.0, 15.0), true),
+        (rectangle(0.0, 0.0, 20.0, 20.0), rectangle(5.0, 5.0, 10.0, 10.0), true),
+        (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(5.0, 5.0, 15.0, 15.0), false),
+        (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(5.0, 0.0, 15.0, 15.0), false),
+        (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(0.0, 5.0, 15.0, 15.0), false),
+        (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(0.0, 20.0, 10.0, 30.0), false),
+        (rectangle(0.0, 20.0, 10.0, 30.0), rectangle(0.0, 0.0, 10.0, 10.0), false),
+        (rectangle(0.0, 0.0, 10.0, 10.0), rectangle(20.0, 0.0, 30.0, 10.0), false),
+    ];
+    for (first, second, accelerated) in cases {
+        for reverse in [false, true] {
+            let mut first = first.clone();
+            let mut second = second.clone();
+            if reverse {
+                first.reverse();
+                second.reverse();
+            }
+            let subjects = [first, second];
+            let request = BooleanRequest::new(&subjects, &[], ClipType::Union, FillRule::NonZero);
+            let specialized = try_coalesced_rectangle_union(&request);
+            assert_eq!(specialized.is_some(), accelerated);
+            if let Some(actual) = specialized {
+                assert_eq!(
+                    canonical_trimmed_geometry(actual),
+                    canonical_trimmed_geometry(exact_result(request))
+                );
+            }
+        }
+    }
+
+    let mut reversed = rectangle(5.0, 0.0, 15.0, 10.0);
+    reversed.reverse();
+    let mixed_winding = [rectangle(0.0, 0.0, 10.0, 10.0), reversed];
+    for fill_rule in [FillRule::EvenOdd, FillRule::Positive, FillRule::Negative] {
+        let request = BooleanRequest::new(&mixed_winding, &[], ClipType::Union, fill_rule);
+        assert!(try_coalesced_rectangle_union(&request).is_none());
+    }
+    let request = BooleanRequest::new(&mixed_winding, &[], ClipType::Union, FillRule::NonZero);
+    assert!(try_coalesced_rectangle_union(&request).is_none());
+
+    let closed = [rectangle(0.0, 0.0, 10.0, 10.0), rectangle(5.0, 0.0, 15.0, 10.0)];
+    let open = [vec![PointD::new(0.0, 0.0), PointD::new(1.0, 0.0)]];
+    let request = BooleanRequest {
+        closed_subjects: &closed,
+        open_subjects: &open,
+        clips: &[],
+        clip_type: ClipType::Union,
+        fill_rule: FillRule::NonZero,
+        limits: crate::ComplexityLimits::DEFAULT,
+    };
+    assert!(try_coalesced_rectangle_union(&request).is_none());
+}
+
+fn canonical_trimmed_geometry(paths: PathsD) -> PathsD {
+    canonical_geometry(
+        paths
+            .into_iter()
+            .map(|path| crate::trim_collinear_d(&path, crate::PathKind::Closed).unwrap())
+            .collect(),
+    )
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn nested_rectangle_xor_matches_exact_and_rejects_ambiguous_boundaries() {
     let outer = rectangle(0.0, 0.0, 30.0, 30.0);

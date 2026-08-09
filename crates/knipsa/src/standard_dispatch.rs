@@ -36,6 +36,9 @@ impl SmallBoundary {
 }
 
 pub(crate) fn try_apply(request: &BooleanRequest<'_, PathD>) -> Option<PathsD> {
+    if let Some(result) = try_coalesced_rectangle_union(request) {
+        return Some(result);
+    }
     if let Some(result) = try_rectangle_pair(request) {
         return Some(result);
     }
@@ -49,6 +52,62 @@ pub(crate) fn try_apply(request: &BooleanRequest<'_, PathD>) -> Option<PathsD> {
         return Some(result);
     }
     None
+}
+
+/// Coalesces two same-winding exact-grid rectangles when their union is itself
+/// a rectangle. This covers adjacent and overlapping offset contours without
+/// building even the tiny rectangle arrangement used by `try_rectangle_pair`.
+fn try_coalesced_rectangle_union(request: &BooleanRequest<'_, PathD>) -> Option<PathsD> {
+    if !request.open_subjects.is_empty()
+        || request.clip_type != ClipType::Union
+        || request.fill_rule != FillRule::NonZero
+    {
+        return None;
+    }
+    let mut paths =
+        request.closed_subjects.iter().chain(request.clips).filter(|path| !path.is_empty());
+    let first_path = paths.next()?.as_slice();
+    let second_path = paths.next()?.as_slice();
+    if paths.next().is_some()
+        || signed_area2_d(first_path).signum() != signed_area2_d(second_path).signum()
+    {
+        return None;
+    }
+
+    let first = axis_aligned_rectangle(first_path)?;
+    let second = axis_aligned_rectangle(second_path)?;
+    let (xs, x_len) = tiny_coordinates(first.min_x, first.max_x, second.min_x, second.max_x)?;
+    let (ys, y_len) = tiny_coordinates(first.min_y, first.max_y, second.min_y, second.max_y)?;
+
+    let contained = contains_rectangle(first, second) || contains_rectangle(second, first);
+    let horizontal_strip = first.min_y.key == second.min_y.key
+        && first.max_y.key == second.max_y.key
+        && first.max_x.key >= second.min_x.key
+        && second.max_x.key >= first.min_x.key;
+    let vertical_strip = first.min_x.key == second.min_x.key
+        && first.max_x.key == second.max_x.key
+        && first.max_y.key >= second.min_y.key
+        && second.max_y.key >= first.min_y.key;
+    if !contained && !horizontal_strip && !vertical_strip {
+        return None;
+    }
+
+    Some(vec![rectangle_path(
+        AxisAlignedRectangle {
+            min_x: xs[0],
+            min_y: ys[0],
+            max_x: xs[x_len - 1],
+            max_y: ys[y_len - 1],
+        },
+        true,
+    )])
+}
+
+fn contains_rectangle(outer: AxisAlignedRectangle, inner: AxisAlignedRectangle) -> bool {
+    outer.min_x.key <= inner.min_x.key
+        && outer.min_y.key <= inner.min_y.key
+        && outer.max_x.key >= inner.max_x.key
+        && outer.max_y.key >= inner.max_y.key
 }
 
 /// Resolves XOR over strictly nested or disjoint exact-grid rectangles. Under
