@@ -72,14 +72,14 @@ pub type PathsD = Vec<PathD>;
 
 #[allow(clippy::cast_precision_loss)]
 pub(crate) fn paths64_to_local_d(paths: &[Path64]) -> Result<(Point64, PathsD), Error> {
-    let origin = integer_frame_origin(paths);
+    let origin = paths64_local_origin(paths)?;
     let mut local = Vec::with_capacity(paths.len());
     for path in paths {
         let mut local_path = Vec::with_capacity(path.len());
         for point in path {
             local_path.push(PointD::new(
-                i128_to_exact_f64(i128::from(point.x) - i128::from(origin.x))?,
-                i128_to_exact_f64(i128::from(point.y) - i128::from(origin.y))?,
+                (i128::from(point.x) - i128::from(origin.x)) as f64,
+                (i128::from(point.y) - i128::from(origin.y)) as f64,
             ));
         }
         local.push(local_path);
@@ -87,25 +87,24 @@ pub(crate) fn paths64_to_local_d(paths: &[Path64]) -> Result<(Point64, PathsD), 
     Ok((origin, local))
 }
 
-fn integer_frame_origin(paths: &[Path64]) -> Point64 {
+pub(crate) fn paths64_local_origin(paths: &[Path64]) -> Result<Point64, Error> {
+    const MAX_EXACT_INTEGER: i128 = 1 << 53;
     let Some(first) = paths.iter().flatten().next().copied() else {
-        return Point64::new(0, 0);
+        return Ok(Point64::new(0, 0));
     };
-    let (mut min_x, mut min_y) = (first.x, first.y);
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (first.x, first.y, first.x, first.y);
     for point in paths.iter().flatten() {
         min_x = min_x.min(point.x);
         min_y = min_y.min(point.y);
+        max_x = max_x.max(point.x);
+        max_y = max_y.max(point.y);
     }
-    Point64::new(min_x, min_y)
-}
-
-#[allow(clippy::cast_precision_loss)]
-fn i128_to_exact_f64(value: i128) -> Result<f64, Error> {
-    const MAX_EXACT_INTEGER: u128 = 1 << 53;
-    if value.unsigned_abs() > MAX_EXACT_INTEGER {
+    if i128::from(max_x) - i128::from(min_x) > MAX_EXACT_INTEGER
+        || i128::from(max_y) - i128::from(min_y) > MAX_EXACT_INTEGER
+    {
         return Err(Error::ArithmeticOverflow);
     }
-    Ok(value as f64)
+    Ok(Point64::new(min_x, min_y))
 }
 
 /// The orientation of three points in Cartesian coordinates.
@@ -783,6 +782,9 @@ mod tests {
         let excessive_span =
             [vec![Point64::new(i64::MIN, 0), Point64::new(i64::MAX, 0), Point64::new(0, 1)]];
         assert_eq!(paths64_to_local_d(&excessive_span), Err(Error::ArithmeticOverflow));
+        let excessive_y_span =
+            [vec![Point64::new(0, i64::MIN), Point64::new(0, i64::MAX), Point64::new(1, 0)]];
+        assert_eq!(paths64_to_local_d(&excessive_y_span), Err(Error::ArithmeticOverflow));
     }
 
     #[test]
