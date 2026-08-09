@@ -8,7 +8,7 @@
 
 use crate::{
     ComplexityLimits, Error, FillRule, Orientation, Path64, PathD, Point64, PointD,
-    geometry::{orientation, paths64_to_local_d},
+    geometry::{orientation, paths64_local_origin, paths64_to_local_d},
     topology::{EPSILON, collect_rings_d, collect_rings64, cross, filled_groups},
 };
 
@@ -58,6 +58,11 @@ pub fn triangulate64(
     let groups = filled_groups(&rings, fill_rule);
     let mut result = Vec::new();
     for (outer, holes) in groups {
+        if holes.is_empty() && is_strictly_convex64(&rings[outer].vertices) {
+            paths64_local_origin(std::slice::from_ref(&rings[outer].vertices))?;
+            append_convex_fan64(&mut result, &rings[outer].vertices);
+            continue;
+        }
         let group_start = result.len();
         let mut originals = vec![rings[outer].vertices.clone()];
         originals.extend(holes.iter().map(|hole| rings[*hole].vertices.clone()));
@@ -96,6 +101,32 @@ fn orient_triangle64(vertices: &[Point64], indices: &[usize]) -> Option<Triangle
 fn push_oriented_triangle64(result: &mut Vec<Triangle64>, vertices: &[Point64], indices: &[usize]) {
     if let Some(triangle) = orient_triangle64(vertices, indices) {
         result.push(triangle);
+    }
+}
+
+fn is_strictly_convex64(vertices: &[Point64]) -> bool {
+    let mut turn = None;
+    for index in 0..vertices.len() {
+        let current = orientation(
+            vertices[index],
+            vertices[(index + 1) % vertices.len()],
+            vertices[(index + 2) % vertices.len()],
+        );
+        if current == Orientation::Collinear {
+            return false;
+        }
+        if turn.is_some_and(|turn| turn != current) {
+            return false;
+        }
+        turn = Some(current);
+    }
+    true
+}
+
+fn append_convex_fan64(result: &mut Vec<Triangle64>, vertices: &[Point64]) {
+    result.reserve(vertices.len().saturating_sub(2));
+    for index in 1..vertices.len() - 1 {
+        push_oriented_triangle64(result, vertices, &[0, index, index + 1]);
     }
 }
 
@@ -484,6 +515,57 @@ mod tests {
         let triangles =
             triangulate64(&[path], FillRule::NonZero, ComplexityLimits::DEFAULT).unwrap();
         assert_eq!(triangles.len(), 2);
+    }
+
+    #[test]
+    fn exact_convex_fan_handles_winding_and_rejects_concavity() {
+        let square = vec![
+            Point64::new(i64::MIN, i64::MIN),
+            Point64::new(i64::MAX, i64::MIN),
+            Point64::new(i64::MAX, i64::MAX),
+            Point64::new(i64::MIN, i64::MAX),
+        ];
+        let mut triangles = Vec::new();
+        assert!(is_strictly_convex64(&square));
+        append_convex_fan64(&mut triangles, &square);
+        assert_eq!(triangles.len(), 2);
+        assert!(triangles.iter().all(|triangle| {
+            orientation(triangle[0], triangle[1], triangle[2]) == Orientation::CounterClockwise
+        }));
+
+        let mut reversed = square;
+        reversed.reverse();
+        triangles.clear();
+        assert!(is_strictly_convex64(&reversed));
+        append_convex_fan64(&mut triangles, &reversed);
+        assert_eq!(triangles.len(), 2);
+        assert!(triangles.iter().all(|triangle| {
+            orientation(triangle[0], triangle[1], triangle[2]) == Orientation::CounterClockwise
+        }));
+
+        let concave = vec![
+            Point64::new(0, 0),
+            Point64::new(4, 0),
+            Point64::new(2, 2),
+            Point64::new(4, 4),
+            Point64::new(0, 4),
+        ];
+        triangles.clear();
+        assert!(!is_strictly_convex64(&concave));
+        assert!(triangles.is_empty());
+        assert_eq!(
+            triangulate64(&[concave], FillRule::NonZero, ComplexityLimits::DEFAULT).unwrap().len(),
+            3
+        );
+
+        let collinear = vec![
+            Point64::new(0, 0),
+            Point64::new(2, 0),
+            Point64::new(4, 0),
+            Point64::new(4, 4),
+            Point64::new(0, 4),
+        ];
+        assert!(!is_strictly_convex64(&collinear));
     }
 
     #[test]

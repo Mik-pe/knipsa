@@ -16,7 +16,9 @@ use crate::{
 const EPSILON: f64 = 1e-12;
 const ARC_TOLERANCE_RATIO: f64 = 0.002;
 const MAX_ARC_STEPS: usize = 4096;
-const SMALL_CONTOUR_CERTIFICATION_LIMIT: usize = 256;
+// The quadratic certifier wins for tiny contours; above this measured
+// crossover, the existing sweep has lower overhead and better scaling.
+const BRUTE_FORCE_CONTOUR_CERTIFICATION_LIMIT: usize = 24;
 const MAX_CERTIFIED_CONTOURS: usize = 1024;
 const MAX_CERTIFIED_CONTOUR_SEGMENTS: usize = 65_536;
 const MAX_CERTIFIED_SEGMENT_CANDIDATES: usize = 1_048_576;
@@ -685,7 +687,8 @@ fn append_round_join(
         push_point(output, shifted(center, end, radius));
         return;
     }
-    append_arc(output, center, start, sweep, radius, arc_tolerance);
+    append_arc_with_sweep(output, center, start, sweep, radius, arc_tolerance);
+    push_point(output, shifted(center, end, radius));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -723,22 +726,6 @@ fn append_cap(
         }
         EndType::Polygon | EndType::Joined => push_point(output, end),
     }
-}
-
-fn append_arc(
-    output: &mut PathD,
-    center: PointD,
-    start: Vector,
-    sweep: f64,
-    radius: f64,
-    arc_tolerance: f64,
-) {
-    append_arc_with_sweep(output, center, start, sweep, radius, arc_tolerance);
-    let end_angle = start.y.atan2(start.x) + sweep;
-    push_point(
-        output,
-        PointD::new(center.x + radius * end_angle.cos(), center.y + radius * end_angle.sin()),
-    );
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -905,7 +892,7 @@ fn certify_non_zero_contours(paths: &[PathD]) -> Option<Vec<bool>> {
         push_certified_contour_metadata(path, &mut bounds, &mut winding_signs, &mut segment_count)?;
     }
 
-    if paths.len() == 1 && paths[0].len() <= SMALL_CONTOUR_CERTIFICATION_LIMIT {
+    if paths.len() == 1 && paths[0].len() <= BRUTE_FORCE_CONTOUR_CERTIFICATION_LIMIT {
         return if ring_self_intersects(&paths[0]) { None } else { Some(vec![true]) };
     }
     certify_boundaries_do_not_touch(paths, segment_count)?;
@@ -1640,16 +1627,21 @@ mod tests {
             None
         );
 
-        let large = regular_polygon(SMALL_CONTOUR_CERTIFICATION_LIMIT + 44, 20.0);
+        let small = regular_polygon(BRUTE_FORCE_CONTOUR_CERTIFICATION_LIMIT, 20.0);
+        assert_eq!(certify_non_zero_contours(std::slice::from_ref(&small)), Some(vec![true]));
+        let swept = regular_polygon(BRUTE_FORCE_CONTOUR_CERTIFICATION_LIMIT + 1, 20.0);
+        assert_eq!(certify_non_zero_contours(std::slice::from_ref(&swept)), Some(vec![true]));
+
+        let large = regular_polygon(BRUTE_FORCE_CONTOUR_CERTIFICATION_LIMIT + 276, 20.0);
         assert_eq!(certify_non_zero_contours(std::slice::from_ref(&large)), Some(vec![true]));
 
         let options = OffsetOptions::polygon(JoinType::Round).with_arc_tolerance(0.000_01);
         let raw = clean_ring(closed_outline(&outer, 10.0, options).unwrap(), false);
-        assert!(raw.len() > SMALL_CONTOUR_CERTIFICATION_LIMIT);
+        assert!(raw.len() > BRUTE_FORCE_CONTOUR_CERTIFICATION_LIMIT);
         assert_eq!(certify_non_zero_contours(std::slice::from_ref(&raw)), Some(vec![true]));
         let rounded = offset_paths_d(&[outer], 10.0, options).unwrap();
         assert_eq!(rounded.len(), 1);
-        assert!(rounded[0].len() > SMALL_CONTOUR_CERTIFICATION_LIMIT);
+        assert!(rounded[0].len() > BRUTE_FORCE_CONTOUR_CERTIFICATION_LIMIT);
     }
 
     #[test]
@@ -2021,6 +2013,9 @@ mod tests {
         output.clear();
         append_round_join(&mut output, center, horizontal, horizontal, 1.0, 0.0);
         assert_eq!(output.len(), 1);
+        output.clear();
+        append_round_join(&mut output, center, horizontal, vertical, 1.0, 0.1);
+        assert_eq!(output.last(), Some(&shifted(center, vertical, 1.0)));
         output.clear();
         append_round_join(&mut output, center, horizontal, vertical, 0.0, 0.0);
         assert_eq!(output, vec![center]);
