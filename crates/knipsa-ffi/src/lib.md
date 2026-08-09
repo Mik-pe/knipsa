@@ -13,6 +13,8 @@ reusing its slot.
 Offset calls use `KnipsaOffsetOptions`, normally initialized with
 `KNIPSA_OFFSET_OPTIONS_INIT`. Status codes are returned for invalid pointers,
 bad geometry, invalid options, arithmetic failures, and topology failures.
+Offset input and generated contours use Knipsa's fixed default complexity
+budget.
 The C ABI also exposes `knipsa_simplify64`, `knipsa_simplify_d`,
 `knipsa_clip_to_rect64`, and `knipsa_clip_to_rect_d` for common cleanup and
 viewport-clipping workflows.

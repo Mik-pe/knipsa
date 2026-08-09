@@ -29,6 +29,9 @@ languages that can consume a C-compatible shared library.
   fractional joins and round caps in `KnipsaPathsD`. Both use the small
   `KnipsaOffsetOptions` descriptor, normally initialized with
   `KNIPSA_OFFSET_OPTIONS_INIT`.
+- Offset entry points apply Knipsa's fixed default path, vertex, and edge-pair
+  budgets before copying foreign input or generating contours. Inputs over
+  those budgets return `KNIPSA_STATUS_INVALID_ARGUMENT`.
 - `knipsa_triangulate64` and `knipsa_triangulate_d` return each triangle as a
   three-point path and use the same fill-rule enum as boolean operations.
 - The C triangulation entry points apply Knipsa's fixed default path, vertex,

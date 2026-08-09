@@ -1993,6 +1993,10 @@ mod tests {
         let direct = crate::dispatch::try_direct_paths64(&separated, FillRule::EvenOdd)
             .expect("separated rings");
         assert_eq!(direct.len(), 2);
+        assert_eq!(
+            crate::dispatch::try_direct_paths64(&separated, FillRule::NonZero),
+            Some(separated.to_vec())
+        );
 
         let touching = [rectangle(0, 0, 2, 2), rectangle(2, 0, 4, 2)];
         assert!(crate::dispatch::try_direct_paths64(&touching, FillRule::EvenOdd).is_none());
@@ -2002,11 +2006,45 @@ mod tests {
         let direct =
             crate::dispatch::try_direct_paths64(&reversed, FillRule::NonZero).expect("simple ring");
         assert!(crate::signed_area2(&direct[0]).unwrap().is_positive());
+        let duplicate = [separated[0].clone(), separated[0].clone()];
+        assert_eq!(
+            crate::dispatch::try_direct_paths64(&duplicate, FillRule::NonZero),
+            Some(vec![separated[0].clone()])
+        );
 
         let bow_tie =
             [vec![Point64::new(0, 0), Point64::new(2, 2), Point64::new(0, 2), Point64::new(2, 0)]];
         assert!(crate::dispatch::try_direct_paths64(&bow_tie, FillRule::EvenOdd).is_none());
-        assert!(crate::dispatch::try_direct_paths64(&separated, FillRule::Positive).is_none());
+
+        let clockwise =
+            vec![Point64::new(8, 0), Point64::new(8, 2), Point64::new(10, 2), Point64::new(10, 0)];
+        let mixed = [separated[0].clone(), clockwise];
+        let positive = crate::dispatch::try_direct_paths64(&mixed, FillRule::Positive)
+            .expect("separated positive ring");
+        assert_eq!(positive, vec![separated[0].clone()]);
+        let negative = crate::dispatch::try_direct_paths64(&mixed, FillRule::Negative)
+            .expect("separated negative ring");
+        assert_eq!(negative.len(), 1);
+        assert!(crate::signed_area2(&negative[0]).unwrap().is_positive());
+
+        for clip_type in [ClipType::Union, ClipType::Difference, ClipType::Xor] {
+            let output = super::boolean_op64(&BooleanRequest::new(
+                &mixed,
+                &[],
+                clip_type,
+                FillRule::Positive,
+            ))
+            .unwrap();
+            assert_eq!(output.closed, positive);
+        }
+        let intersection = super::boolean_op64(&BooleanRequest::new(
+            &mixed,
+            &[],
+            ClipType::Intersection,
+            FillRule::Positive,
+        ))
+        .unwrap();
+        assert!(intersection.closed.is_empty());
     }
 
     #[test]

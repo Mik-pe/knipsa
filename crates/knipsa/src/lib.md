@@ -45,10 +45,10 @@ clockwise, and nested islands become separate polygons.
 Integer topology classification is exact across the complete `i64` coordinate
 domain and does not round-trip through floating point.
 
-Every Boolean request, polygon-builder, and triangulation call is bounded by
-[`crate::ComplexityLimits`]. Start with [`crate::ComplexityLimits::DEFAULT`] to
-reject oversized requests before quadratic intersection validation begins;
-there is no unbounded public path.
+Every Boolean request, offset, polygon-builder, and triangulation call is
+bounded by [`crate::ComplexityLimits`]. Start with
+[`crate::ComplexityLimits::DEFAULT`] to reject oversized requests before
+quadratic intersection validation begins; there is no unbounded public path.
 
 Use [`crate::validate_paths_d_located`] or
 [`crate::validate_paths64_located`] when validation diagnostics must include

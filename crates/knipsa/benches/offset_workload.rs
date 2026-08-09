@@ -63,6 +63,7 @@ fn main() {
             miter_limit: case.miter_limit,
             arc_tolerance: case.arc_tolerance,
             preserve_collinear: case.preserve_collinear,
+            limits: knipsa::ComplexityLimits::DEFAULT,
         };
         let measured = match measure(|| {
             offset_paths_d(&paths, case.delta, options).map_err(|error| error.to_string())

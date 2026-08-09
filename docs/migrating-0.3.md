@@ -1,8 +1,8 @@
 # Migrating from 0.2 to 0.3
 
-The next pre-1.0 minor release removes unbounded topology analysis and
-makes polygon hole ownership explicit. These changes are intentionally
-breaking; there are no compatibility wrappers.
+Version 0.3 removes unbounded topology analysis and makes polygon hole
+ownership explicit. These changes are intentionally breaking; there are no
+compatibility wrappers.
 
 ## One Boolean request and output model
 
@@ -81,6 +81,23 @@ With the `geo-types` feature, use these one-to-one conversions:
 The old flat `paths*_from_polygon` and `polygon_from_paths*` helpers were
 removed because they discarded the typed ownership boundary.
 
+## Bounded offsets
+
+`OffsetOptions` now carries the same `ComplexityLimits` used by Boolean,
+polygon-building, and triangulation requests. Constructor-based code keeps the
+default budget automatically. Struct literals must add `limits` or use struct
+update syntax:
+
+```rust
+use knipsa::{ComplexityLimits, JoinType, OffsetOptions};
+
+let options = OffsetOptions::polygon(JoinType::Round)
+    .with_limits(ComplexityLimits::new(128, 100_000, 1_000_000));
+```
+
+The budget is checked against both input paths and generated contours before
+Boolean topology cleanup.
+
 ## Request validation and version reporting
 
 The standalone `validate_request` and `validate_request_d` wrappers were
@@ -98,3 +115,8 @@ operations; open-subject clipping is currently a safe-Rust API. Both
 triangulation entry points use
 the documented fixed default budgets and return
 `KNIPSA_STATUS_INVALID_ARGUMENT` when a budget is exceeded.
+
+The C signatures and calling convention are unchanged. Rust code that depends
+directly on the `knipsa-ffi` `rlib` must now call pointer-bearing exports from
+an `unsafe` block and uphold the same pointer validity rules already documented
+for C callers.

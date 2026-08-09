@@ -22,9 +22,21 @@ const MAX_EXACT_F64_INTEGER: u64 = 1_u64 << 53;
 
 /// Tries every certified specialization for an integer request.
 ///
-/// Integer inputs are translated into one exact local `f64` frame. Any
-/// inexact input or output conversion defers to the exact integer kernel.
+/// Empty-side and separated-ring shortcuts stay in integer arithmetic. Other
+/// candidates are translated into one exact local `f64` frame; any inexact
+/// input or output conversion defers to the exact integer kernel.
 pub(crate) fn try_boolean_op64(request: &BooleanRequest<'_, Path64>) -> Option<Paths64> {
+    if request.clips.is_empty() {
+        match request.clip_type {
+            ClipType::Intersection => return Some(Vec::new()),
+            ClipType::Union | ClipType::Difference | ClipType::Xor => {
+                if let Some(paths) = try_direct_paths64(request.closed_subjects, request.fill_rule)
+                {
+                    return Some(paths);
+                }
+            }
+        }
+    }
     if request.closed_subjects.is_empty()
         && matches!(request.clip_type, ClipType::Union | ClipType::Xor)
         && let Some(paths) = try_direct_paths64(request.clips, request.fill_rule)
@@ -63,14 +75,17 @@ pub(crate) fn try_boolean_op_d(request: &BooleanRequest<'_, PathD>) -> Option<Pa
 }
 
 pub(crate) fn try_direct_paths64(paths: &[Path64], fill_rule: FillRule) -> Option<Paths64> {
-    if !matches!(fill_rule, FillRule::EvenOdd | FillRule::NonZero) {
-        return None;
-    }
     let mut paths = paths
         .iter()
         .map(|path| normalize_path64(path, crate::PathKind::Closed))
         .filter(|path| path.len() >= 3)
         .collect::<Paths64>();
+    if fill_rule == FillRule::NonZero
+        && paths.len() > 1
+        && paths[1..].iter().all(|path| path == &paths[0])
+    {
+        paths.truncate(1);
+    }
     for (index, path) in paths.iter().enumerate() {
         for first in 0..path.len() {
             let first_edge = (path[first], path[(first + 1) % path.len()]);
@@ -88,14 +103,25 @@ pub(crate) fn try_direct_paths64(paths: &[Path64], fill_rule: FillRule) -> Optio
             }
         }
     }
-    for path in &mut paths {
-        if crate::signed_area2(path).ok()?.is_negative() {
+    let mut result = Vec::with_capacity(paths.len());
+    for mut path in paths {
+        let area = crate::signed_area2(&path).ok()?;
+        let keep = match fill_rule {
+            FillRule::EvenOdd | FillRule::NonZero => area != 0,
+            FillRule::Positive => area.is_positive(),
+            FillRule::Negative => area.is_negative(),
+        };
+        if !keep {
+            continue;
+        }
+        if area.is_negative() {
             path.reverse();
         }
         let (minimum, _) = path.iter().enumerate().min_by_key(|(_, point)| (point.x, point.y))?;
         path.rotate_left(minimum);
+        result.push(path);
     }
-    Some(paths)
+    Some(result)
 }
 
 fn edges_intersect64(first: (Point64, Point64), second: (Point64, Point64)) -> Option<bool> {

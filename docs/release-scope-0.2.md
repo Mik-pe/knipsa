@@ -55,10 +55,9 @@ assuming capabilities that the current API does not promise. Compatible
 additions may land in 0.2.x; changes to existing contracts require a later
 pre-1.0 minor release.
 
-The planned 0.3 Rust API requires `ComplexityLimits` for untrusted polygon
-building and triangulation requests. Boolean and offset operations still need
-a unified public request-budget API before resource limits are complete across
-the whole crate.
+The 0.3 Rust API subsequently added `ComplexityLimits` to Boolean requests,
+offset options, polygon building, and triangulation. The 0.2 line retains its
+original API and limitations.
 
 ## Evidence boundary
 

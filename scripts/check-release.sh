@@ -9,8 +9,8 @@ version=${package_id##*#}
 core_archive="target/package/knipsa-$version.crate"
 core_directory="target/package/knipsa-$version"
 
-test "$version" = "0.2.1" || {
-  echo "release fixture expects 0.2.1, workspace is $version" >&2
+test "$version" = "0.3.0" || {
+  echo "release fixture expects 0.3.0, workspace is $version" >&2
   exit 1
 }
 
