@@ -1,0 +1,164 @@
+{
+  "schema": "knipsa-clipper2-issue-corpus-v1",
+  "source_repository": "https://github.com/AngusJohnson/Clipper2",
+  "reviewed_at": "2026-08-09",
+  "fixture_license": "MIT OR Apache-2.0",
+  "derivation": "Original Knipsa fixtures synthesized from publicly described failure classes; no upstream fixture or test code is copied.",
+  "cases": [
+    {
+      "id": "union-mirrored-wedges",
+      "issue": 381,
+      "evidence": "maintainer_confirmed",
+      "operation": "boolean",
+      "clip_type": "union",
+      "fill_rule": "non_zero",
+      "subjects": [[[0, 0], [60, 30], [0, 30]], [[30, 0], [60, 30], [30, 30]]],
+      "clips": [],
+      "expect_non_empty": true
+    },
+    {
+      "id": "intersection-near-coincident-sliver",
+      "issue": 975,
+      "evidence": "maintainer_confirmed",
+      "operation": "boolean",
+      "clip_type": "intersection",
+      "fill_rule": "non_zero",
+      "subjects": [[[0, 0], [1, 0], [80000, 12000], [5, 1]]],
+      "clips": [[[0, -1], [90000, -1], [90000, 20000], [0, 20000]]],
+      "expect_non_empty": true
+    },
+    {
+      "id": "union-positive-sliver-fan",
+      "issue": 1067,
+      "evidence": "maintainer_confirmed",
+      "operation": "boolean",
+      "clip_type": "union",
+      "fill_rule": "non_zero",
+      "subjects": [[[40, 20], [60, 20], [50, 60]]],
+      "clips": [[[0, 20], [2, 19], [4, 20]], [[80, 20], [82, 19], [84, 20]], [[0, 80], [50, 60], [100, 80]], [[40, 20], [20, 40], [0, 20]]],
+      "expect_non_empty": true
+    },
+    {
+      "id": "open-out-and-back-through-box",
+      "issue": 771,
+      "evidence": "maintainer_fixed",
+      "operation": "open_boolean",
+      "clip_type": "intersection",
+      "fill_rule": "even_odd",
+      "open_subjects": [[[-40, 50], [50, 50], [-40, 50]]],
+      "clips": [[[0, 0], [100, 0], [100, 100], [0, 100]]],
+      "min_open_paths": 1
+    },
+    {
+      "id": "open-horizontal-collinear-run",
+      "issue": 339,
+      "evidence": "maintainer_fixed",
+      "operation": "open_boolean",
+      "clip_type": "intersection",
+      "fill_rule": "even_odd",
+      "open_subjects": [[[34, -51], [33, -51], [29, -51]]],
+      "clips": [[[0, -100], [100, -100], [100, 0], [0, 0]]],
+      "min_open_paths": 1
+    },
+    {
+      "id": "offset-reversing-open-left",
+      "issue": 408,
+      "evidence": "maintainer_confirmed",
+      "operation": "offset",
+      "paths": [[[-20, 0], [0, 0], [-10, 0]]],
+      "delta": 5.0,
+      "join_type": "round",
+      "end_type": "butt",
+      "min_paths": 1
+    },
+    {
+      "id": "offset-reversing-open-right",
+      "issue": 408,
+      "evidence": "maintainer_confirmed",
+      "operation": "offset",
+      "paths": [[[20, 0], [0, 0], [10, 0]]],
+      "delta": 5.0,
+      "join_type": "round",
+      "end_type": "butt",
+      "min_paths": 1
+    },
+    {
+      "id": "offset-near-collinear-with-large-shell",
+      "issue": 703,
+      "evidence": "maintainer_fixed",
+      "reference_comparison": "invariant_only",
+      "operation": "offset",
+      "paths": [[[0, 0], [800, 2], [1500, 4], [1700, 5]], [[-10000, -10000], [10000, -10000], [10000, 10000], [-10000, 10000]]],
+      "delta": -10.0,
+      "join_type": "miter",
+      "end_type": "polygon",
+      "min_paths": 1
+    },
+    {
+      "id": "offset-contract-shell-expand-hole",
+      "issue": 715,
+      "evidence": "maintainer_fixed",
+      "operation": "offset",
+      "paths": [[[-100, -80], [100, -80], [100, 80], [-100, 80]], [[-12, -12], [-12, 12], [12, 12], [12, -12]]],
+      "delta": -8.0,
+      "join_type": "round",
+      "end_type": "polygon",
+      "min_paths": 2
+    },
+    {
+      "id": "offset-overdeflate-regular-polygon",
+      "issue": 916,
+      "evidence": "maintainer_confirmed_fixed",
+      "operation": "offset",
+      "paths": [[[100, 0], [92, 38], [71, 71], [38, 92], [0, 100], [-38, 92], [-71, 71], [-92, 38], [-100, 0], [-92, -38], [-71, -71], [-38, -92], [0, -100], [38, -92], [71, -71], [92, -38]]],
+      "delta": -120.0,
+      "join_type": "miter",
+      "end_type": "polygon",
+      "max_paths": 0
+    },
+    {
+      "id": "rect-clip-oblique-triangle",
+      "issue": 542,
+      "evidence": "maintainer_confirmed",
+      "operation": "rect_clip",
+      "path": [[-40, 10], [280, 190], [330, 80]],
+      "rect": [100, 100, 240, 240],
+      "min_paths": 1
+    },
+    {
+      "id": "triangulate-huge-origin-near-collinear-quad",
+      "issue": 1056,
+      "evidence": "maintainer_fixed",
+      "operation": "triangulate",
+      "paths": [[[4000000000000000, 1700000000000000], [3800000000000000, 1500000000000000], [3803000000000000, 1497000000000000], [4003000000000000, 1697000000000000]]],
+      "min_triangles": 2
+    },
+    {
+      "id": "topology-touching-frame-with-island",
+      "issue": 957,
+      "evidence": "maintainer_confirmed",
+      "operation": "topology",
+      "subjects": [[[0, 0], [100, 0], [100, 10], [0, 10]], [[0, 10], [10, 10], [10, 100], [0, 100]], [[90, 10], [100, 10], [100, 100], [90, 100]], [[0, 100], [100, 100], [100, 110], [0, 110]], [[35, 40], [65, 40], [65, 70], [35, 70]]],
+      "min_outer_polygons": 2,
+      "min_total_holes": 1
+    },
+    {
+      "id": "topology-nested-frame-and-island",
+      "issue": 942,
+      "evidence": "maintainer_fixed",
+      "operation": "topology",
+      "subjects": [[[0, 0], [120, 0], [120, 12], [0, 12]], [[0, 12], [12, 12], [12, 108], [0, 108]], [[108, 12], [120, 12], [120, 108], [108, 108]], [[0, 108], [120, 108], [120, 120], [0, 120]], [[45, 45], [75, 45], [75, 75], [45, 75]]],
+      "min_outer_polygons": 2,
+      "min_total_holes": 1
+    }
+  ],
+  "excluded": [
+    {"issue": 1038, "reason": "reporter_confirmed_output-ordering_assumption"},
+    {"issue": 1008, "reason": "maintainer_confirmed_semantically_valid_noncanonical_output"},
+    {"issue": 970, "reason": "documented_touching-output_behavior"},
+    {"issue": 923, "reason": "documented_integer-rounding_behavior"},
+    {"issue": 934, "reason": "input_requires_user_simplification"},
+    {"issue": 921, "reason": "no_reproduction_data"},
+    {"issue": 425, "reason": "maintainer_confirmed_not_a_bug"}
+  ]
+}

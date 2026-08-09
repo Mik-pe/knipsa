@@ -1,4 +1,4 @@
-.PHONY: check test lint docs c-api coverage conformance conformance-integer conformance-open conformance-offset conformance-triangulation conformance-triangulation-d fuzz-replay release-check
+.PHONY: check test lint docs c-api coverage conformance conformance-integer conformance-open conformance-offset conformance-triangulation conformance-triangulation-d conformance-clipper-issues fuzz-replay release-check
 
 check: test lint c-api
 
@@ -37,6 +37,9 @@ conformance-triangulation:
 
 conformance-triangulation-d:
 	./scripts/run-triangulation-d-conformance.sh
+
+conformance-clipper-issues:
+	python3 ./scripts/run-clipper2-issue-conformance.py
 
 fuzz-replay:
 	./scripts/fuzz-replay.sh

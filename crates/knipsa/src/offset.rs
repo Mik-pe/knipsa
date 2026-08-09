@@ -385,7 +385,7 @@ fn closed_outline(path: &[PointD], delta: f64, options: OffsetOptions) -> Result
         let previous_point = shifted(path[index], normals[previous], delta);
         let next_point = shifted(path[index], normals[index], delta);
         let turn = directions[previous].cross(directions[index]);
-        let outer = turn * orientation * delta > 0.0;
+        let outer = turn * delta > 0.0;
         append_join(
             &mut result,
             path[index],
@@ -462,15 +462,23 @@ fn open_outline(path: &[PointD], radius: f64, options: OffsetOptions) -> Result<
     if path.len() < 2 || radius <= EPSILON {
         return Ok(Vec::new());
     }
+    let end_style = effective_open_end_style(options);
+    if let Some((outer_endpoint, reversal)) = three_point_reversal(path) {
+        let reversal_style =
+            if options.join_type == JoinType::Round { EndType::Round } else { EndType::Butt };
+        return open_segment_outline(
+            outer_endpoint,
+            reversal,
+            radius,
+            end_style,
+            reversal_style,
+            options.arc_tolerance,
+        );
+    }
     let directions = edge_directions(path)?;
     let left = offset_side(path, &directions, 1.0, radius, options);
     let right = offset_side(path, &directions, -1.0, radius, options);
     let mut result = left.clone();
-    let end_style = if options.end_type == EndType::Joined {
-        if options.join_type == JoinType::Round { EndType::Round } else { EndType::Square }
-    } else {
-        options.end_type
-    };
     append_cap(
         &mut result,
         path[path.len() - 1],
@@ -491,6 +499,59 @@ fn open_outline(path: &[PointD], radius: f64, options: OffsetOptions) -> Result<
         radius,
         end_style,
         options.arc_tolerance,
+    );
+    ensure_finite(result)
+}
+
+fn effective_open_end_style(options: OffsetOptions) -> EndType {
+    if options.end_type == EndType::Joined {
+        if options.join_type == JoinType::Round { EndType::Round } else { EndType::Square }
+    } else {
+        options.end_type
+    }
+}
+
+fn three_point_reversal(path: &[PointD]) -> Option<(PointD, PointD)> {
+    let [first, reversal, last] = path else {
+        return None;
+    };
+    let incoming = Vector::from(*reversal).sub(Vector::from(*first)).normalized()?;
+    let outgoing = Vector::from(*last).sub(Vector::from(*reversal)).normalized()?;
+    if incoming.dot(outgoing) >= -1.0 + EPSILON || incoming.cross(outgoing).abs() > EPSILON {
+        return None;
+    }
+    let first_distance = distance(*first, *reversal);
+    let last_distance = distance(*last, *reversal);
+    Some((if first_distance >= last_distance { *first } else { *last }, *reversal))
+}
+
+fn open_segment_outline(
+    start: PointD,
+    end: PointD,
+    radius: f64,
+    start_style: EndType,
+    end_style: EndType,
+    arc_tolerance: f64,
+) -> Result<PathD, Error> {
+    let direction =
+        Vector::from(end).sub(Vector::from(start)).normalized().ok_or(Error::InvalidOffset)?;
+    let normal = direction.left();
+    let left_start = shifted(start, normal, radius);
+    let left_end = shifted(end, normal, radius);
+    let right_start = shifted(start, normal, -radius);
+    let right_end = shifted(end, normal, -radius);
+    let mut result = vec![left_start, left_end];
+    append_cap(&mut result, end, left_end, right_end, direction, radius, end_style, arc_tolerance);
+    push_point(&mut result, right_start);
+    append_cap(
+        &mut result,
+        start,
+        right_start,
+        left_start,
+        direction.scale(-1.0),
+        radius,
+        start_style,
+        arc_tolerance,
     );
     ensure_finite(result)
 }
@@ -580,6 +641,20 @@ fn append_join(
     outer: bool,
     options: OffsetOptions,
 ) {
+    let reversal = previous_direction.dot(next_direction) < -1.0 + EPSILON
+        && previous_direction.cross(next_direction).abs() <= EPSILON;
+    if reversal && options.join_type == JoinType::Round {
+        let offset_sign = delta.signum();
+        append_round_join(
+            output,
+            center,
+            previous_normal.scale(offset_sign),
+            next_normal.scale(offset_sign),
+            delta.abs(),
+            options.arc_tolerance,
+        );
+        return;
+    }
     if !outer {
         if let Some(intersection) =
             line_intersection(previous, previous_direction, next, next_direction)
@@ -597,14 +672,17 @@ fn append_join(
             push_point(output, previous);
             push_point(output, next);
         }
-        JoinType::Round => append_round_join(
-            output,
-            center,
-            previous_normal,
-            next_normal,
-            delta.abs(),
-            options.arc_tolerance,
-        ),
+        JoinType::Round => {
+            let offset_sign = delta.signum();
+            append_round_join(
+                output,
+                center,
+                previous_normal.scale(offset_sign),
+                next_normal.scale(offset_sign),
+                delta.abs(),
+                options.arc_tolerance,
+            );
+        }
         JoinType::Miter => {
             let intersection =
                 line_intersection(previous, previous_direction, next, next_direction);
@@ -1408,6 +1486,98 @@ mod tests {
         .unwrap();
         assert!(round[0].len() > bevel[0].len());
         assert!(area2(&round[0]).abs() > area2(&bevel[0]).abs());
+    }
+
+    #[test]
+    fn round_offsets_cover_expanding_holes_and_exact_reversals() {
+        let shell = rectangle(-100.0, -80.0, 100.0, 80.0);
+        let hole = vec![
+            PointD::new(-12.0, -12.0),
+            PointD::new(-12.0, 12.0),
+            PointD::new(12.0, 12.0),
+            PointD::new(12.0, -12.0),
+        ];
+        let donut = offset_paths_d(
+            &[shell, hole],
+            -8.0,
+            OffsetOptions::polygon(JoinType::Round).with_arc_tolerance(0.02),
+        )
+        .unwrap();
+        assert_eq!(donut.len(), 2);
+        let expanded_hole = donut.iter().max_by_key(|path| path.len()).unwrap();
+        assert!(expanded_hole.len() > 8, "{donut:?}");
+        assert!(expanded_hole.iter().any(|point| point.x > 19.9 && point.y.abs() < 13.0));
+
+        for reversal in [
+            vec![PointD::new(-20.0, 0.0), PointD::new(0.0, 0.0), PointD::new(-10.0, 0.0)],
+            vec![PointD::new(20.0, 0.0), PointD::new(0.0, 0.0), PointD::new(10.0, 0.0)],
+        ] {
+            let stroke = offset_paths_d(
+                &[reversal],
+                5.0,
+                OffsetOptions::polyline(JoinType::Round, EndType::Butt).with_arc_tolerance(0.02),
+            )
+            .unwrap();
+            assert_eq!(stroke.len(), 1);
+            assert!(stroke[0].len() > 8);
+            assert!(stroke[0].iter().any(|point| point.x.abs() > 19.9));
+        }
+
+        let longer_return =
+            [PointD::new(-10.0, 0.0), PointD::new(0.0, 0.0), PointD::new(-20.0, 0.0)];
+        assert_eq!(
+            three_point_reversal(&longer_return),
+            Some((longer_return[2], longer_return[1]))
+        );
+        let bevel_reversal = offset_paths_d(
+            &[longer_return.to_vec()],
+            5.0,
+            OffsetOptions::polyline(JoinType::Bevel, EndType::Butt),
+        )
+        .unwrap();
+        assert_eq!(bevel_reversal.len(), 1);
+        assert_eq!(bevel_reversal[0].len(), 4);
+        assert!(
+            three_point_reversal(&[
+                PointD::new(-1.0, 0.0),
+                PointD::new(0.0, 0.0),
+                PointD::new(-1.0, 0.000_001),
+            ])
+            .is_none()
+        );
+
+        let mut internal_join = Vec::new();
+        append_join(
+            &mut internal_join,
+            PointD::new(0.0, 0.0),
+            PointD::new(0.0, 5.0),
+            PointD::new(0.0, -5.0),
+            Vector { x: 1.0, y: 0.0 },
+            Vector { x: -1.0, y: 0.0 },
+            Vector { x: 0.0, y: 1.0 },
+            Vector { x: 0.0, y: -1.0 },
+            5.0,
+            false,
+            OffsetOptions::polyline(JoinType::Round, EndType::Butt).with_arc_tolerance(0.02),
+        );
+        assert!(internal_join.len() > 8);
+        assert!(internal_join.iter().any(|point| point.x > 4.9));
+
+        let mut bevel_join = Vec::new();
+        append_join(
+            &mut bevel_join,
+            PointD::new(0.0, 0.0),
+            PointD::new(0.0, 5.0),
+            PointD::new(0.0, -5.0),
+            Vector { x: 1.0, y: 0.0 },
+            Vector { x: -1.0, y: 0.0 },
+            Vector { x: 0.0, y: 1.0 },
+            Vector { x: 0.0, y: -1.0 },
+            5.0,
+            false,
+            OffsetOptions::polyline(JoinType::Bevel, EndType::Butt),
+        );
+        assert_eq!(bevel_join, vec![PointD::new(0.0, 5.0), PointD::new(0.0, -5.0)]);
     }
 
     #[test]
