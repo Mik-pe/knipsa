@@ -2,9 +2,9 @@
 //!
 //! Input edges are shifted in floating point and joins and caps are constructed
 //! explicitly. Simple generated contours with no boundary contact are reduced
-//! through a certified containment forest. Touching, overlapping, self-crossing,
-//! oversized, or numerically ambiguous contours fall back to the exact non-zero
-//! Boolean union, which removes negative slivers and merges overlapping lobes.
+//! through a certified containment forest. Dense self-crossing outlines first
+//! use a certified signed-face regularizer. Touching, overlapping, oversized,
+//! or numerically ambiguous contours fall back to the exact Boolean kernel.
 
 use crate::{
     BooleanRequest, ClipType, Error, FillRule, Path64, PathD, PathKind, Paths64, PathsD, Point64,
@@ -12,6 +12,8 @@ use crate::{
     geometry::{paths64_to_local_d, signed_area2_d},
     normalize_path_d, validate_path_d,
 };
+
+mod regularize;
 
 const EPSILON: f64 = 1e-12;
 const ARC_TOLERANCE_RATIO: f64 = 0.002;
@@ -217,17 +219,54 @@ pub fn offset_paths_d(
     }
 
     let mut generated = Vec::new();
+    let mut needs_signed_regularization = false;
     for path in &normalized {
-        let outline = if options.end_type == EndType::Polygon {
-            closed_outline(path, delta, options)?
+        if options.end_type == EndType::Polygon {
+            let direct = clean_ring(
+                closed_outline_with_concave_wedges(path, delta, options, false)?,
+                options.preserve_collinear,
+            );
+            if direct.len() < 3 {
+                continue;
+            }
+            if certify_non_zero_contours(std::slice::from_ref(&direct)).is_some() {
+                if normalized.len() == 1 {
+                    return Ok(vec![direct]);
+                }
+                generated.push(direct);
+            } else {
+                needs_signed_regularization = true;
+                add_generated_outline(
+                    &mut generated,
+                    closed_outline_with_concave_wedges(path, delta, options, true)?,
+                    options.preserve_collinear,
+                );
+            }
         } else {
-            open_outline(path, delta.abs(), options)?
-        };
-        add_generated_outline(&mut generated, outline, options.preserve_collinear);
+            add_generated_outline(
+                &mut generated,
+                open_outline(path, delta.abs(), options)?,
+                options.preserve_collinear,
+            );
+        }
     }
     if generated.is_empty() {
         return Ok(Vec::new());
     }
+    if needs_signed_regularization {
+        let assume_signed = generated.len() == 1;
+        let generated =
+            regularize::generated_contours(&generated, options.preserve_collinear, assume_signed)?;
+        if let Some(selection) = certify_non_zero_contours(&generated) {
+            return Ok(generated
+                .into_iter()
+                .zip(selection)
+                .filter_map(|(path, keep)| keep.then_some(path))
+                .collect());
+        }
+        return merge_generated_contours(&generated, options.preserve_collinear);
+    }
+
     if let Some(selection) = certify_non_zero_contours(&generated) {
         return Ok(generated
             .into_iter()
@@ -363,7 +402,17 @@ fn round_path_with_origin(path: PathD, origin: Point64) -> Result<Path64, Error>
         .collect()
 }
 
+#[cfg(test)]
 fn closed_outline(path: &[PointD], delta: f64, options: OffsetOptions) -> Result<PathD, Error> {
+    closed_outline_with_concave_wedges(path, delta, options, false)
+}
+
+fn closed_outline_with_concave_wedges(
+    path: &[PointD],
+    delta: f64,
+    options: OffsetOptions,
+    concave_wedges: bool,
+) -> Result<PathD, Error> {
     if path.len() < 3 {
         return Ok(Vec::new());
     }
@@ -386,6 +435,12 @@ fn closed_outline(path: &[PointD], delta: f64, options: OffsetOptions) -> Result
         let next_point = shifted(path[index], normals[index], delta);
         let turn = directions[previous].cross(directions[index]);
         let outer = turn * delta > 0.0;
+        if !outer && concave_wedges {
+            push_point(&mut result, previous_point);
+            push_point(&mut result, path[index]);
+            push_point(&mut result, next_point);
+            continue;
+        }
         append_join(
             &mut result,
             path[index],
@@ -1353,6 +1408,72 @@ mod tests {
                 PointD::new(radius * angle.cos(), radius * angle.sin())
             })
             .collect()
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn signed_regularizer_handles_dense_reflex_offset() {
+        let path = (0..228)
+            .map(|index| {
+                let angle = std::f64::consts::TAU * f64::from(index) / 228.0;
+                let radius = if index % 2 == 0 { 100.0 } else { 65.0 };
+                PointD::new(radius * angle.cos(), radius * angle.sin())
+            })
+            .collect::<PathD>();
+        let raw = clean_ring(
+            closed_outline_with_concave_wedges(
+                &path,
+                3.0,
+                OffsetOptions::polygon(JoinType::Miter),
+                true,
+            )
+            .unwrap(),
+            false,
+        );
+        let regularized = regularize::signed_contour(&raw, FillRule::Positive, false).unwrap();
+        assert_eq!(regularized.len(), 1);
+        assert_eq!(regularized[0].len(), 570);
+        assert!(!ring_self_intersects(&regularized[0]));
+
+        let expanded = offset_paths_d(
+            std::slice::from_ref(&path),
+            3.0,
+            OffsetOptions::polygon(JoinType::Miter),
+        )
+        .unwrap();
+        let mut reversed = path.clone();
+        reversed.reverse();
+        let reversed = offset_paths_d(
+            std::slice::from_ref(&reversed),
+            -3.0,
+            OffsetOptions::polygon(JoinType::Miter),
+        )
+        .unwrap();
+        let translation = PointD::new(1_000_000.0, -2_000_000.0);
+        let translated_path = path
+            .iter()
+            .map(|point| PointD::new(point.x + translation.x, point.y + translation.y))
+            .collect::<PathD>();
+        let mut translated =
+            offset_paths_d(&[translated_path], 3.0, OffsetOptions::polygon(JoinType::Miter))
+                .unwrap();
+        for point in &mut translated[0] {
+            point.x -= translation.x;
+            point.y -= translation.y;
+        }
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0].len(), 570);
+        assert_eq!(reversed.len(), 1);
+        assert_eq!(reversed[0].len(), 570);
+        assert_eq!(translated.len(), 1);
+        assert_eq!(translated[0].len(), 570);
+        assert!((area2(&expanded[0]).abs() - area2(&reversed[0]).abs()).abs() < 1.0e-6);
+        assert!((area2(&expanded[0]).abs() - area2(&translated[0]).abs()).abs() < 1.0e-4);
+
+        let overlap = rectangle(90.0, -8.0, 120.0, 8.0);
+        let merged =
+            offset_paths_d(&[path, overlap], 3.0, OffsetOptions::polygon(JoinType::Miter)).unwrap();
+        assert_eq!(merged.len(), 1);
     }
 
     fn bounds(paths: &[PathD]) -> (f64, f64, f64, f64) {
