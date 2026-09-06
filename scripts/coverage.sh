@@ -84,6 +84,12 @@ if [ "$branch_records" -ne "$branch_found" ]; then
   exit 1
 fi
 if [ "$branch_missed" -ne 0 ]; then
+  awk -F, '
+    /^SF:/ { file = substr($0, 4) }
+    /^BRDA:/ && ($4 == "-" || $4 == "" || ($4 + 0) == 0) {
+      printf "uncovered branch: %s:%s (block %s, branch %s)\n", file, substr($1, 6), $2, $3
+    }
+  ' target/coverage/lcov.info >&2
   echo "branch coverage has ${branch_missed} missed detailed branch records" >&2
   exit 1
 fi

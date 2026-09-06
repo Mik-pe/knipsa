@@ -59,14 +59,18 @@ impl Rational {
         let signed_mantissa = if negative { -i128::from(mantissa) } else { i128::from(mantissa) };
         if exponent >= 0 {
             let shift = u32::try_from(exponent).expect("f64 exponent is non-negative here");
-            if let Some(numerator) = signed_mantissa.checked_shl(shift) {
+            // checked_shl checks the shift count, not arithmetic representability.
+            if let Some(numerator) = signed_mantissa.checked_shl(shift)
+                && (numerator >> shift) == signed_mantissa
+            {
                 return Ok(Self::from_i128(numerator, 1));
             }
         } else {
             let shift = u32::try_from(-exponent).expect("f64 exponent fits in u32");
-            if let Some(denominator) = 1_i128.checked_shl(shift) {
-                return Ok(Self::new_small(signed_mantissa, denominator)
-                    .expect("a positive power-of-two denominator fits the small rational"));
+            if let Some(denominator) = 1_i128.checked_shl(shift)
+                && let Some(value) = Self::new_small(signed_mantissa, denominator)
+            {
+                return Ok(value);
             }
         }
         let mut numerator = BigInt::from(signed_mantissa);
@@ -1800,6 +1804,71 @@ fn exact_paths_to_f64(paths: &[ExactPath]) -> Result<PathsD, Error> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn f64_conversion_shift_boundaries_match_bigint() {
+        for exponent in [126_i32, 127, 128, 179, -76, -75, -74, -1022, 1023] {
+            for offset in [0_u64, 1] {
+                let bits = (u64::try_from(exponent + 1023).unwrap() << 52) | offset;
+                let value = f64::from_bits(bits);
+                let mantissa = BigInt::from((1_u64 << 52) + offset);
+                let shift = exponent - 52;
+                let (numerator, denominator) = if shift >= 0 {
+                    (mantissa << usize::try_from(shift).unwrap(), BigInt::from(1))
+                } else {
+                    (mantissa, BigInt::from(1) << usize::try_from(-shift).unwrap())
+                };
+                assert_eq!(
+                    Rational::from_f64(value).unwrap(),
+                    Rational::new(numerator.clone(), denominator.clone())
+                );
+                assert_eq!(
+                    Rational::from_f64(-value).unwrap(),
+                    Rational::new(-numerator, denominator)
+                );
+            }
+        }
+        let subnormal_denominator = BigInt::from(1) << 1074_usize;
+        let maximum = ((BigInt::from(1) << 53_usize) - BigInt::from(1)) << 971_usize;
+        for (value, numerator, denominator) in [
+            (0.0, BigInt::from(0), BigInt::from(1)),
+            (-0.0, BigInt::from(0), BigInt::from(1)),
+            (f64::from_bits(1), BigInt::from(1), subnormal_denominator.clone()),
+            (-f64::from_bits(1), BigInt::from(-1), subnormal_denominator),
+            (f64::MAX, maximum.clone(), BigInt::from(1)),
+            (-f64::MAX, -maximum, BigInt::from(1)),
+        ] {
+            assert_eq!(Rational::from_f64(value).unwrap(), Rational::new(numerator, denominator));
+        }
+    }
+
+    #[test]
+    fn floating_boolean_preserves_coordinates_at_conversion_shift_boundaries() {
+        let tiny = 2_f64.powi(-75);
+        let large = 2_f64.powi(128);
+        let step = 2_f64.powi(77);
+        for path in [
+            vec![
+                PointD::new(0.0, tiny),
+                PointD::new(2_000_000.0, tiny),
+                PointD::new(2_000_000.0, 1.0),
+                PointD::new(0.0, 1.0),
+            ],
+            vec![
+                PointD::new(large, 0.0),
+                PointD::new(large + step, 0.0),
+                PointD::new(large + step, step),
+                PointD::new(large, step),
+            ],
+        ] {
+            let subjects = [path];
+            let request = BooleanRequest::new(&subjects, &[], ClipType::Union, FillRule::EvenOdd);
+            assert!(crate::dispatch::try_boolean_op_d(&request).is_none());
+            let output = crate::boolean_op_d(request).unwrap();
+            assert!(output.open.is_empty());
+            assert_eq!(output.closed, subjects);
+        }
+    }
     use super::*;
     use crate::{PointLocation, point_in_polygon, signed_area2};
 

@@ -80,7 +80,7 @@ pub fn triangulate64(
         let indices = earcutr::earcut(&coordinates, &hole_indices, 2)
             .map_err(|_| Error::TriangulationFailure)?;
         validate_triangle_indices(&indices)?;
-        for indices in indices.chunks_exact(3) {
+        for indices in indices.as_chunks::<3>().0 {
             push_oriented_triangle64(&mut result, &vertices, indices);
         }
         ensure_group_result(group_start, result.len(), !rings[outer].vertices.is_empty())?;
@@ -187,7 +187,7 @@ fn triangulate_d_impl(paths: &[PathD], fill_rule: FillRule) -> Result<Vec<Triang
         let indices = earcutr::earcut(&coordinates, &hole_indices, 2)
             .map_err(|_| Error::TriangulationFailure)?;
         validate_triangle_indices(&indices)?;
-        for indices in indices.chunks_exact(3) {
+        for indices in indices.as_chunks::<3>().0 {
             push_oriented_triangle(&mut result, &vertices, &predicate_vertices, indices);
         }
         ensure_group_result(group_start, result.len(), !rings[outer].path.is_empty())?;
