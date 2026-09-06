@@ -284,7 +284,7 @@ mod tests {
         let vertical = Point64::new(0, 4);
         for first in [(origin, horizontal), (horizontal, origin)] {
             for second in [(origin, vertical), (vertical, origin)] {
-                let path = [
+                let mut path = [
                     first.0,
                     first.1,
                     Point64::new(8, 8),
@@ -293,6 +293,8 @@ mod tests {
                     Point64::new(-8, -8),
                 ];
                 assert_eq!(certify_edge_pair(&path, 0, 3), None);
+                path.rotate_right(1);
+                assert_eq!(certify_edge_pair(&path, 1, 4), None);
             }
         }
     }
