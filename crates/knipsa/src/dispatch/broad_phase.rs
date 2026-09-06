@@ -278,6 +278,26 @@ mod tests {
     }
 
     #[test]
+    fn non_adjacent_contacts_defer_for_every_endpoint_orientation() {
+        let origin = Point64::new(0, 0);
+        let horizontal = Point64::new(4, 0);
+        let vertical = Point64::new(0, 4);
+        for first in [(origin, horizontal), (horizontal, origin)] {
+            for second in [(origin, vertical), (vertical, origin)] {
+                let path = [
+                    first.0,
+                    first.1,
+                    Point64::new(8, 8),
+                    second.0,
+                    second.1,
+                    Point64::new(-8, -8),
+                ];
+                assert_eq!(certify_edge_pair(&path, 0, 3), None);
+            }
+        }
+    }
+
+    #[test]
     fn separated_rings_and_disjoint_collinear_supports_are_certified() {
         let paths = (0..256)
             .map(|index| {
