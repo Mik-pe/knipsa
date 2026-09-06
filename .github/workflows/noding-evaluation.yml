@@ -1,0 +1,33 @@
+name: Exact noding evaluation
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/noding-evaluation.yml'
+      - 'scripts/evaluate-noding.py'
+      - 'benchmarks/exact-noding.rs'
+      - 'crates/knipsa/src/**'
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Snapshot the public source for kernel review
+        run: |
+          mkdir -p target/noding-evaluation
+          git archive --format=tar.gz --output=target/noding-evaluation/source.tar.gz HEAD
+          uname -a > target/noding-evaluation/host.txt
+          lspci >> target/noding-evaluation/host.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: noding-evaluation-${{ github.event.pull_request.head.sha }}
+          path: target/noding-evaluation/
