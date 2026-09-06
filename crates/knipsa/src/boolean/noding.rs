@@ -110,12 +110,9 @@ mod tests {
     fn native_bounds_and_partial_conversion_use_one_consistent_coordinate_space() {
         let native = Edge::new(point(-4, -4), point(3, 3));
         assert_eq!(spatial_bounds(std::slice::from_ref(&native)), [(-4, -4, 3, 3)]);
-        for [start_x, start_y, end_x, end_y] in [
-            [0.5, 0.0, 2.0, 2.0],
-            [0.0, 0.5, 2.0, 2.0],
-            [0.0, 0.0, 2.5, 2.0],
-            [0.0, 0.0, 2.0, 2.5],
-        ] {
+        for [start_x, start_y, end_x, end_y] in
+            [[0.5, 0.0, 2.0, 2.0], [0.0, 0.5, 2.0, 2.0], [0.0, 0.0, 2.5, 2.0], [0.0, 0.0, 2.0, 2.5]]
+        {
             let fractional = Edge::new(
                 ExactPoint::new(
                     Rational::from_f64(start_x).unwrap(),

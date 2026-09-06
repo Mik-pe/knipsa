@@ -1,115 +1,122 @@
 # Exact noding and shared-index measurements
 
-Measured September 6, 2026. This report compares the merged #14 baseline
-`ad5383f99df6501b1abfc3e8beb3f1ba57a108d5` with code commit
-`3951d9ff223bfaa9d72dc1f7a6f998897da8b614` from #17. Documentation-only
-follow-ups do not change the measured source. These are new gains relative to
-#14, not another comparison with the older quadratic direct-ring certificate.
+Measured September 6, 2026. Baseline is merged #14,
+`ad5383f99df6501b1abfc3e8beb3f1ba57a108d5`. Measured candidate is
+`cd015cce120dfef9947a0600a66e03e9165941b5`: shared spatial noding, exact native
+bounds before rank compression, and the adjacent-corner certificate. Subsequent
+formatting/documentation changes do not change this production logic. These
+are gains relative to #14, not another comparison with its older baseline.
 
-## Decision and limits
+## Decision and scope
 
-Adopt the shared two-dimensional CPU index for general closed noding. The
-large horizontal-comb pathology improves about 5x end to end. This does not
-establish that the CPU wins against GPU hardware: no physical GPU benchmark was
-available. GPU remains a proposed candidate-generation stage under the admission
-criteria in [the execution design](execution-design.md), not an implemented or
-enabled backend.
+Adopt the shared two-dimensional CPU index for general closed noding. Horizontal
+comb cases improve with input size, including fractional input that requires
+rank compression. This does not establish a CPU-versus-GPU winner: no physical
+GPU benchmark was available. The [execution design](execution-design.md) specifies
+a conditional GPU experiment; no GPU backend is implemented or enabled.
 
-The change is not uniformly faster. The vertical 256-vertex comb has a median
-base/head ratio of 0.960x, or about 4.2% more latency, with all five pairs showing
-the regression. This is an accepted, explicit tradeoff for two-axis pruning,
-not dismissed as noise. The 2048-vertex rotated control is approximately flat.
-Dense intersections and tiny exact calls are roughly unchanged in this run.
-Integer certification benefits from the shared-index layout and the checked
-adjacent-corner reduction. No broad claim about unrelated workloads follows.
+Not every case improves. The 2048-vertex vertical comb is about 6.3% slower with
+integral input and 8.1% slower with fractional input by paired medians. Every pair
+shows those regressions; they are not dismissed as noise. Smaller integral rotated
+cases benefit from skipping unnecessary rank sorting. Fractional rotated input
+still pays for ranking. The full table, including regressions, is the basis for
+accepting this tradeoff, not a universal speedup claim.
 
 ## Method
 
-Each suite runs five alternating base/head process pairs. Each process verifies
-the complete analytic output and measures 21 calibrated batches per fixture.
-The same source harness is compiled into both revisions. Floating noding outputs
-are compared using full canonical f64 bit sequences, not area or vertex counts;
-integer outputs compare full coordinate sequences. Ring order and start vertex
-are canonicalized, but winding and coordinates are retained.
+Five alternating base/head process pairs per suite, 21 calibrated batches per
+fixture. The same harness is compiled into both revisions. Every process checks
+complete analytic geometry before timing; the script also compares complete
+canonical output signatures between revisions. Floating output uses f64 bit
+sequences, with signed zeros normalized. Winding and coordinates are retained;
+only ring order and start vertex are canonicalized. Integer output compares all
+coordinate pairs. Equality is not reduced to area or vertex counts.
 
-Timing includes public validation, allocations, exact rank preparation, index
-construction, exact intersections, topology, and result destruction. Fixture
-construction and output verification are outside the measured interval. Ratios
-are medians of paired process medians; the displayed ranges are not confidence
-intervals. Batch latency is not per-request p99. Allocation counts, resident GPU
-throughput, real-world GIS distributions, and cross-library rankings were not
-measured here.
+Timings include public validation, preparation, allocation, intersections,
+topology, and result destruction. Fixture creation and output comparison are
+outside the timed interval. Ratios are medians of paired process medians, not
+ratios of the displayed time medians. Pair ranges are not confidence intervals;
+batch latency is not per-request p99. Allocation counts, candidate-stage fractions,
+GPU throughput, real GIS distributions, and cross-library rankings were not measured.
 
 Both runners report AMD EPYC 7763 64-Core Processor, Linux x86_64, Rust 1.98.1,
 LLVM 22.1.8, default release profile/features, empty RUSTFLAGS, and identical
-Cargo.lock hashes. Each comparison is within one runner; the two suites are
-separate jobs. The CPU model name does not imply 64-core parallel execution.
-The full machine/compiler metadata, samples, signatures, iteration counts,
-execution order, and hashes are retained in the artifacts.
+Cargo.lock hashes. Each suite compares revisions on the same runner; the two
+suites are separate jobs. The CPU model name does not imply parallel execution.
+Artifacts retain raw samples, signatures, iterations, execution order, metadata,
+and harness/lock hashes.
 
-## Full Boolean intersection
+## Complete Boolean intersection
 
-[Actions run 34035265586](https://github.com/Mik-pe/knipsa/actions/runs/34035265586).
-Comb vertex counts name the subject only; each case also has a four-vertex clip.
-Both axes are tested. Original coordinates beyond the specialization range force
-the exact kernel. The fractional triangle checks a constructed nonintegral vertex.
+[Run 34035872277](https://github.com/Mik-pe/knipsa/actions/runs/34035872277).
+Comb vertex counts name the subject; each case also has a four-vertex clip.
+Coordinates beyond the specialization range force the exact kernel. Fractional
+comb inputs translate both operands and their analytic expected result by an
+exact binary quarter, exercising rank preparation rather than native extraction.
+The triangle separately checks construction of a nonintegral output vertex.
 
 | Case | Base ns/op | Head ns/op | Median base/head | Pair range |
 | --- | ---: | ---: | ---: | ---: |
-| horizontal_comb_32_vertices | 270049.0 | 257542.2 | 1.050x | 1.043–1.060x |
-| vertical_comb_32_vertices | 345054.8 | 350226.4 | 0.987x | 0.983–0.996x |
-| horizontal_comb_256_vertices | 3464173.5 | 2460697.2 | 1.416x | 1.404–1.422x |
-| vertical_comb_256_vertices | 2804667.5 | 2929123.0 | 0.960x | 0.947–0.963x |
-| horizontal_comb_1024_vertices | 30463103.0 | 11076333.0 | 2.768x | 2.708–2.778x |
-| vertical_comb_1024_vertices | 12580885.0 | 12732183.0 | 0.993x | 0.980–1.000x |
-| horizontal_comb_2048_vertices | 112492340.0 | 22152156.0 | 5.078x | 5.002–5.215x |
-| vertical_comb_2048_vertices | 26454016.0 | 26354671.0 | 0.997x | 0.995–1.009x |
-| dense_grid_4 | 453794.1 | 453932.4 | 0.996x | 0.994–1.006x |
-| dense_grid_8 | 1774791.0 | 1735974.0 | 1.022x | 1.019–1.040x |
-| exact_fractional_triangle | 44800.5 | 44752.2 | 1.004x | 0.989–1.018x |
-| exact_rectangle_control | 52116.0 | 52641.2 | 0.993x | 0.984–1.015x |
+| horizontal_comb_32_vertices | 279379.7 | 258210.4 | 1.083x | 1.074–1.088x |
+| vertical_comb_32_vertices | 350924.7 | 340566.1 | 1.033x | 1.024–1.037x |
+| horizontal_comb_256_vertices | 3620510.5 | 2293877.0 | 1.579x | 1.574–1.596x |
+| vertical_comb_256_vertices | 2823236.5 | 2798251.5 | 1.009x | 1.005–1.014x |
+| horizontal_comb_1024_vertices | 31376334.0 | 10554021.0 | 2.974x | 2.966–2.982x |
+| vertical_comb_1024_vertices | 12724372.0 | 11543102.0 | 1.104x | 1.093–1.108x |
+| horizontal_comb_2048_vertices | 111175391.0 | 22505308.0 | 4.937x | 4.893–4.978x |
+| vertical_comb_2048_vertices | 24350174.0 | 25925562.0 | 0.941x | 0.937–0.945x |
+| fractional_horizontal_comb_256_vertices | 3548062.0 | 2373035.2 | 1.495x | 1.489–1.497x |
+| fractional_vertical_comb_256_vertices | 2856914.0 | 2889388.0 | 0.987x | 0.986–0.994x |
+| fractional_horizontal_comb_2048_vertices | 108092167.0 | 23211240.0 | 4.647x | 4.624–4.697x |
+| fractional_vertical_comb_2048_vertices | 24601618.0 | 26703068.0 | 0.925x | 0.918–0.929x |
+| dense_grid_4 | 467516.1 | 462789.7 | 1.011x | 1.009–1.016x |
+| dense_grid_8 | 1868407.0 | 1839877.0 | 1.014x | 1.009–1.020x |
+| exact_fractional_triangle | 44876.4 | 44223.2 | 1.014x | 1.007–1.017x |
+| exact_rectangle_control | 52923.9 | 52425.3 | 1.011x | 1.006–1.016x |
 
 ## Existing integer certificate consumer
 
-[Actions run 34035265550](https://github.com/Mik-pe/knipsa/actions/runs/34035265550).
-This guards the actual existing user of the extracted index. The initial extraction
-at `8126700` slowed separated-ring cases; the corner reduction at `3951d9f`
-removed that observed regression. The unrelated overlap control is retained.
+[Run 34035872288](https://github.com/Mik-pe/knipsa/actions/runs/34035872288).
+The shared index's original consumer is included rather than assuming extraction
+has no cost. The unrelated overlap control remains in the suite.
 
 | Case | Base ns/op | Head ns/op | Median base/head | Pair range |
 | --- | ---: | ---: | ---: | ---: |
-| rectangle_4 | 262.3 | 231.0 | 1.148x | 1.113–1.172x |
-| convex_66 | 6780.6 | 4184.0 | 1.622x | 1.615–1.625x |
-| convex_258 | 31395.5 | 20020.0 | 1.568x | 1.559–1.575x |
-| convex_1026 | 142712.9 | 96095.4 | 1.488x | 1.480–1.488x |
-| convex_2050 | 326792.4 | 228775.0 | 1.429x | 1.385–1.430x |
-| separated_rectangles_8 | 1792.3 | 1401.5 | 1.273x | 1.225–1.296x |
-| separated_rectangles_64 | 16275.7 | 13579.7 | 1.201x | 1.176–1.205x |
-| separated_rectangles_256 | 62884.6 | 52603.8 | 1.197x | 1.176–1.200x |
-| concave_disjoint_supports_8 | 435.6 | 317.5 | 1.373x | 1.366–1.398x |
-| overlapping_rectangle_control | 791.8 | 791.7 | 1.007x | 0.942–1.012x |
+| rectangle_4 | 237.2 | 176.7 | 1.343x | 1.340–1.372x |
+| convex_66 | 6335.6 | 4042.7 | 1.571x | 1.553–1.579x |
+| convex_258 | 29431.0 | 19381.2 | 1.517x | 1.499–1.530x |
+| convex_1026 | 134128.3 | 93131.1 | 1.439x | 1.437–1.463x |
+| convex_2050 | 306194.9 | 220712.1 | 1.386x | 1.373–1.401x |
+| separated_rectangles_8 | 1697.4 | 1281.1 | 1.328x | 1.314–1.337x |
+| separated_rectangles_64 | 15175.1 | 12593.5 | 1.205x | 1.203–1.211x |
+| separated_rectangles_256 | 58235.5 | 48382.5 | 1.204x | 1.200–1.207x |
+| concave_disjoint_supports_8 | 400.4 | 279.7 | 1.433x | 1.420–1.440x |
+| overlapping_rectangle_control | 831.4 | 761.7 | 1.089x | 1.074–1.134x |
 
 ## Reproduce and locate evidence
 
 ```sh
 python3 scripts/benchmark-revisions.py --workload exact-noding \
   --base ad5383f99df6501b1abfc3e8beb3f1ba57a108d5 \
-  --head 3951d9ff223bfaa9d72dc1f7a6f998897da8b614 --pairs 5
+  --head cd015cce120dfef9947a0600a66e03e9165941b5 --pairs 5
 python3 scripts/benchmark-revisions.py --workload direct-certification \
   --base ad5383f99df6501b1abfc3e8beb3f1ba57a108d5 \
-  --head 3951d9ff223bfaa9d72dc1f7a6f998897da8b614 --pairs 5
+  --head cd015cce120dfef9947a0600a66e03e9165941b5 --pairs 5
 ```
 
-- Noding artifact ID `9989970331`, ZIP SHA-256
-  `0fc4574865e064ae4bed80dbf209f8c395a588c77f4087b9a5ffce213370cd30`.
-- Certificate artifact ID `9989962020`, ZIP SHA-256
-  `f00a5ad3468ef47e064985d1165dc279fb1529bf22b35d21e764c1f3d829cbf1`.
-- Earlier noding comparison: run `34035046724`, head `8126700`, about 5.028x
-  on the large horizontal comb. It is a separate earlier result, not pooled
-  with the final code's process pairs.
+- Noding artifact ID `9990164301`, ZIP SHA-256
+  `46b5de8891ad18ebddb9ea92d6daa50eae6a5d80807b080f1e0a450a3334a441`.
+- Certificate artifact ID `9990149606`, ZIP SHA-256
+  `0234448262eb453d0c9bb6d163ab0b097df4fede63a44b8836dd868dcf190d5d`.
+
+Earlier experiments are not pooled with these samples. The initial extraction
+at `8126700` improved the large horizontal comb about 5x but slowed separated-ring
+certification. The adjacent-corner reduction at `3951d9f` removed that observed
+regression. Always-ranking revisions still penalized small exact controls and
+some rotated cases; checked native bounds were introduced before this final
+integral/fractional comparison. The remaining large rotated regressions above
+are explicitly retained.
 
 The unchanged strict coverage, fuzz replay, compiler/MSRV checks, C ABI,
-packaged consumers, and all reference conformance matrices remain CI gates.
-The complete run for the measured source is
-[34035265563](https://github.com/Mik-pe/knipsa/actions/runs/34035265563).
-The PR records the status of the latest documentation-inclusive head.
+packaged consumers, and all reference matrices remain CI gates. The PR records
+the latest head and its full check status separately from these pinned timings.
