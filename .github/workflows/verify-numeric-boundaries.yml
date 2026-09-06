@@ -1,0 +1,207 @@
+name: Verify numeric boundary fixes
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/verify-numeric-boundaries.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'perf/exact-integer-spatial-certification'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Reproduce failures before applying the exact arithmetic fix
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          import os
+
+          output = Path('target/numeric-verification')
+          output.mkdir(parents=True, exist_ok=True)
+          source = Path('crates/knipsa/src/boolean.rs')
+          text = source.read_text()
+          tests = '''
+              #[test]
+              fn f64_conversion_shift_boundaries_match_bigint() {
+                  for exponent in [126_i32, 127, 128, 179, -76, -75, -74, -1022, 1023] {
+                      for offset in [0_u64, 1] {
+                          let bits = (u64::try_from(exponent + 1023).unwrap() << 52) | offset;
+                          let value = f64::from_bits(bits);
+                          let mantissa = BigInt::from((1_u64 << 52) + offset);
+                          let shift = exponent - 52;
+                          let (numerator, denominator) = if shift >= 0 {
+                              (mantissa << usize::try_from(shift).unwrap(), BigInt::from(1))
+                          } else {
+                              (mantissa, BigInt::from(1) << usize::try_from(-shift).unwrap())
+                          };
+                          assert_eq!(
+                              Rational::from_f64(value).unwrap(),
+                              Rational::new(numerator.clone(), denominator.clone())
+                          );
+                          assert_eq!(
+                              Rational::from_f64(-value).unwrap(),
+                              Rational::new(-numerator, denominator)
+                          );
+                      }
+                  }
+                  let subnormal_denominator = BigInt::from(1) << 1074_usize;
+                  let maximum = ((BigInt::from(1) << 53_usize) - BigInt::from(1)) << 971_usize;
+                  for (value, numerator, denominator) in [
+                      (0.0, BigInt::from(0), BigInt::from(1)),
+                      (-0.0, BigInt::from(0), BigInt::from(1)),
+                      (f64::from_bits(1), BigInt::from(1), subnormal_denominator.clone()),
+                      (-f64::from_bits(1), BigInt::from(-1), subnormal_denominator),
+                      (f64::MAX, maximum.clone(), BigInt::from(1)),
+                      (-f64::MAX, -maximum, BigInt::from(1)),
+                  ] {
+                      assert_eq!(
+                          Rational::from_f64(value).unwrap(),
+                          Rational::new(numerator, denominator)
+                      );
+                  }
+              }
+
+              #[test]
+              fn floating_boolean_preserves_coordinates_at_conversion_shift_boundaries() {
+                  let tiny = 2_f64.powi(-75);
+                  let large = 2_f64.powi(128);
+                  let step = 2_f64.powi(77);
+                  for path in [
+                      vec![
+                          PointD::new(0.0, tiny),
+                          PointD::new(2_000_000.0, tiny),
+                          PointD::new(2_000_000.0, 1.0),
+                          PointD::new(0.0, 1.0),
+                      ],
+                      vec![
+                          PointD::new(large, 0.0),
+                          PointD::new(large + step, 0.0),
+                          PointD::new(large + step, step),
+                          PointD::new(large, step),
+                      ],
+                  ] {
+                      let subjects = [path];
+                      let request = BooleanRequest::new(
+                          &subjects, &[], ClipType::Union, FillRule::EvenOdd,
+                      );
+                      assert!(crate::dispatch::try_boolean_op_d(&request).is_none());
+                      let output = crate::boolean_op_d(request).unwrap();
+                      assert!(output.open.is_empty());
+                      assert_eq!(output.closed, subjects);
+                  }
+              }
+          '''
+          anchor = '#[cfg(test)]\nmod tests {\n'
+          assert text.count(anchor) == 1
+          source.write_text(text.replace(anchor, anchor + tests))
+          before = subprocess.run(
+              ['cargo', 'test', '-p', 'knipsa', '--all-features', 'conversion_shift_boundaries'],
+              text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+          )
+          (output / 'before.log').write_text(before.stdout)
+          print(before.stdout)
+          assert before.returncode != 0 and 'test result: FAILED' in before.stdout, 'expected an executed regression failure'
+          assert '2 failed' in before.stdout, 'both conversion and public-API regressions must fail before the fix'
+
+          text = source.read_text()
+          old = 'if let Some(numerator) = signed_mantissa.checked_shl(shift) {'
+          new = '''// checked_shl checks the shift count, not arithmetic representability.
+                      if let Some(numerator) = signed_mantissa.checked_shl(shift)
+                          && (numerator >> shift) == signed_mantissa
+                      {'''
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+          old = '''            if let Some(denominator) = 1_i128.checked_shl(shift) {
+                          return Ok(Self::new_small(signed_mantissa, denominator)
+                              .expect("a positive power-of-two denominator fits the small rational"));
+                      }'''
+          new = '''            if let Some(denominator) = 1_i128.checked_shl(shift)
+                          && let Some(value) = Self::new_small(signed_mantissa, denominator)
+                      {
+                          return Ok(value);
+                      }'''
+          assert text.count(old) == 1
+          source.write_text(text.replace(old, new))
+
+          fast = Path('crates/knipsa/src/fast.rs')
+          text = fast.read_text()
+          for axis in ['x', 'y']:
+              old = f'(start.{axis} + end.{axis}) * 0.5'
+              assert text.count(old) == 3
+              text = text.replace(old, f'start.{axis}.midpoint(end.{axis})')
+              old = f'(subject_previous.{axis} + subject[subject_index].{axis}) * 0.5'
+              assert text.count(old) == 1
+              text = text.replace(old, f'subject_previous.{axis}.midpoint(subject[subject_index].{axis})')
+          assert text.count('.chunks_exact(5)') == 1
+          text = text.replace('.chunks_exact(5)', '.as_chunks::<5>().0.iter()')
+          fast.write_text(text)
+          triangulation = Path('crates/knipsa/src/triangulation.rs')
+          text = triangulation.read_text()
+          assert text.count('.chunks_exact(3)') == 2
+          triangulation.write_text(text.replace('.chunks_exact(3)', '.as_chunks::<3>().0'))
+
+          commands = [
+              ['cargo', 'fmt', '--all'],
+              ['cargo', 'test', '-p', 'knipsa', '--all-features', 'conversion_shift_boundaries'],
+              ['cargo', 'clippy', '--workspace', '--all-targets', '--all-features', '--', '-D', 'warnings'],
+              ['cargo', 'test', '--workspace', '--all-features'],
+              ['cargo', 'doc', '--workspace', '--all-features', '--no-deps'],
+              ['git', 'diff', '--check'],
+          ]
+          with (output / 'after.log').open('w') as log:
+              for command in commands:
+                  environment = dict(os.environ, RUSTDOCFLAGS='-D warnings')
+                  result = subprocess.run(command, env=environment, text=True,
+                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                  log.write('$ ' + ' '.join(command) + '\n' + result.stdout)
+                  log.flush()
+                  print(result.stdout)
+                  if result.returncode:
+                      raise SystemExit(result.returncode)
+          (output / 'review.patch').write_bytes(subprocess.check_output(['git', 'diff', '--', 'crates/knipsa/src']))
+          PY
+      - name: Publish verified blobs without updating any branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import urllib.request
+          files = ['crates/knipsa/src/boolean.rs', 'crates/knipsa/src/fast.rs', 'crates/knipsa/src/triangulation.rs']
+          report = {'source_head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'blobs': []}
+          for name in files:
+              payload = json.dumps({'content': Path(name).read_text(), 'encoding': 'utf-8'}).encode()
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] + '/git/blobs',
+                  data=payload,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'},
+                  method='POST',
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  blob = json.load(response)
+              report['blobs'].append({'path': name, 'sha': blob['sha']})
+          Path('target/numeric-verification/blobs.json').write_text(json.dumps(report, indent=2) + '\n')
+          print(json.dumps(report, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: numeric-boundary-verification
+          path: target/numeric-verification/
