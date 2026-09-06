@@ -6,6 +6,8 @@
 //! proof obligations are not met. The caller in `boolean` owns the one exact
 //! arrangement fallback.
 
+mod broad_phase;
+
 use std::cmp::Ordering;
 
 use num_traits::ToPrimitive;
@@ -86,23 +88,7 @@ pub(crate) fn try_direct_paths64(paths: &[Path64], fill_rule: FillRule) -> Optio
     {
         paths.truncate(1);
     }
-    for (index, path) in paths.iter().enumerate() {
-        for first in 0..path.len() {
-            let first_edge = (path[first], path[(first + 1) % path.len()]);
-            for second in first + 1..path.len() {
-                let second_edge = (path[second], path[(second + 1) % path.len()]);
-                if edges_intersect64(first_edge, second_edge)? {
-                    return None;
-                }
-            }
-        }
-        let bounds = path_bounds64(path)?;
-        for other in paths.iter().skip(index + 1) {
-            if boxes_touch_or_overlap64(bounds, path_bounds64(other)?) {
-                return None;
-            }
-        }
-    }
+    broad_phase::certify_paths(&paths)?;
     let mut result = Vec::with_capacity(paths.len());
     for mut path in paths {
         let area = crate::signed_area2(&path).ok()?;
