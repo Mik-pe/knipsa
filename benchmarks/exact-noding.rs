@@ -50,7 +50,8 @@ fn canonical(paths: &PathsD) -> Vec<Vec<(u64, u64)>> {
     let mut result = paths
         .iter()
         .map(|path| {
-            let mut points = path.iter()
+            let mut points = path
+                .iter()
                 .map(|p| ((p.x + 0.0).to_bits(), (p.y + 0.0).to_bits()))
                 .collect::<Vec<_>>();
             if let Some((index, _)) = points.iter().enumerate().min_by_key(|(_, p)| *p) {
@@ -88,9 +89,11 @@ fn fixtures() -> Vec<Case> {
         let width = f64::from(count) * 3.0;
         let subjects = (0..count).map(|i| rectangle(0.0, f64::from(i) * 3.0, width, 1.0)).collect();
         let clips = (0..count).map(|i| rectangle(f64::from(i) * 3.0, 0.0, 1.0, width)).collect();
-        let expected = (0..count).flat_map(|i| {
-            (0..count).map(move |j| rectangle(f64::from(i) * 3.0, f64::from(j) * 3.0, 1.0, 1.0))
-        }).collect();
+        let expected = (0..count)
+            .flat_map(|i| {
+                (0..count).map(move |j| rectangle(f64::from(i) * 3.0, f64::from(j) * 3.0, 1.0, 1.0))
+            })
+            .collect();
         cases.push(Case { name: format!("dense_grid_{count}"), subjects, clips, expected });
     }
     cases.push(Case {
@@ -110,7 +113,12 @@ fn fixtures() -> Vec<Case> {
 
 fn main() {
     for case in fixtures() {
-        let request = BooleanRequest::new(&case.subjects, &case.clips, ClipType::Intersection, FillRule::NonZero);
+        let request = BooleanRequest::new(
+            &case.subjects,
+            &case.clips,
+            ClipType::Intersection,
+            FillRule::NonZero,
+        );
         let output = boolean_op_d(request).expect("benchmark input must succeed");
         assert!(output.open.is_empty());
         let signature = canonical(&output.closed);
@@ -130,12 +138,15 @@ fn main() {
         let samples = (0..21)
             .map(|_| batch(iterations).as_secs_f64() * 1e9 / f64::from(iterations))
             .collect::<Vec<_>>();
-        println!("{}", serde_json::json!({
-            "case": case.name,
-            "iterations": iterations,
-            "samples_ns": samples,
-            "signature": signature,
-            "input_vertices": case.subjects.iter().chain(&case.clips).map(Vec::len).sum::<usize>(),
-        }));
+        println!(
+            "{}",
+            serde_json::json!({
+                "case": case.name,
+                "iterations": iterations,
+                "samples_ns": samples,
+                "signature": signature,
+                "input_vertices": case.subjects.iter().chain(&case.clips).map(Vec::len).sum::<usize>(),
+            })
+        );
     }
 }

@@ -26,19 +26,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", required=True)
     parser.add_argument("--head", default="HEAD")
+    parser.add_argument("--workload", choices=["direct-certification", "exact-noding"], default="direct-certification")
     parser.add_argument("--pairs", type=int, default=5)
-    parser.add_argument("--output", type=Path, default=Path("target/direct-certification.json"))
+    parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
     if args.pairs < 1:
         parser.error("--pairs must be positive")
     root = Path(__file__).resolve().parents[1]
-    source = root / "benchmarks/direct-certification.rs"
+    source = root / "benchmarks" / (args.workload + ".rs")
+    if args.output is None:
+        args.output = Path("target") / (args.workload + ".json")
     revisions = {
         name: command(["git", "rev-parse", "--verify", "--end-of-options", ref + "^{commit}"], root)
         for name, ref in [("base", args.base), ("head", args.head)]
     }
     report = {
         "revisions": revisions,
+        "workload": args.workload,
         "rustc": command(["rustc", "-Vv"], root),
         "platform": platform.platform(),
         "cpu": next((line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines()
@@ -50,7 +54,7 @@ def main():
         "process_pairs": [],
     }
     worktrees = []
-    with tempfile.TemporaryDirectory(prefix="knipsa-certification-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="knipsa-paired-") as temporary:
         temporary = Path(temporary)
         binaries = {}
         try:
@@ -59,7 +63,7 @@ def main():
                 subprocess.run(["git", "worktree", "add", "--detach", "--quiet", str(tree), revision],
                                cwd=root, check=True)
                 worktrees.append(tree)
-                example = tree / "crates/knipsa/examples/direct_certification_bench.rs"
+                example = tree / "crates/knipsa/examples/paired_revision_bench.rs"
                 if example.exists():
                     raise RuntimeError(f"refusing to overwrite {example}")
                 example.parent.mkdir(parents=True, exist_ok=True)
@@ -67,8 +71,8 @@ def main():
                 report["lock_sha256"][name] = digest(tree / "Cargo.lock")
                 target = temporary / (name + "-target")
                 subprocess.run(["cargo", "build", "--locked", "--release", "-p", "knipsa", "--example",
-                                "direct_certification_bench", "--target-dir", str(target)], cwd=tree, check=True)
-                binaries[name] = target / "release/examples/direct_certification_bench"
+                                "paired_revision_bench", "--target-dir", str(target)], cwd=tree, check=True)
+                binaries[name] = target / "release/examples/paired_revision_bench"
             for pair in range(args.pairs):
                 order = ["base", "head"] if pair % 2 == 0 else ["head", "base"]
                 results = {}
@@ -105,7 +109,7 @@ def main():
     report["summary"] = summary
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
-    print("## Direct integer certification: paired public-API benchmark\n")
+    print(f"## {args.workload}: paired public-API benchmark\n")
     print(f"Base `{revisions['base']}`; head `{revisions['head']}`.\n")
     print(f"{args.pairs} alternating process pairs; 21 batches per case; exact output equality checked.\n")
     print("| Case | Base ns/op | Head ns/op | Median base/head | Pair range |")

@@ -1,33 +1,39 @@
-name: Exact noding evaluation
+name: Exact noding benchmark
 
 on:
   pull_request:
     paths:
-      - '.github/workflows/noding-evaluation.yml'
-      - 'scripts/evaluate-noding.py'
-      - 'benchmarks/exact-noding.rs'
       - 'crates/knipsa/src/**'
+      - 'benchmarks/exact-noding.rs'
+      - 'scripts/benchmark-revisions.py'
+      - '.github/workflows/noding-evaluation.yml'
 
 permissions:
   contents: read
 
 jobs:
-  evaluate:
+  paired:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Snapshot the public source for kernel review
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compare full Boolean results and paired latency
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          mkdir -p target/noding-evaluation
-          git archive --format=tar.gz --output=target/noding-evaluation/source.tar.gz HEAD
-          uname -a > target/noding-evaluation/host.txt
-          lspci >> target/noding-evaluation/host.txt
+          set -o pipefail
+          python3 scripts/benchmark-revisions.py --workload exact-noding --base "$BASE_SHA" --head "$HEAD_SHA" --pairs 5 --output target/exact-noding.json | tee noding-summary.md
+          cat noding-summary.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: noding-evaluation-${{ github.event.pull_request.head.sha }}
-          path: target/noding-evaluation/
+          name: exact-noding-${{ github.event.pull_request.head.sha }}
+          path: |
+            target/exact-noding.json
+            noding-summary.md
+          if-no-files-found: warn

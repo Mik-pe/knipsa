@@ -63,8 +63,10 @@ mod tests {
             for second in first + 1..edges.len() {
                 let a = &edges[first];
                 let b = &edges[second];
-                let overlaps = !(a.max_x < b.min_x || b.max_x < a.min_x
-                    || a.max_y < b.min_y || b.max_y < a.min_y);
+                let overlaps = !(a.max_x < b.min_x
+                    || b.max_x < a.min_x
+                    || a.max_y < b.min_y
+                    || b.max_y < a.min_y);
                 assert_eq!(overlaps, boxes_touch_or_overlap64(bounds[first], bounds[second]));
                 if overlaps {
                     expected_pairs.insert((first, second));
@@ -125,8 +127,13 @@ mod tests {
         let tiny = Rational::from_f64(f64::from_bits(1)).unwrap();
         let large = Rational::from_f64(f64::MAX).unwrap();
         let coordinates = [
-            large.neg(), Rational::from_i64(i64::MIN), tiny.neg(), Rational::zero(),
-            tiny, Rational::from_i64(i64::MAX), large,
+            large.neg(),
+            Rational::from_i64(i64::MIN),
+            tiny.neg(),
+            Rational::zero(),
+            tiny,
+            Rational::from_i64(i64::MAX),
+            large,
         ];
         let mut edges = Vec::new();
         for x in coordinates.windows(2) {
