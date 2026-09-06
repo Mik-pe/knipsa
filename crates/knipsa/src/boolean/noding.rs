@@ -1,11 +1,11 @@
-//! Exact coordinate order becomes integer ranks only for broad-phase comparisons.
+//! Exact integer bounds or exact coordinate ranks feed the shared broad phase.
 //! Intersections and topology always use the original rational coordinates.
 
 use super::{Edge, Rational, split_edge_pair};
 use crate::spatial::{Bounds, visit_pairs};
 
 pub(super) fn node_edges(edges: &[Edge], parameters: &mut [Vec<Rational>]) {
-    let bounds = ranked_bounds(edges);
+    let bounds = spatial_bounds(edges);
     // This visitor cannot reject a pair; Option is used by the certificate caller.
     let _ = visit_pairs(bounds.into_iter(), |first, second| {
         let (before, after) = parameters.split_at_mut(second);
@@ -14,8 +14,22 @@ pub(super) fn node_edges(edges: &[Edge], parameters: &mut [Vec<Rational>]) {
     });
 }
 
-fn ranked_bounds(edges: &[Edge]) -> Vec<Bounds> {
+fn spatial_bounds(edges: &[Edge]) -> Vec<Bounds> {
     let mut bounds = vec![(0, 0, 0, 0); edges.len()];
+    let native = edges.iter().zip(&mut bounds).try_for_each(|(edge, bounds)| {
+        *bounds = (
+            edge.min_x.to_i64()?,
+            edge.min_y.to_i64()?,
+            edge.max_x.to_i64()?,
+            edge.max_y.to_i64()?,
+        );
+        Some(())
+    });
+    if native.is_some() {
+        return bounds;
+    }
+    // A fractional or out-of-range endpoint requires one common rank space.
+    // Both passes overwrite every component, including any native prefix above.
     let mut coordinates = Vec::with_capacity(edges.len() * 2);
     for x_axis in [true, false] {
         coordinates.clear();
@@ -56,7 +70,7 @@ mod tests {
     }
 
     fn check_nodes(edges: &[Edge]) {
-        let bounds = ranked_bounds(edges);
+        let bounds = spatial_bounds(edges);
         let mut expected_pairs = BTreeSet::new();
         let mut expected = vec![vec![Rational::zero(), Rational::one()]; edges.len()];
         for first in 0..edges.len() {
@@ -89,6 +103,30 @@ mod tests {
             expected.sort();
             expected.dedup();
             assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn native_bounds_and_partial_conversion_use_one_consistent_coordinate_space() {
+        let native = Edge::new(point(-4, -4), point(3, 3));
+        assert_eq!(spatial_bounds(std::slice::from_ref(&native)), [(-4, -4, 3, 3)]);
+        for [start_x, start_y, end_x, end_y] in [
+            [0.5, 0.0, 2.0, 2.0],
+            [0.0, 0.5, 2.0, 2.0],
+            [0.0, 0.0, 2.5, 2.0],
+            [0.0, 0.0, 2.0, 2.5],
+        ] {
+            let fractional = Edge::new(
+                ExactPoint::new(
+                    Rational::from_f64(start_x).unwrap(),
+                    Rational::from_f64(start_y).unwrap(),
+                ),
+                ExactPoint::new(
+                    Rational::from_f64(end_x).unwrap(),
+                    Rational::from_f64(end_y).unwrap(),
+                ),
+            );
+            check_nodes(&[native.clone(), fractional]);
         }
     }
 
@@ -143,7 +181,7 @@ mod tests {
             ));
         }
         check_nodes(&edges);
-        let bounds = ranked_bounds(&edges);
+        let bounds = spatial_bounds(&edges);
         for adjacent in bounds.windows(2) {
             assert_eq!(adjacent[0].2, adjacent[1].0);
             assert!(adjacent[0].0 < adjacent[0].2);
@@ -168,9 +206,9 @@ mod tests {
                 pairs.push((first, second));
                 Some(())
             };
-            let _ = visit_pairs(ranked_bounds(&edges).into_iter(), &mut visit);
+            let _ = visit_pairs(spatial_bounds(&edges).into_iter(), &mut visit);
             edges.push(edges[0].clone());
-            let _ = visit_pairs(ranked_bounds(&edges).into_iter(), &mut visit);
+            let _ = visit_pairs(spatial_bounds(&edges).into_iter(), &mut visit);
             assert_eq!(pairs, [(0, 128)]);
             check_nodes(&edges);
         }
