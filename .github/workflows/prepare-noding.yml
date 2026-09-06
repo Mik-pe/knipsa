@@ -25,10 +25,48 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Compile and check the candidate without updating any branch
+      - name: Check the candidate and export blobs without updating a branch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python3 scripts/prepare-noding.py
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          import os
+          import subprocess
+          import tarfile
+          import urllib.request
+
+          source = Path('scripts/prepare-noding.py').read_text()
+          prefix = source[:source.index('entries = [')]
+          context = {}
+          exec(compile(prefix, 'scripts/prepare-noding.py', 'exec'), context)
+          files = context['files']
+          removed = context['removed']
+          output = context['output']
+          subprocess.run(['git', 'add', '--', *files], check=True)
+          (output / 'changes.patch').write_bytes(subprocess.check_output(['git', 'diff', '--cached']))
+          with tarfile.open(output / 'sources.tar.gz', 'w:gz') as archive:
+              for name in files:
+                  archive.add(name, arcname=name)
+          report = {
+              'source_head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'base_tree': subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip(),
+              'blobs': [], 'removed': removed,
+          }
+          for name in files:
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] + '/git/blobs',
+                  data=json.dumps({'content': Path(name).read_text(), 'encoding': 'utf-8'}).encode(),
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'},
+                  method='POST',
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  blob = json.load(response)
+              report['blobs'].append({'path': name, 'sha': blob['sha']})
+          (output / 'blobs.json').write_text(json.dumps(report, indent=2) + '\n')
+          print(json.dumps(report, indent=2), flush=True)
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
