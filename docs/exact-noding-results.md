@@ -39,12 +39,13 @@ ratios of the displayed time medians. Pair ranges are not confidence intervals;
 batch latency is not per-request p99. Allocation counts, candidate-stage fractions,
 GPU throughput, real GIS distributions, and cross-library rankings were not measured.
 
-Both runners report AMD EPYC 7763 64-Core Processor, Linux x86_64, Rust 1.98.1,
-LLVM 22.1.8, default release profile/features, empty RUSTFLAGS, and identical
-Cargo.lock hashes. Each suite compares revisions on the same runner; the two
-suites are separate jobs. The CPU model name does not imply parallel execution.
-Artifacts retain raw samples, signatures, iterations, execution order, metadata,
-and harness/lock hashes.
+The exact-noding runner reports AMD EPYC 9V74 80-Core Processor; the integer
+certificate runner reports AMD EPYC 7763 64-Core Processor. Both use Linux x86_64,
+Rust 1.98.1, LLVM 22.1.8, default release profile/features, empty RUSTFLAGS, and
+identical Cargo.lock hashes. Each suite compares revisions on the same runner;
+the two suites are separate jobs on different CPU models. The model names do not
+imply parallel execution. Artifacts retain raw samples, signatures, iterations,
+execution order, metadata, and harness/lock hashes.
 
 ## Complete Boolean intersection
 
