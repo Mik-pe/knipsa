@@ -41,9 +41,21 @@ only original edge IDs to `split_edge_pair`, which still computes with the
 original rationals. Input edge order, sorted exact split parameters, fill rules,
 coincident contributions, and output ordering retain their existing semantics.
 
+Ranks are local to one request, not persistent vertex identities. A future
+prepared geometry or GPU cache must merge coordinate orders correctly or rebuild
+the ranks, and associate buffers with the request generation. Never compare ranks
+from independent preparations or reuse stale edge IDs.
+
 The index visits unordered pairs once and streams them directly to the exact
 splitter, avoiding an O(K) candidate allocation. The previous X-only active
 scan is removed rather than retained as another production backend.
+
+The integer ring certificate also avoids redundant arithmetic at adjacent edges.
+They already share an endpoint; a checked nonzero cross product proves that their
+supporting lines have no second intersection. Collinear or overflowing cases
+still defer. Non-adjacent contacts still require the complete intersection
+contract. An exhaustive small-coordinate test compares this corner certificate
+with the previous full predicate, including the closing edge.
 
 ## What should remain stable for callers
 
@@ -109,6 +121,9 @@ hardware/workload crossover is measured. Discrete-GPU and unified-memory results
 need separate attribution, including adapter, driver, power state, and residency.
 Software Vulkan and shader validation are useful correctness checks, not physical
 GPU performance evidence. No physical GPU was exposed by the evaluation runner.
+
+The first CPU comparison and its regressions are recorded in
+[the paired measurement report](exact-noding-results.md). It is not GPU evidence.
 
 ## Verification and reproducibility
 
