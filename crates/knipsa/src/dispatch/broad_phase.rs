@@ -15,9 +15,9 @@ pub(super) fn certify_paths(paths: &[Path64]) -> Option<()> {
     }
     for path in paths {
         visit_pairs(
-            path.iter().enumerate().map(|(index, &start)| {
-                edge_bounds(start, path[(index + 1) % path.len()])
-            }),
+            path.iter()
+                .enumerate()
+                .map(|(index, &start)| edge_bounds(start, path[(index + 1) % path.len()])),
             |first, second| certify_edge_pair(path, first, second),
         )?;
     }
@@ -71,7 +71,8 @@ fn visit_pairs(
         }
         return visit_leaf(&entries[..len], &mut visit);
     }
-    let mut entries = bounds.enumerate().map(|(id, bounds)| Entry { bounds, id }).collect::<Vec<_>>();
+    let mut entries =
+        bounds.enumerate().map(|(id, bounds)| Entry { bounds, id }).collect::<Vec<_>>();
     let mut nodes = Vec::with_capacity(len / (LEAF_CAPACITY / 2));
     build(&mut entries, &mut nodes, 0, len);
     Tree { entries: &entries, nodes }.visit_same(0, &mut visit)
@@ -117,10 +118,7 @@ fn visit_pair(
     Some(())
 }
 
-fn visit_leaf(
-    entries: &[Entry],
-    visit: &mut impl FnMut(usize, usize) -> Option<()>,
-) -> Option<()> {
+fn visit_leaf(entries: &[Entry], visit: &mut impl FnMut(usize, usize) -> Option<()>) -> Option<()> {
     for (index, &a) in entries.iter().enumerate() {
         for &b in &entries[index + 1..] {
             visit_pair(a, b, visit)?;
@@ -268,7 +266,14 @@ mod tests {
                     }
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(visit_pairs(boxes.into_iter(), |_, _| panic!("disjoint boxes")), Some(()));
+            let mut visits = 0;
+            let mut visit = |_, _| {
+                visits += 1;
+                Some(())
+            };
+            assert_eq!(visit_pairs(boxes.into_iter(), &mut visit), Some(()));
+            assert_eq!(visit_pairs([(0, 0, 1, 1); 2].into_iter(), &mut visit), Some(()));
+            assert_eq!(visits, 1);
         }
     }
 
@@ -302,12 +307,7 @@ mod tests {
     #[test]
     fn crossings_contacts_overlaps_and_uncertain_arithmetic_defer() {
         let paths = [
-            vec![
-                Point64::new(0, 0),
-                Point64::new(4, 4),
-                Point64::new(0, 4),
-                Point64::new(4, 0),
-            ],
+            vec![Point64::new(0, 0), Point64::new(4, 4), Point64::new(0, 4), Point64::new(4, 0)],
             vec![
                 Point64::new(0, 0),
                 Point64::new(-4, 3),
@@ -316,12 +316,7 @@ mod tests {
                 Point64::new(4, -1),
                 Point64::new(3, 4),
             ],
-            vec![
-                Point64::new(0, 0),
-                Point64::new(4, 0),
-                Point64::new(2, 0),
-                Point64::new(2, 2),
-            ],
+            vec![Point64::new(0, 0), Point64::new(4, 0), Point64::new(2, 0), Point64::new(2, 2)],
             vec![
                 Point64::new(i64::MIN, i64::MIN),
                 Point64::new(i64::MAX, i64::MIN),

@@ -1,0 +1,41 @@
+name: Direct certification benchmark
+
+on:
+  pull_request:
+    paths:
+      - 'crates/knipsa/src/dispatch.rs'
+      - 'crates/knipsa/src/dispatch/**'
+      - 'benchmarks/direct-certification.rs'
+      - 'scripts/benchmark-direct-certification.py'
+      - '.github/workflows/direct-certification.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  paired:
+    name: Paired public-API performance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compare identical fixtures on the same runner
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -o pipefail
+          python3 scripts/benchmark-direct-certification.py --base "$BASE_SHA" --head "$HEAD_SHA" --pairs 5 --output target/direct-certification.json | tee target-summary.md
+          cat target-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: direct-certification-${{ github.event.pull_request.head.sha }}
+          path: |
+            target/direct-certification.json
+            target-summary.md
+          if-no-files-found: warn
