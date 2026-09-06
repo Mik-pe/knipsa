@@ -1,0 +1,36 @@
+name: Prepare exact noding experiment
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/prepare-noding.py'
+      - 'crates/knipsa/src/boolean/noding.rs'
+      - '.github/workflows/prepare-noding.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'perf/exact-noding-spatial-index'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Compile and check the candidate without updating any branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/prepare-noding.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: noding-preparation-${{ github.event.pull_request.head.sha }}
+          path: target/noding-preparation/
