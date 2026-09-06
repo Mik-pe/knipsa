@@ -66,7 +66,14 @@ fn canonical(paths: &PathsD) -> Vec<Vec<(u64, u64)>> {
 
 fn fixtures() -> Vec<Case> {
     let mut cases = Vec::new();
-    for teeth in [8, 64, 256, 512] {
+    for (teeth, fractional) in [
+        (8, false),
+        (64, false),
+        (256, false),
+        (512, false),
+        (64, true),
+        (512, true),
+    ] {
         for vertical in [false, true] {
             let mut subject = comb(teeth, 100.0);
             let mut clip = rectangle(-1.0, -1.0, 51.0, f64::from(teeth) * 2.0 + 1.0);
@@ -76,9 +83,18 @@ fn fixtures() -> Vec<Case> {
                 transpose(&mut clip);
                 transpose(&mut expected);
             }
+            if fractional {
+                for path in [&mut subject, &mut clip, &mut expected] {
+                    for p in path {
+                        p.x += 0.25;
+                        p.y += 0.25;
+                    }
+                }
+            }
+            let prefix = if fractional { "fractional_" } else { "" };
             let axis = if vertical { "vertical" } else { "horizontal" };
             cases.push(Case {
-                name: format!("{axis}_comb_{}_vertices", subject.len()),
+                name: format!("{prefix}{axis}_comb_{}_vertices", subject.len()),
                 subjects: vec![subject],
                 clips: vec![clip],
                 expected: vec![expected],
