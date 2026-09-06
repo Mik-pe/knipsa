@@ -779,7 +779,7 @@ fn run<P: PathSlice>(
             if start_key == end_key {
                 continue;
             }
-            let midpoint = Point { x: (start.x + end.x) * 0.5, y: (start.y + end.y) * 0.5 };
+            let midpoint = Point { x: start.x.midpoint(end.x), y: start.y.midpoint(end.y) };
             let vector = subtract(end, start);
             let left_sample =
                 Point { x: midpoint.x - vector.y * sample, y: midpoint.y + vector.x * sample };
@@ -1015,7 +1015,7 @@ fn convex_boolean(
             if start_key == end_key {
                 continue;
             }
-            let midpoint = Point { x: (start.x + end.x) * 0.5, y: (start.y + end.y) * 0.5 };
+            let midpoint = Point { x: start.x.midpoint(end.x), y: start.y.midpoint(end.y) };
             let other_inside = if edge.subject {
                 clip_index.contains(midpoint)
             } else {
@@ -1203,7 +1203,7 @@ fn append_convex_operation_edges(
             if start_key == end_key {
                 continue;
             }
-            let midpoint = Point { x: (start.x + end.x) * 0.5, y: (start.y + end.y) * 0.5 };
+            let midpoint = Point { x: start.x.midpoint(end.x), y: start.y.midpoint(end.y) };
             let other_inside = if !has_split {
                 inside_hints.get(index).copied().flatten().unwrap_or_else(|| {
                     if subject {
@@ -1316,8 +1316,8 @@ fn convex_boundary_walk(
     let mut subject_vector = subtract(subject[subject_index], subject_previous);
     let mut clip_vector = subtract(clip[clip_index], clip_previous);
     let initial_subject_midpoint = Point {
-        x: (subject_previous.x + subject[subject_index].x) * 0.5,
-        y: (subject_previous.y + subject[subject_index].y) * 0.5,
+        x: subject_previous.x.midpoint(subject[subject_index].x),
+        y: subject_previous.y.midpoint(subject[subject_index].y),
     };
     // Split-only walks need the initial side of the subject boundary so their
     // per-edge hints remain valid before the first crossing is encountered.
@@ -2294,7 +2294,9 @@ mod tests {
     fn convex_results_are_stable_when_operands_are_swapped() {
         let input = b"0A0A!K0A0\"K0K0'A0K0$F0F0%P0F0&\n";
         let points = input[1..]
-            .chunks_exact(5)
+            .as_chunks::<5>()
+            .0
+            .iter()
             .map(|bytes| {
                 let x = f64::from(i16::from_le_bytes([bytes[0], bytes[1]])) / 16.0;
                 let y = f64::from(i16::from_le_bytes([bytes[2], bytes[3]])) / 16.0;
