@@ -1,6 +1,6 @@
 //! Integer-only broad phase for the direct-ring certificate.
 
-use super::{edges_intersect64, path_bounds64};
+use super::{cross64, edges_intersect64, path_bounds64, vector64};
 use crate::spatial::{Bounds, visit_pairs};
 use crate::{Path64, Point64};
 
@@ -30,8 +30,12 @@ fn certify_edge_pair(path: &[Point64], first: usize, second: usize) -> Option<()
     let a = (path[first], path[(first + 1) % path.len()]);
     let b = (path[second], path[(second + 1) % path.len()]);
     let adjacent = first + 1 == second || (first == 0 && second + 1 == path.len());
-    // An endpoint-only contact is harmless only between adjacent edges.
-    if !adjacent && (a.0 == b.0 || a.0 == b.1 || a.1 == b.0 || a.1 == b.1) {
+    if adjacent {
+        // Shared endpoints are guaranteed here; non-collinear supports meet only there.
+        let turn = cross64(vector64(a.0, a.1), vector64(b.0, b.1))?;
+        return (turn != 0).then_some(());
+    }
+    if a.0 == b.0 || a.0 == b.1 || a.1 == b.0 || a.1 == b.1 {
         return None;
     }
     (!edges_intersect64(a, b)?).then_some(())
@@ -40,6 +44,34 @@ fn certify_edge_pair(path: &[Point64], first: usize, second: usize) -> Option<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adjacent_corner_certificate_matches_full_intersection_predicate() {
+        for first_x in -2..=2 {
+            for first_y in -2..=2 {
+                for second_x in -2..=2 {
+                    for second_y in -2..=2 {
+                        let path = [
+                            Point64::new(0, 0),
+                            Point64::new(first_x, first_y),
+                            Point64::new(second_x, second_y),
+                        ];
+                        for (first, second) in [(0, 1), (0, 2), (1, 2)] {
+                            let intersects = edges_intersect64(
+                                (path[first], path[(first + 1) % path.len()]),
+                                (path[second], path[(second + 1) % path.len()]),
+                            )
+                            .unwrap();
+                            assert_eq!(
+                                certify_edge_pair(&path, first, second),
+                                (!intersects).then_some(())
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn non_adjacent_contacts_defer_for_every_endpoint_orientation() {
