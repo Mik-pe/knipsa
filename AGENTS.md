@@ -30,9 +30,10 @@ When provenance or license terms are unclear, do not import the code.
 
 ## Git delivery
 
-Use ordinary merge commits for pull requests and branch updates. Never rebase,
-squash-merge, or force-push. Fetch the current base and merge it into the topic
-branch when conflicts, integration changes, or branch protection require it;
+Squash-merge pull requests into main: one commit per PR. Update topic branches
+with ordinary merge commits. Never rebase or force-push. Fetch the current base
+and merge it into the topic branch when conflicts, integration changes, or branch
+protection require it;
 do not update every branch merely because another PR landed. Verify the current
 PR head before merging.
 
