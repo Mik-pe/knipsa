@@ -9,7 +9,30 @@ permissions:
   contents: read
 
 jobs:
+  verify-plan:
+    name: Decide verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      needed: ${{ steps.decide.outputs.needed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test CI reuse boundaries
+        run: node --test .github/scripts/ci-reuse.test.mjs
+      - name: Check successful PR tree
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/ci-reuse.mjs decide
+
   msrv:
+    needs: verify-plan
+    if: needs.verify-plan.outputs.needed == 'true'
     name: Rust 1.97 compatibility
     runs-on: ubuntu-latest
     steps:
@@ -19,6 +42,8 @@ jobs:
       - run: cargo test --workspace --all-features
 
   rust:
+    needs: verify-plan
+    if: needs.verify-plan.outputs.needed == 'true'
     name: Rust checks
     runs-on: ubuntu-latest
     steps:
@@ -37,6 +62,8 @@ jobs:
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
   reference-adapters:
+    needs: verify-plan
+    if: needs.verify-plan.outputs.needed == 'true'
     name: Pinned reference adapters
     runs-on: ubuntu-latest
     steps:
@@ -61,6 +88,8 @@ jobs:
       - run: make conformance-triangulation-d
 
   c-api:
+    needs: verify-plan
+    if: needs.verify-plan.outputs.needed == 'true'
     name: C-compatible FFI
     runs-on: ubuntu-latest
     steps:
@@ -69,6 +98,8 @@ jobs:
       - run: ./scripts/check-c-api.sh
 
   release-package:
+    needs: verify-plan
+    if: needs.verify-plan.outputs.needed == 'true'
     name: Packaged crate consumer
     runs-on: ubuntu-latest
     steps:
@@ -77,6 +108,8 @@ jobs:
       - run: make release-check
 
   coverage:
+    needs: verify-plan
+    if: needs.verify-plan.outputs.needed == 'true'
     name: Coverage gate
     runs-on: ubuntu-latest
     steps:
@@ -86,6 +119,8 @@ jobs:
       - run: ./scripts/coverage.sh
 
   fuzz-replay:
+    needs: verify-plan
+    if: needs.verify-plan.outputs.needed == 'true'
     name: Deterministic fuzz replay
     runs-on: ubuntu-latest
     steps:
@@ -93,3 +128,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - run: ./scripts/fuzz-replay.sh
+
+  verified-tree:
+    name: Record verified PR tree
+    needs: [verify-plan, msrv, rust, reference-adapters, c-api, release-package, coverage, fuzz-replay]
+    if: github.event_name == 'pull_request' && success()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Record checked source tree
+        run: node .github/scripts/ci-reuse.mjs record
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-tree-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-tested-tree/receipt.json
+          retention-days: 14
+          if-no-files-found: error
