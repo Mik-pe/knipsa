@@ -27,3 +27,17 @@ reference matrix and benchmark protocol. Keep reference versions pinned in
 
 Read `docs/licensing.md` before copying or translating any third-party source.
 When provenance or license terms are unclear, do not import the code.
+
+## Git delivery
+
+Squash-merge pull requests into main: one commit per PR. Update topic branches
+with ordinary merge commits. Never rebase or force-push. Fetch the current base
+and merge it into the topic branch when conflicts, integration changes, or branch
+protection require it;
+do not update every branch merely because another PR landed. Verify the current
+PR head before merging.
+
+CI reuses a successful PR run on `main` only when its recorded checkout tree
+matches the merged tree in the same workflow. Missing, expired, incomplete, or
+failed evidence runs the checks. Direct pushes, manual runs and schedules still
+run verification; release and deployment workflows keep their own gates.
