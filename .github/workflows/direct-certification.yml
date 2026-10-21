@@ -5,8 +5,9 @@ on:
     paths:
       - 'crates/knipsa/src/dispatch.rs'
       - 'crates/knipsa/src/dispatch/**'
+      - 'crates/knipsa/src/spatial.rs'
       - 'benchmarks/direct-certification.rs'
-      - 'scripts/benchmark-direct-certification.py'
+      - 'scripts/benchmark-revisions.py'
       - '.github/workflows/direct-certification.yml'
 
 permissions:
@@ -29,7 +30,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -o pipefail
-          python3 scripts/benchmark-direct-certification.py --base "$BASE_SHA" --head "$HEAD_SHA" --pairs 5 --output target/direct-certification.json | tee target-summary.md
+          python3 scripts/benchmark-revisions.py --base "$BASE_SHA" --head "$HEAD_SHA" --pairs 5 --output target/direct-certification.json | tee target-summary.md
           cat target-summary.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()

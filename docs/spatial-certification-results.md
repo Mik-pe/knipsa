@@ -54,7 +54,7 @@ The artifact `direct-certification-59286535186f9d0c2e272b5f4974e644430da584` con
 Reproduce with the checked-in harness against two trusted revisions:
 
 ```sh
-python3 scripts/benchmark-direct-certification.py \
+python3 scripts/benchmark-revisions.py \
   --base f3860d0af69e7881488bac98f4010e15e3dceea5 \
   --head 59286535186f9d0c2e272b5f4974e644430da584 \
   --pairs 5 --output target/direct-certification.json

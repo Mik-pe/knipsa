@@ -162,10 +162,6 @@ fn path_bounds64(path: &[Point64]) -> Option<(i64, i64, i64, i64)> {
     ))
 }
 
-fn boxes_touch_or_overlap64(first: (i64, i64, i64, i64), second: (i64, i64, i64, i64)) -> bool {
-    !(first.2 < second.0 || second.2 < first.0 || first.3 < second.1 || second.3 < first.1)
-}
-
 fn paths64_to_d(paths: &[Path64], origin: Point64) -> Option<PathsD> {
     paths
         .iter()
@@ -435,6 +431,7 @@ pub(crate) fn exact_key(point: PointD) -> Option<PointKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spatial::boxes_touch_or_overlap64;
     use crate::{BooleanRequest, ClipType, FillRule};
 
     #[test]

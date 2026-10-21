@@ -14,6 +14,7 @@ pub mod geo_types;
 mod geometry;
 mod offset;
 mod request;
+mod spatial;
 mod standard_dispatch;
 mod topology;
 mod triangulation;

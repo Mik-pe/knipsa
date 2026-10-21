@@ -8,6 +8,8 @@
 //! output rings are traced. Ambiguous embeddings fail closed to the independent
 //! per-edge exact side classifier.
 
+mod noding;
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -962,25 +964,7 @@ fn run_boolean(
     }
 
     let mut split_parameters = vec![vec![Rational::zero(), Rational::one()]; edges.len()];
-    let mut edge_order: Vec<usize> = (0..edges.len()).collect();
-    edge_order.sort_unstable_by(|&first, &second| {
-        edges[first]
-            .min_x
-            .cmp(&edges[second].min_x)
-            .then_with(|| edges[first].max_x.cmp(&edges[second].max_x))
-    });
-    let mut active: Vec<usize> = Vec::new();
-    for &current in &edge_order {
-        let current_min_x = &edges[current].min_x;
-        active.retain(|&candidate| edges[candidate].max_x >= *current_min_x);
-        for &previous in &active {
-            let (first, second) =
-                if previous < current { (previous, current) } else { (current, previous) };
-            let (before, after) = split_parameters.split_at_mut(second);
-            split_edge_pair(&edges[first], &edges[second], &mut before[first], &mut after[0]);
-        }
-        active.push(current);
-    }
+    noding::node_edges(&edges, &mut split_parameters);
 
     let atomic_edges = split_source_edges(&edges, &mut split_parameters, &edge_subjects);
     let epsilon = Rational::new(BigInt::one(), BigInt::one() << sample_bits);
